@@ -283,4 +283,4 @@ class Test:
 
         print("\n--- Testing on NEW dataset AFTER fine-tuning ---")
         final_metrics = self.compute_metrics(self.new_test_loader, "New_Dataset_Final_Test")
-        self.display_samples(final_metrics['sample_info'], "New Dataset Final Test", num_samples=30) ایا با داده های تری ن و ولیدشن دیتاست جدید فاین تیون و با داده تست ان قدرت تعملم دیتاست جدید تست میشه؟ به دیتاست قبلی کاری داره ایا؟
+        self.display_samples(final_metrics['sample_info'], "New Dataset Final Test", num_samples=30)
