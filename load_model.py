@@ -494,48 +494,36 @@ def prune_and_load_weights(sparsed_student_ckpt_path, dataset_mode="rvf10k"):
         sparse_conv_idx += 1
 
     # Copy BatchNorm layers
-    sparse_bn_modules = [m for m in student.modules() if isinstance(m, nn.BatchNorm2d)]
-    pruned_bn_modules = [m for m in pruned_model.modules() if isinstance(m, nn.BatchNorm2d)]
-
-    # Filter out non-pruned BatchNorm2d layers (bn1 and downsample)
-    pruned_bn_modules_filtered = []
+    sparse_bn_modules = []
+    pruned_bn_modules = []
     bn_mask_indices = []
-    mask_idx = 0
+
+    # Collect BatchNorm2d layers in the correct order
     for layer_name in ['layer1', 'layer2', 'layer3', 'layer4']:
-        layer = getattr(pruned_model, layer_name)
-        for block_idx, block in enumerate(layer):
-            # Append bn1, bn2, bn3 for each block
-            pruned_bn_modules_filtered.append(block.bn1)
-            pruned_bn_modules_filtered.append(block.bn2)
-            pruned_bn_modules_filtered.append(block.bn3)
+        sparse_layer = getattr(student, layer_name)
+        pruned_layer = getattr(pruned_model, layer_name)
+        for block_idx, (sparse_block, pruned_block) in enumerate(zip(sparse_layer, pruned_layer)):
+            # Collect bn1, bn2, bn3 for each block
+            sparse_bn_modules.extend([sparse_block.bn1, sparse_block.bn2, sparse_block.bn3])
+            pruned_bn_modules.extend([pruned_block.bn1, pruned_block.bn2, pruned_block.bn3])
             # Assign mask indices (conv1 -> bn1, conv2 -> bn2, conv3 -> bn3)
-            bn_mask_indices.extend([mask_idx, mask_idx + 1, mask_idx + 2])
+            bn_mask_indices.extend([mask_idx - 3 + i for i in range(3)])
             mask_idx += 3
-            # Skip downsample BatchNorm2d if present
-            if len(block.downsample) > 0:
-                continue  # Downsample BatchNorm2d is not pruned, so skip it
 
-    if len(pruned_bn_modules_filtered) != len(masks):
-        raise ValueError(f"Expected {len(pruned_bn_modules_filtered)} masks for BatchNorm2d layers, got {len(masks)}")
+    if len(pruned_bn_modules) != len(masks):
+        raise ValueError(f"Expected {len(pruned_bn_modules)} masks for BatchNorm2d layers, got {len(masks)}")
 
-    # Copy weights for pruned BatchNorm2d layers
-    sparse_bn_idx = 0
-    for i, pruned_bn in enumerate(pruned_bn_modules_filtered):
-        while sparse_bn_idx < len(sparse_bn_modules) and not isinstance(sparse_bn_modules[sparse_bn_idx], nn.BatchNorm2d):
-            sparse_bn_idx += 1
-        if sparse_bn_idx >= len(sparse_bn_modules):
-            raise ValueError(f"Ran out of BatchNorm2d modules at index {i}")
-        sparse_bn = sparse_bn_modules[sparse_bn_idx]
-
-        bn_mask = masks[bn_mask_indices[i]].bool()
-
-        print(f"Processing BatchNorm2d at index {i} (mask_idx {bn_mask_indices[i]})")
+    # Debug: Print BatchNorm2d layers and their mask indices
+    for i, (sparse_bn, pruned_bn, mask_idx) in enumerate(zip(sparse_bn_modules, pruned_bn_modules, bn_mask_indices)):
+        print(f"Processing BatchNorm2d at index {i} (mask_idx {mask_idx})")
         print(f"  Sparse BN features: {sparse_bn.num_features}")
         print(f"  Pruned BN features: {pruned_bn.num_features}")
-        print(f"  BN mask shape: {bn_mask.shape}")
+        print(f"  BN mask shape: {masks[mask_idx].shape}")
+
+        bn_mask = masks[mask_idx].bool()
 
         if bn_mask.shape[0] != sparse_bn.num_features:
-            raise ValueError(f"BN mask shape {bn_mask.shape} does not match sparse BN features {sparse_bn.num_features} at mask_idx {bn_mask_indices[i]}")
+            raise ValueError(f"BN mask shape {bn_mask.shape} does not match sparse BN features {sparse_bn.num_features} at mask_idx {mask_idx}")
 
         try:
             pruned_bn.weight.data = sparse_bn.weight.data[bn_mask].clone()
@@ -543,9 +531,7 @@ def prune_and_load_weights(sparsed_student_ckpt_path, dataset_mode="rvf10k"):
             pruned_bn.running_mean = sparse_bn.running_mean[bn_mask].clone()
             pruned_bn.running_var = sparse_bn.running_var[bn_mask].clone()
         except IndexError as e:
-            raise IndexError(f"Shape mismatch in BatchNorm2d at mask_idx {bn_mask_indices[i]}: {e}")
-
-        sparse_bn_idx += 1
+            raise IndexError(f"Shape mismatch in BatchNorm2d at mask_idx {mask_idx}: {e}")
 
     # Copy non-pruned layers (conv1, bn1, downsample, fc)
     pruned_model.conv1.weight.data = student.conv1.weight.data.clone()
@@ -564,10 +550,10 @@ def prune_and_load_weights(sparsed_student_ckpt_path, dataset_mode="rvf10k"):
         for i in range(len(sparse_layer)):
             if len(sparse_layer[i].downsample) > 0:
                 pruned_layer[i].downsample[0].weight.data = sparse_layer[i].downsample[0].weight.data.clone()
-                pruned_layer[i].downsample[1].weight.data = sparse_bn.weight.data.clone()
-                pruned_layer[i].downsample[1].bias.data = sparse_bn.bias.data.clone()
-                pruned_layer[i].downsample[1].running_mean = sparse_bn.running_mean.clone()
-                pruned_layer[i].downsample[1].running_var = sparse_bn.running_var.clone()
+                pruned_layer[i].downsample[1].weight.data = sparse_layer[i].downsample[1].weight.data.clone()
+                pruned_layer[i].downsample[1].bias.data = sparse_layer[i].downsample[1].bias.data.clone()
+                pruned_layer[i].downsample[1].running_mean = sparse_layer[i].downsample[1].running_mean.clone()
+                pruned_layer[i].downsample[1].running_var = sparse_layer[i].downsample[1].running_var.clone()
 
     return pruned_model
 
