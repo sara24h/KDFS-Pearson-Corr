@@ -135,16 +135,14 @@ def get_flops_and_params(dataset_mode, sparsed_student_ckpt_path):
     )
 
 def main():
-    # مسیر فایل چک‌پوینت مدل
+
     sparsed_student_ckpt_path = "/kaggle/input/kdfs-10k-pearson-19-shahrivar-314-epochs/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt"
 
-    # بررسی وجود مسیر
     import os
     if not os.path.exists(sparsed_student_ckpt_path):
         raise ValueError(f"Checkpoint path {sparsed_student_ckpt_path} does not exist.")
 
-    # ارزیابی برای تمام دیتاست‌ها
-    for dataset_mode in ["hardfake"]:
+    for dataset_mode in ["rvf10k"]:
         print(f"\nEvaluating for dataset: {dataset_mode}")
         (
             Flops_baseline,
