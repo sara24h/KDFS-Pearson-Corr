@@ -17,6 +17,11 @@ else:
 # Load the state dictionary into the model
 model.load_state_dict(state_dict)
 
+# Freeze all layers except the last fully connected layer
+for name, param in model.named_parameters():
+    if 'fc' not in name:  # unfreeze the last fully connected layer
+        param.requires_grad = False
+
 # Set the model to evaluation mode
 model.eval()
 
