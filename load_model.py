@@ -220,13 +220,12 @@ class Bottleneck_pruned(nn.Module):
         out = F.relu(self.bn2(self.conv2(out)))
         out = self.bn3(self.conv3(out))
 
-        shortcut_out = self.downsample(x)
-        padded_out = torch.zeros_like(shortcut_out)
+        shortcut_out = self.downsample(x).clone()
+        padded_out = torch.zeros_like(shortcut_out).clone()
+        for padded_feature_map, feature_map in zip(padded_out, out):
+            padded_feature_map[self.masks[2] == 1] = feature_map
 
-        # اصلاح‌شده: استفاده از indexing مستقیم روی کانال‌ها برای جلوگیری از in-place روی view
-        indices = torch.nonzero(self.masks[2] == 1).squeeze(-1)  # ایندکس‌های کانال‌هایی که ماسک 1 دارن
-        padded_out[:, indices, :, :] = out
-
+        assert padded_out.shape == shortcut_out.shape, "wrong shape"
         padded_out += shortcut_out
         padded_out = F.relu(padded_out)
         return padded_out
@@ -498,19 +497,27 @@ def prune_and_load_weights(sparsed_student_ckpt_path, dataset_mode="rvf10k"):
     sparse_bn_modules = []
     pruned_bn_modules = []
     bn_mask_indices = []
-    bn_mask_idx = 0  # Separate index for BN masks, starting from 0
 
     # Collect BatchNorm2d layers in the correct order
+    mask_idx = 0
     for layer_name in ['layer1', 'layer2', 'layer3', 'layer4']:
         sparse_layer = getattr(student, layer_name)
         pruned_layer = getattr(pruned_model, layer_name)
         for block_idx, (sparse_block, pruned_block) in enumerate(zip(sparse_layer, pruned_layer)):
-            # Collect bn1, bn2, bn3 for each block
-            sparse_bn_modules.extend([sparse_block.bn1, sparse_block.bn2, sparse_block.bn3])
-            pruned_bn_modules.extend([pruned_block.bn1, pruned_block.bn2, pruned_block.bn3])
-            # Assign mask indices sequentially (0,1,2 for first block, 3,4,5 for second, etc.)
-            bn_mask_indices.extend([bn_mask_idx, bn_mask_idx + 1, bn_mask_idx + 2])
-            bn_mask_idx += 3
+            sparse_bn_modules.append(sparse_block.bn1)
+            pruned_bn_modules.append(pruned_block.bn1)
+            bn_mask_indices.append(mask_idx)
+            mask_idx += 1
+
+            sparse_bn_modules.append(sparse_block.bn2)
+            pruned_bn_modules.append(pruned_block.bn2)
+            bn_mask_indices.append(mask_idx)
+            mask_idx += 1
+
+            sparse_bn_modules.append(sparse_block.bn3)
+            pruned_bn_modules.append(pruned_block.bn3)
+            bn_mask_indices.append(mask_idx)
+            mask_idx += 1
 
     if len(pruned_bn_modules) != len(masks):
         raise ValueError(f"Expected {len(pruned_bn_modules)} masks for BatchNorm2d layers, got {len(masks)}")
@@ -520,9 +527,9 @@ def prune_and_load_weights(sparsed_student_ckpt_path, dataset_mode="rvf10k"):
         print(f"Processing BatchNorm2d at index {i} (mask_idx {mask_idx})")
         print(f"  Sparse BN features: {sparse_bn.num_features}")
         print(f"  Pruned BN features: {pruned_bn.num_features}")
-        print(f"  BN mask shape: {masks[mask_idx].shape}")
+        print(f"  BN mask shape: {masks[mask_idx - 3].shape if i % 3 == 0 else masks[mask_idx - 2].shape if i % 3 == 1 else masks[mask_idx - 1].shape}")
 
-        bn_mask = masks[mask_idx].bool()
+        bn_mask = masks[mask_idx - 3 if i % 3 == 0 else mask_idx - 2 if i % 3 == 1 else mask_idx - 1].bool()
 
         if bn_mask.shape[0] != sparse_bn.num_features:
             raise ValueError(f"BN mask shape {bn_mask.shape} does not match sparse BN features {sparse_bn.num_features} at mask_idx {mask_idx}")
