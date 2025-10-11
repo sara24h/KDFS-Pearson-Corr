@@ -13,7 +13,7 @@ class SoftMaskedConv2d(nn.Conv2d):
         super().__init__(in_channels, out_channels, kernel_size, stride=stride, padding=padding, bias=bias)
         self.mask_weight = nn.Parameter(torch.empty(out_channels, 2, 1, 1).normal_(mean=0.0, std=0.01))
         self.gumbel_temperature = 2.0
-        self.feature_map_h = 0  # Placeholder, should be set based on input size
+        self.feature_map_h = 0  # Placeholder
         self.feature_map_w = 0
         self.kernel_size = kernel_size
         self.in_channels = in_channels
@@ -26,7 +26,7 @@ class SoftMaskedConv2d(nn.Conv2d):
         else:
             logits = self.mask_weight
             soft_mask = F.gumbel_softmax(logits, tau=self.gumbel_temperature, hard=False, dim=1)
-            self.mask = soft_mask[:, 1:2, :, :]  # Assume index 1 is 'keep'
+            self.mask = soft_mask[:, 1:2, :, :]
         out = super().forward(x)
         return out * self.mask
 
@@ -49,40 +49,6 @@ class MaskedNet(nn.Module):
         )
         for m in self.mask_modules:
             m.gumbel_temperature = self.gumbel_temperature
-
-class BasicBlock_sparse(nn.Module):
-    expansion = 1
-
-    def __init__(self, in_planes, planes, stride=1):
-        super().__init__()
-        self.conv1 = SoftMaskedConv2d(
-            in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False
-        )
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = SoftMaskedConv2d(
-            planes, planes, kernel_size=3, stride=1, padding=1, bias=False
-        )
-        self.bn2 = nn.BatchNorm2d(planes)
-
-        self.downsample = nn.Sequential()
-        if stride != 1 or in_planes != self.expansion * planes:
-            self.downsample = nn.Sequential(
-                nn.Conv2d(
-                    in_planes,
-                    self.expansion * planes,
-                    kernel_size=1,
-                    stride=stride,
-                    bias=False
-                ),
-                nn.BatchNorm2d(self.expansion * planes),
-            )
-
-    def forward(self, x, ticket):
-        out = F.relu(self.bn1(self.conv1(x, ticket)))
-        out = self.bn2(self.conv2(out, ticket))
-        out += self.downsample(x)
-        out = F.relu(out)
-        return out
 
 class Bottleneck_sparse(nn.Module):
     expansion = 4
@@ -204,61 +170,6 @@ def ResNet_50_sparse_hardfakevsreal(
 
 def get_preserved_filter_num(mask):
     return int(mask.sum())
-
-class BasicBlock_pruned(nn.Module):
-    expansion = 1
-
-    def __init__(self, in_planes, planes, masks=[], stride=1):
-        super().__init__()
-        self.masks = masks
-
-        preserved_filter_num1 = get_preserved_filter_num(masks[0])
-        self.conv1 = nn.Conv2d(
-            in_planes,
-            preserved_filter_num1,
-            kernel_size=3,
-            stride=stride,
-            padding=1,
-            bias=False,
-        )
-        self.bn1 = nn.BatchNorm2d(preserved_filter_num1)
-        preserved_filter_num2 = get_preserved_filter_num(masks[1])
-        self.conv2 = nn.Conv2d(
-            preserved_filter_num1,
-            preserved_filter_num2,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            bias=False,
-        )
-        self.bn2 = nn.BatchNorm2d(preserved_filter_num2)
-
-        self.downsample = nn.Sequential()
-        if stride != 1 or in_planes != self.expansion * planes:
-            self.downsample = nn.Sequential(
-                nn.Conv2d(
-                    in_planes,
-                    self.expansion * planes,
-                    kernel_size=1,
-                    stride=stride,
-                    bias=False,
-                ),
-                nn.BatchNorm2d(self.expansion * planes),
-            )
-
-    def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-
-        shortcut_out = self.downsample(x).clone()
-        padded_out = torch.zeros_like(shortcut_out).clone()
-        for padded_feature_map, feature_map in zip(padded_out, out):
-            padded_feature_map[self.masks[1] == 1] = feature_map
-
-        assert padded_out.shape == shortcut_out.shape, "wrong shape"
-        padded_out += shortcut_out
-        padded_out = F.relu(padded_out)
-        return padded_out
 
 class Bottleneck_pruned(nn.Module):
     expansion = 4
@@ -467,7 +378,7 @@ def get_flops_and_params(dataset_mode, sparsed_student_ckpt_path):
 
     model_type = "ResNet_50"
     student = ResNet_50_sparse_hardfakevsreal()
-    student.load_state_dict(state_dict)
+    student.load_state_dict(state_dict, strict=False)  # Use strict=False to ignore extra keys
 
     mask_weights = [m.mask_weight for m in student.mask_modules]
     masks = [
@@ -504,32 +415,26 @@ def prune_and_load_weights(sparsed_student_ckpt_path, dataset_mode="rvf10k"):
         "125k": "125k"
     }[dataset_mode]
 
-    # Load checkpoint
     ckpt_student = torch.load(sparsed_student_ckpt_path, map_location="cpu", weights_only=True)
     state_dict = ckpt_student["student"]
 
-    # Initialize sparse model
     student = ResNet_50_sparse_hardfakevsreal()
-    student.load_state_dict(state_dict)
+    student.load_state_dict(state_dict, strict=False)
     student.eval()
 
-    # Extract masks
     mask_weights = [m.mask_weight for m in student.mask_modules]
     masks = [
         torch.argmax(mask_weight, dim=1).squeeze(1).squeeze(1)
         for mask_weight in mask_weights
     ]
 
-    # Initialize pruned model
     pruned_model = ResNet_50_pruned_hardfakevsreal(masks=masks)
     pruned_model.eval()
 
-    # Get lists of modules
     sparse_modules = list(student.modules())
     pruned_modules = list(pruned_model.modules())
 
-    # Expected number of masks for ResNet-50 (3 conv layers per bottleneck, 16 bottlenecks)
-    expected_mask_count = 3 * (3 + 4 + 6 + 3)  # 48 masks
+    expected_mask_count = 3 * (3 + 4 + 6 + 3)  # 48 masks for ResNet-50
     if len(masks) != expected_mask_count:
         raise ValueError(f"Expected {expected_mask_count} masks, got {len(masks)}")
 
@@ -537,14 +442,13 @@ def prune_and_load_weights(sparsed_student_ckpt_path, dataset_mode="rvf10k"):
     sparse_idx = 0
     for pruned_module in pruned_modules:
         if isinstance(pruned_module, nn.Conv2d):
-            # Find next SoftMaskedConv2d
-            while sparse_idx < len(sparse_modules) and not isinstance(sparse_modules[sparse_idx], SoftMaskedConv2d):
+            while sparse_idx < len(sparse_modules) and not isinstance(sparse_modules[sparse_idx], (SoftMaskedConv2d, nn.Conv2d)):
                 sparse_idx += 1
             if sparse_idx >= len(sparse_modules):
-                break  # No more SoftMaskedConv2d layers
+                break
             sparse_conv = sparse_modules[sparse_idx]
 
-            out_mask = masks[mask_idx].bool()
+            out_mask = masks[mask_idx].bool() if mask_idx < len(masks) else torch.ones(sparse_conv.out_channels, dtype=torch.bool)
             in_mask = masks[mask_idx - 1].bool() if mask_idx > 0 else torch.ones(sparse_conv.in_channels, dtype=torch.bool)
 
             try:
@@ -574,7 +478,6 @@ def prune_and_load_weights(sparsed_student_ckpt_path, dataset_mode="rvf10k"):
 
             sparse_idx += 1
 
-    # Copy non-pruned layers
     pruned_model.conv1.weight.data = student.conv1.weight.data.clone()
     pruned_model.bn1.weight.data = student.bn1.weight.data.clone()
     pruned_model.bn1.bias.data = student.bn1.bias.data.clone()
