@@ -545,3 +545,6 @@ def main():
 
     torch.save(pruned_model.state_dict(), "pruned_resnet50_rvf10k.pt")
     print("مدل هرس‌شده ذخیره شد.")
+
+if __name__ == "__main__":
+    main()
