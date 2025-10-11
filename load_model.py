@@ -20,21 +20,15 @@ class SoftMaskedConv2d(nn.Conv2d):
         self.out_channels = out_channels
         self.mask = None
 
-    def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = F.relu(self.bn2(self.conv2(out)))
-        out = self.bn3(self.conv3(out))
-
-        shortcut_out = self.downsample(x)
-        padded_out = torch.zeros_like(shortcut_out)
-    
-    # استفاده از index_put_ برای جلوگیری از in-place روی view
-        mask = (self.masks[2] == 1).unsqueeze(0).unsqueeze(2).unsqueeze(3)  # expand به shape [1, channels, 1, 1]
-        padded_out = torch.where(mask, out, padded_out)
-    
-        padded_out += shortcut_out
-        padded_out = F.relu(padded_out)
-        return padded_out
+    def forward(self, x, ticket):
+        if ticket:
+            self.mask = (torch.argmax(self.mask_weight, dim=1) == 1).float().unsqueeze(1).unsqueeze(1).unsqueeze(0)
+        else:
+            logits = self.mask_weight
+            soft_mask = F.gumbel_softmax(logits, tau=self.gumbel_temperature, hard=False, dim=1)
+            self.mask = soft_mask[:, 1:2, :, :]
+        out = super().forward(x)
+        return out * self.mask
 
 # --- Sparse Model Definitions ---
 
@@ -226,12 +220,13 @@ class Bottleneck_pruned(nn.Module):
         out = F.relu(self.bn2(self.conv2(out)))
         out = self.bn3(self.conv3(out))
 
-        shortcut_out = self.downsample(x).clone()
-        padded_out = torch.zeros_like(shortcut_out).clone()
-        for padded_feature_map, feature_map in zip(padded_out, out):
-            padded_feature_map[self.masks[2] == 1] = feature_map
+        shortcut_out = self.downsample(x)
+        padded_out = torch.zeros_like(shortcut_out)
 
-        assert padded_out.shape == shortcut_out.shape, "wrong shape"
+        # اصلاح‌شده: استفاده از indexing مستقیم روی کانال‌ها برای جلوگیری از in-place روی view
+        indices = torch.nonzero(self.masks[2] == 1).squeeze(-1)  # ایندکس‌های کانال‌هایی که ماسک 1 دارن
+        padded_out[:, indices, :, :] = out
+
         padded_out += shortcut_out
         padded_out = F.relu(padded_out)
         return padded_out
@@ -410,7 +405,6 @@ def get_flops_and_params(dataset_mode, sparsed_student_ckpt_path):
         Params_reduction,
     )
 
-
 def prune_and_load_weights(sparsed_student_ckpt_path, dataset_mode="rvf10k"):
     dataset_type = {
         "hardfake": "hardfakevsreal",
@@ -504,7 +498,7 @@ def prune_and_load_weights(sparsed_student_ckpt_path, dataset_mode="rvf10k"):
     sparse_bn_modules = []
     pruned_bn_modules = []
     bn_mask_indices = []
-    bn_mask_idx = 0  # متغیر جداگانه برای ایندکس BNها، از ۰ شروع می‌شه
+    bn_mask_idx = 0  # Separate index for BN masks, starting from 0
 
     # Collect BatchNorm2d layers in the correct order
     for layer_name in ['layer1', 'layer2', 'layer3', 'layer4']:
@@ -516,7 +510,7 @@ def prune_and_load_weights(sparsed_student_ckpt_path, dataset_mode="rvf10k"):
             pruned_bn_modules.extend([pruned_block.bn1, pruned_block.bn2, pruned_block.bn3])
             # Assign mask indices sequentially (0,1,2 for first block, 3,4,5 for second, etc.)
             bn_mask_indices.extend([bn_mask_idx, bn_mask_idx + 1, bn_mask_idx + 2])
-            bn_mask_idx += 3  # افزایش ایندکس برای بلاک بعدی
+            bn_mask_idx += 3
 
     if len(pruned_bn_modules) != len(masks):
         raise ValueError(f"Expected {len(pruned_bn_modules)} masks for BatchNorm2d layers, got {len(masks)}")
@@ -525,7 +519,7 @@ def prune_and_load_weights(sparsed_student_ckpt_path, dataset_mode="rvf10k"):
     for i, (sparse_bn, pruned_bn, mask_idx) in enumerate(zip(sparse_bn_modules, pruned_bn_modules, bn_mask_indices)):
         print(f"Processing BatchNorm2d at index {i} (mask_idx {mask_idx})")
         print(f"  Sparse BN features: {sparse_bn.num_features}")
-        print(f"  Pruned BN features: {pruned_bn.num_features}")  # اضافه کردم چون توی خروجی‌ت بود
+        print(f"  Pruned BN features: {pruned_bn.num_features}")
         print(f"  BN mask shape: {masks[mask_idx].shape}")
 
         bn_mask = masks[mask_idx].bool()
