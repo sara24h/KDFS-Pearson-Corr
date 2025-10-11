@@ -20,15 +20,21 @@ class SoftMaskedConv2d(nn.Conv2d):
         self.out_channels = out_channels
         self.mask = None
 
-    def forward(self, x, ticket):
-        if ticket:
-            self.mask = (torch.argmax(self.mask_weight, dim=1) == 1).float().unsqueeze(1).unsqueeze(1).unsqueeze(0)
-        else:
-            logits = self.mask_weight
-            soft_mask = F.gumbel_softmax(logits, tau=self.gumbel_temperature, hard=False, dim=1)
-            self.mask = soft_mask[:, 1:2, :, :]
-        out = super().forward(x)
-        return out * self.mask
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = F.relu(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+
+        shortcut_out = self.downsample(x)
+        padded_out = torch.zeros_like(shortcut_out)
+    
+    # استفاده از index_put_ برای جلوگیری از in-place روی view
+        mask = (self.masks[2] == 1).unsqueeze(0).unsqueeze(2).unsqueeze(3)  # expand به shape [1, channels, 1, 1]
+        padded_out = torch.where(mask, out, padded_out)
+    
+        padded_out += shortcut_out
+        padded_out = F.relu(padded_out)
+        return padded_out
 
 # --- Sparse Model Definitions ---
 
