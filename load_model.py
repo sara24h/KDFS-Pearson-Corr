@@ -404,6 +404,7 @@ def get_flops_and_params(dataset_mode, sparsed_student_ckpt_path):
         Params_reduction,
     )
 
+
 def prune_and_load_weights(sparsed_student_ckpt_path, dataset_mode="rvf10k"):
     dataset_type = {
         "hardfake": "hardfakevsreal",
@@ -497,6 +498,7 @@ def prune_and_load_weights(sparsed_student_ckpt_path, dataset_mode="rvf10k"):
     sparse_bn_modules = []
     pruned_bn_modules = []
     bn_mask_indices = []
+    bn_mask_idx = 0  # متغیر جداگانه برای ایندکس BNها، از ۰ شروع می‌شه
 
     # Collect BatchNorm2d layers in the correct order
     for layer_name in ['layer1', 'layer2', 'layer3', 'layer4']:
@@ -506,9 +508,9 @@ def prune_and_load_weights(sparsed_student_ckpt_path, dataset_mode="rvf10k"):
             # Collect bn1, bn2, bn3 for each block
             sparse_bn_modules.extend([sparse_block.bn1, sparse_block.bn2, sparse_block.bn3])
             pruned_bn_modules.extend([pruned_block.bn1, pruned_block.bn2, pruned_block.bn3])
-            # Assign mask indices (conv1 -> bn1, conv2 -> bn2, conv3 -> bn3)
-            bn_mask_indices.extend([mask_idx - 3 + i for i in range(3)])
-            mask_idx += 3
+            # Assign mask indices sequentially (0,1,2 for first block, 3,4,5 for second, etc.)
+            bn_mask_indices.extend([bn_mask_idx, bn_mask_idx + 1, bn_mask_idx + 2])
+            bn_mask_idx += 3  # افزایش ایندکس برای بلاک بعدی
 
     if len(pruned_bn_modules) != len(masks):
         raise ValueError(f"Expected {len(pruned_bn_modules)} masks for BatchNorm2d layers, got {len(masks)}")
@@ -517,7 +519,7 @@ def prune_and_load_weights(sparsed_student_ckpt_path, dataset_mode="rvf10k"):
     for i, (sparse_bn, pruned_bn, mask_idx) in enumerate(zip(sparse_bn_modules, pruned_bn_modules, bn_mask_indices)):
         print(f"Processing BatchNorm2d at index {i} (mask_idx {mask_idx})")
         print(f"  Sparse BN features: {sparse_bn.num_features}")
-        print(f"  Pruned BN features: {pruned_bn.num_features}")
+        print(f"  Pruned BN features: {pruned_bn.num_features}")  # اضافه کردم چون توی خروجی‌ت بود
         print(f"  BN mask shape: {masks[mask_idx].shape}")
 
         bn_mask = masks[mask_idx].bool()
