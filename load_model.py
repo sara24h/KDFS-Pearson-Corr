@@ -6,29 +6,31 @@ import math
 import os
 from thop import profile
 
-# --- Sparse Model Definitions ---
+# --- SoftMaskedConv2d Definition ---
 
 class SoftMaskedConv2d(nn.Conv2d):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.mask_weight = nn.Parameter(torch.empty(self.out_channels, 2, 1, 1).normal_(mean=0.0, std=0.01))
-        # Placeholder for other attributes if needed, e.g., feature_map_h, etc.
-        self.feature_map_h = 0  # Placeholder, set if needed
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, bias=False):
+        super().__init__(in_channels, out_channels, kernel_size, stride=stride, padding=padding, bias=bias)
+        self.mask_weight = nn.Parameter(torch.empty(out_channels, 2, 1, 1).normal_(mean=0.0, std=0.01))
+        self.gumbel_temperature = 2.0
+        self.feature_map_h = 0  # Placeholder, should be set based on input size
         self.feature_map_w = 0
-        self.kernel_size = kwargs.get('kernel_size', 1)
-        self.in_channels = self.in_channels
-        self.out_channels = self.out_channels
-        self.mask = None  # Set in forward if needed
+        self.kernel_size = kernel_size
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.mask = None
 
     def forward(self, x, ticket):
         if ticket:
-            mask = (torch.argmax(self.mask_weight, dim=1) == 1).float().unsqueeze(1).unsqueeze(1).unsqueeze(0)
+            self.mask = (torch.argmax(self.mask_weight, dim=1) == 1).float().unsqueeze(1).unsqueeze(1).unsqueeze(0)
         else:
             logits = self.mask_weight
             soft_mask = F.gumbel_softmax(logits, tau=self.gumbel_temperature, hard=False, dim=1)
-            mask = soft_mask[:, 1:2, :, :]  # Assume index 1 is 'keep'
+            self.mask = soft_mask[:, 1:2, :, :]  # Assume index 1 is 'keep'
         out = super().forward(x)
-        return out * mask
+        return out * self.mask
+
+# --- Sparse Model Definitions ---
 
 class MaskedNet(nn.Module):
     def __init__(self, gumbel_start_temperature=2.0, gumbel_end_temperature=0.5, num_epochs=200):
@@ -40,92 +42,13 @@ class MaskedNet(nn.Module):
         self.ticket = False
         self.mask_modules = []
 
-    def checkpoint(self):
-        for m in self.mask_modules:
-            m.checkpoint()
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d) or isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.Linear):
-                m.checkpoint = copy.deepcopy(m.state_dict())
-
-    def rewind_weights(self):
-        for m in self.mask_modules:
-            m.rewind_weights()
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d) or isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.Linear):
-                m.load_state_dict(m.checkpoint)
-
     def update_gumbel_temperature(self, epoch):
         self.gumbel_temperature = self.gumbel_start_temperature * math.pow(
             self.gumbel_end_temperature / self.gumbel_start_temperature,
             epoch / self.num_epochs,
         )
         for m in self.mask_modules:
-            m.gumbel_temperature = self.gumbel_temperature  # Assume added attribute
-
-    def get_flops(self):
-        device = next(self.parameters()).device
-        Flops_total = torch.tensor(0.0, device=device)
-        image_sizes = {
-            "hardfakevsrealfaces": 300,
-            "rvf10k": 256,
-            "140k": 256
-        }
-        dataset_type = getattr(self, "dataset_type", "hardfakevsrealfaces")
-        input_size = image_sizes.get(dataset_type, 256)
-        
-        conv1_h = (input_size - 7 + 2 * 3) // 2 + 1
-        maxpool_h = (conv1_h - 3 + 2 * 1) // 2 + 1
-        conv1_w = conv1_h
-        maxpool_w = maxpool_h
-        
-        Flops_total = Flops_total + (
-            conv1_h * conv1_w * 7 * 7 * 3 * 64 +
-            conv1_h * conv1_w * 64
-        )
-        
-        for i, m in enumerate(self.mask_modules):
-            m = m.to(device)
-            Flops_shortcut_conv = 0
-            Flops_shortcut_bn = 0
-            if len(self.mask_modules) == 48:  # ResNet-50
-                if i % 3 == 0:
-                    Flops_conv = (
-                        m.feature_map_h * m.feature_map_w * m.kernel_size * m.kernel_size *
-                        m.in_channels * m.mask.sum()
-                    )
-                else:
-                    Flops_conv = (
-                        m.feature_map_h * m.feature_map_w * m.kernel_size * m.kernel_size *
-                        self.mask_modules[i - 1].mask.to(device).sum() * m.mask.sum()
-                    )
-                Flops_bn = m.feature_map_h * m.feature_map_w * m.mask.sum()
-                if i % 3 == 2:
-                    Flops_shortcut_conv = (
-                        m.feature_map_h * m.feature_map_w * 1 * 1 *
-                        (m.out_channels // 4) * m.out_channels
-                    )
-                    Flops_shortcut_bn = m.feature_map_h * m.feature_map_w * m.out_channels
-            elif len(self.mask_modules) in [16, 32]:
-                if i % 2 == 0:
-                    Flops_conv = (
-                        m.feature_map_h * m.feature_map_w * m.kernel_size * m.kernel_size *
-                        m.in_channels * m.mask.sum()
-                    )
-                else:
-                    Flops_conv = (
-                        m.feature_map_h * m.feature_map_w * m.kernel_size * m.kernel_size *
-                        self.mask_modules[i - 1].mask.to(device).sum() * m.mask.sum()
-                    )
-                Flops_bn = m.feature_map_h * m.feature_map_w * m.mask.sum()
-                if i % 2 == 1 and i != 1:
-                    Flops_shortcut_conv = (
-                        m.feature_map_h * m.feature_map_w * 1 * 1 *
-                        m.out_channels * m.out_channels
-                    )
-                    Flops_shortcut_bn = m.feature_map_h * m.feature_map_w * m.out_channels
-
-            Flops_total = Flops_total + Flops_conv + Flops_bn + Flops_shortcut_conv + Flops_shortcut_bn
-        return Flops_total
+            m.gumbel_temperature = self.gumbel_temperature
 
 class BasicBlock_sparse(nn.Module):
     expansion = 1
@@ -225,20 +148,10 @@ class ResNet_sparse(MaskedNet):
         self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2)
         self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2)
         self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2)
-        self.avgpool = nn.Sequential(nn.AvgPool2d(7))
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(512 * block.expansion, num_classes)
 
-        if block == BasicBlock_sparse:
-            expansion = 1
-        elif block == Bottleneck_sparse:
-            expansion = 4
-        self.feat1 = nn.Conv2d(64 * expansion, 64 * expansion, kernel_size=1)
-        self.feat2 = nn.Conv2d(128 * expansion, 128 * expansion, kernel_size=1)
-        self.feat3 = nn.Conv2d(256 * expansion, 256 * expansion, kernel_size=1)
-        self.feat4 = nn.Conv2d(512 * expansion, 512 * expansion, kernel_size=1)
-
         self.mask_modules = [m for m in self.modules() if isinstance(m, SoftMaskedConv2d)]
-        self.mask_modules = [m.to(next(self.parameters()).device) for m in self.mask_modules]
 
     def _make_layer(self, block, planes, num_blocks, stride):
         strides = [stride] + [1] * (num_blocks - 1)
@@ -255,19 +168,19 @@ class ResNet_sparse(MaskedNet):
 
         for block in self.layer1:
             out = block(out, self.ticket)
-        feature_list.append(self.feat1(out))
+        feature_list.append(out)
 
         for block in self.layer2:
             out = block(out, self.ticket)
-        feature_list.append(self.feat2(out))
+        feature_list.append(out)
 
         for block in self.layer3:
             out = block(out, self.ticket)
-        feature_list.append(self.feat3(out))
+        feature_list.append(out)
 
         for block in self.layer4:
             out = block(out, self.ticket)
-        feature_list.append(self.feat4(out))
+        feature_list.append(out)
 
         out = self.avgpool(out)
         out = out.view(out.size(0), -1)
@@ -343,7 +256,6 @@ class BasicBlock_pruned(nn.Module):
             padded_feature_map[self.masks[1] == 1] = feature_map
 
         assert padded_out.shape == shortcut_out.shape, "wrong shape"
-
         padded_out += shortcut_out
         padded_out = F.relu(padded_out)
         return padded_out
@@ -403,7 +315,6 @@ class Bottleneck_pruned(nn.Module):
             padded_feature_map[self.masks[2] == 1] = feature_map
 
         assert padded_out.shape == shortcut_out.shape, "wrong shape"
-
         padded_out += shortcut_out
         padded_out = F.relu(padded_out)
         return padded_out
@@ -453,7 +364,6 @@ class ResNet_pruned(nn.Module):
             stride=2,
             masks=masks[num : num + coef * num_blocks[3]],
         )
-        num += coef * num_blocks[3]
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(512 * block.expansion, num_classes)
@@ -461,9 +371,7 @@ class ResNet_pruned(nn.Module):
     def _make_layer(self, block, planes, num_blocks, stride, masks=[]):
         strides = [stride] + [1] * (num_blocks - 1)
         layers = []
-
         coef = 3 if block == Bottleneck_pruned else 2
-
         for i, stride in enumerate(strides):
             layers.append(
                 block(
@@ -478,7 +386,6 @@ class ResNet_pruned(nn.Module):
 
     def forward(self, x):
         feature_list = []
-
         out = F.relu(self.bn1(self.conv1(x)))
         out = self.maxpool(out)
 
@@ -520,7 +427,6 @@ Flops_baselines = {
         "330k": 5390.0,
         "125k": 2100.0,
     },
-    # Other models omitted for brevity
 }
 Params_baselines = {
     "ResNet_50": {
@@ -532,7 +438,6 @@ Params_baselines = {
         "330k": 23.51,
         "125k": 23.51,
     },
-    # Other models omitted for brevity
 }
 image_sizes = {
     "hardfakevsreal": 300,
@@ -551,7 +456,7 @@ def get_flops_and_params(dataset_mode, sparsed_student_ckpt_path):
         "hardfake": "hardfakevsreal",
         "rvf10k": "rvf10k",
         "140k": "140k",
-        "190k": "190k", 
+        "190k": "190k",
         "200k": "200k",
         "330k": "330k",
         "125k": "125k"
@@ -562,7 +467,6 @@ def get_flops_and_params(dataset_mode, sparsed_student_ckpt_path):
 
     model_type = "ResNet_50"
     student = ResNet_50_sparse_hardfakevsreal()
-
     student.load_state_dict(state_dict)
 
     mask_weights = [m.mask_weight for m in student.mask_modules]
@@ -572,19 +476,14 @@ def get_flops_and_params(dataset_mode, sparsed_student_ckpt_path):
     ]
 
     pruned_model = ResNet_50_pruned_hardfakevsreal(masks=masks)
-
     input = torch.rand([1, 3, image_sizes[dataset_type], image_sizes[dataset_type]])
     Flops, Params = profile(pruned_model, inputs=(input,), verbose=False)
 
     Flops_baseline = Flops_baselines[model_type][dataset_type]
     Params_baseline = Params_baselines[model_type][dataset_type]
 
-    Flops_reduction = (
-        (Flops_baseline - Flops / (10**6)) / Flops_baseline * 100.0
-    )
-    Params_reduction = (
-        (Params_baseline - Params / (10**6)) / Params_baseline * 100.0
-    )
+    Flops_reduction = ((Flops_baseline - Flops / (10**6)) / Flops_baseline * 100.0)
+    Params_reduction = ((Params_baseline - Params / (10**6)) / Params_baseline * 100.0)
     return (
         Flops_baseline,
         Flops / (10**6),
@@ -605,57 +504,77 @@ def prune_and_load_weights(sparsed_student_ckpt_path, dataset_mode="rvf10k"):
         "125k": "125k"
     }[dataset_mode]
 
+    # Load checkpoint
     ckpt_student = torch.load(sparsed_student_ckpt_path, map_location="cpu", weights_only=True)
     state_dict = ckpt_student["student"]
 
+    # Initialize sparse model
     student = ResNet_50_sparse_hardfakevsreal()
     student.load_state_dict(state_dict)
     student.eval()
 
+    # Extract masks
     mask_weights = [m.mask_weight for m in student.mask_modules]
     masks = [
         torch.argmax(mask_weight, dim=1).squeeze(1).squeeze(1)
         for mask_weight in mask_weights
     ]
 
+    # Initialize pruned model
     pruned_model = ResNet_50_pruned_hardfakevsreal(masks=masks)
     pruned_model.eval()
 
+    # Get lists of modules
     sparse_modules = list(student.modules())
     pruned_modules = list(pruned_model.modules())
+
+    # Expected number of masks for ResNet-50 (3 conv layers per bottleneck, 16 bottlenecks)
+    expected_mask_count = 3 * (3 + 4 + 6 + 3)  # 48 masks
+    if len(masks) != expected_mask_count:
+        raise ValueError(f"Expected {expected_mask_count} masks, got {len(masks)}")
 
     mask_idx = 0
     sparse_idx = 0
     for pruned_module in pruned_modules:
         if isinstance(pruned_module, nn.Conv2d):
-            while not isinstance(sparse_modules[sparse_idx], SoftMaskedConv2d):
+            # Find next SoftMaskedConv2d
+            while sparse_idx < len(sparse_modules) and not isinstance(sparse_modules[sparse_idx], SoftMaskedConv2d):
                 sparse_idx += 1
+            if sparse_idx >= len(sparse_modules):
+                break  # No more SoftMaskedConv2d layers
             sparse_conv = sparse_modules[sparse_idx]
 
             out_mask = masks[mask_idx].bool()
             in_mask = masks[mask_idx - 1].bool() if mask_idx > 0 else torch.ones(sparse_conv.in_channels, dtype=torch.bool)
 
-            pruned_module.weight.data = sparse_conv.weight.data[out_mask][:, in_mask, :, :].clone()
-            if pruned_module.bias is not None:
-                pruned_module.bias.data = sparse_conv.bias.data[out_mask].clone()
+            try:
+                pruned_module.weight.data = sparse_conv.weight.data[out_mask][:, in_mask, :, :].clone()
+            except IndexError as e:
+                raise IndexError(f"Shape mismatch in Conv2d at mask_idx {mask_idx}: {e}")
 
             mask_idx += 1
             sparse_idx += 1
 
         elif isinstance(pruned_module, nn.BatchNorm2d):
-            while not isinstance(sparse_modules[sparse_idx], nn.BatchNorm2d):
+            while sparse_idx < len(sparse_modules) and not isinstance(sparse_modules[sparse_idx], nn.BatchNorm2d):
                 sparse_idx += 1
+            if sparse_idx >= len(sparse_modules):
+                break
             sparse_bn = sparse_modules[sparse_idx]
 
-            bn_mask = masks[mask_idx - 1].bool()
+            bn_mask = masks[mask_idx - 1].bool() if mask_idx > 0 else torch.ones(sparse_bn.num_features, dtype=torch.bool)
 
-            pruned_module.weight.data = sparse_bn.weight.data[bn_mask].clone()
-            pruned_module.bias.data = sparse_bn.bias.data[bn_mask].clone()
-            pruned_module.running_mean = sparse_bn.running_mean[bn_mask].clone()
-            pruned_module.running_var = sparse_bn.running_var[bn_mask].clone()
+            try:
+                pruned_module.weight.data = sparse_bn.weight.data[bn_mask].clone()
+                pruned_module.bias.data = sparse_bn.bias.data[bn_mask].clone()
+                pruned_module.running_mean = sparse_bn.running_mean[bn_mask].clone()
+                pruned_module.running_var = sparse_bn.running_var[bn_mask].clone()
+            except IndexError as e:
+                raise IndexError(f"Shape mismatch in BatchNorm2d at mask_idx {mask_idx - 1}: {e}")
 
             sparse_idx += 1
 
+    # Copy non-pruned layers
     pruned_model.conv1.weight.data = student.conv1.weight.data.clone()
     pruned_model.bn1.weight.data = student.bn1.weight.data.clone()
     pruned_model.bn1.bias.data = student.bn1.bias.data.clone()
