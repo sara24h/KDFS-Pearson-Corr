@@ -1,4 +1,4 @@
-ایا با این میشه تعداد پارامتر های مدل هرس شده رو فهمید؟import torch
+import torch
 from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal
 from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
 from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
