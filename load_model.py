@@ -5,7 +5,7 @@ sys.path.append('/kaggle/working')
 
 from model.pruned_model.ResNet_pruned  import ResNet_50_pruned_hardfakevsreal
 
-checkpoint_path = '/kaggle/input/kdfs-140k-pearson-19-shahrivar-data/results/run_resnet50_imagenet_prune1/student_model/resnet50_sparse_best.pt'
+checkpoint_path = '/kaggle/input/kdfs-190k-pearson-19-shahrivar-part1/results/run_resnet50_imagenet_prune1/student_model/resnet50_sparse_best.pt'
 
 print("="*70)
 print("استخراج ماسک‌ها از مدل Sparse")
