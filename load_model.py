@@ -50,7 +50,7 @@ def extract_masks_from_model(model):
     
     return masks, remaining_counts
 
-masks, remaining_counts = extract_masks_from_weights(sparse_state_dict)
+masks, remaining_counts = extract_masks_from_model(sparse_state_dict)
 
 print(f"\n✅ تعداد ماسک‌های ساخته شده: {len(masks)}")
 print(f"✅ جمع فیلترهای باقی‌مانده: {sum(remaining_counts)}")
