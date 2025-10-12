@@ -1,14 +1,11 @@
 import torch
 import torch.nn as nn
 import sys
-import os
-import traceback
-
 sys.path.append('/kaggle/working')
 
-from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
+from model.pruned_model.ResNet_pruned  import ResNet_50_pruned_hardfakevsreal
 
-checkpoint_path = '/kaggle/input/kdfs-190k-pearson-19-shahrivar-part1/results/run_resnet50_imagenet_prune1/student_model/resnet50_sparse_best.pt'
+checkpoint_path = '/kaggle/input/kdfs-10k-pearson-19-shahrivar-314-epochs/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt'
 
 print("="*70)
 print("استخراج ماسک‌ها از مدل Sparse")
@@ -17,7 +14,12 @@ print("="*70)
 checkpoint = torch.load(checkpoint_path, map_location='cpu')
 sparse_state_dict = checkpoint['student']
 
+# استخراج تعداد فیلترهای باقی‌مانده از وزن‌های conv
 def extract_masks_from_sparse_model(state_dict):
+    """
+    استخراج ماسک‌ها بر اساس تعداد فیلترهای باقی‌مانده
+    از خروجی load_model.py میدونیم که مثلاً conv1 از 64 به 20 فیلتر رسیده
+    """
     masks = []
     
     # تعریف ساختار ResNet50 Bottleneck
@@ -268,6 +270,7 @@ try:
     print(f"✅ مدل با موفقیت ذخیره شد در: {save_path}")
     
     # محاسبه حجم فایل
+    import os
     file_size_mb = os.path.getsize(save_path) / (1024 * 1024)
     print(f"✅ حجم فایل: {file_size_mb:.2f} MB")
     
@@ -295,94 +298,7 @@ try:
         
 except Exception as e:
     print(f"❌ خطا: {e}")
+    import traceback
     traceback.print_exc()
 
 print("\n" + "="*70)
-
-def print_checkpoint_info(checkpoint_path):
-    """
-    تابع برای نمایش اطلاعات چک‌پوینت‌های مختلف (sparse یا pruned)
-    
-    :param checkpoint_path: مسیر فایل چک‌پوینت (.pt)
-    """
-    print("\n" + "="*70)
-    print(f"اطلاعات چک‌پوینت: {checkpoint_path}")
-    print("="*70)
-    
-    try:
-        # لود چک‌پوینت
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        
-        # نمایش کلیدهای اصلی چک‌پوینت
-        print("📋 کلیدهای اصلی چک‌پوینت:")
-        for key in checkpoint.keys():
-            print(f"  - {key}")
-        
-        # تعیین state_dict
-        if 'student' in checkpoint:
-            state_dict = checkpoint['student']
-            print("\n✅ نوع چک‌پوینت: Sparse (student model)")
-        elif 'model_state_dict' in checkpoint:
-            state_dict = checkpoint['model_state_dict']
-            print("\n✅ نوع چک‌پوینت: Pruned (full model)")
-        else:
-            state_dict = checkpoint  # اگر مستقیم state_dict باشه
-            print("\n✅ نوع چک‌پوینت: Weights only")
-        
-        # محاسبه تعداد پارامترها
-        total_params = sum(p.numel() for p in state_dict.values() if torch.is_tensor(p))
-        print(f"📊 تعداد پارامترها: {total_params:,}")
-        
-        # اگر ماسک‌ها وجود داشته باشه
-        if 'masks' in checkpoint:
-            masks = checkpoint['masks']
-            print(f"🎭 تعداد ماسک‌ها: {len(masks)}")
-            for i, mask in enumerate(masks):
-                active = int(mask.sum())
-                total = len(mask)
-                print(f"  - Mask {i}: فعال {active}/{total} ({active/total*100:.1f}%)")
-        
-        # اگر pruned_counts و original_counts وجود داشته باشه
-        if 'pruned_counts' in checkpoint and 'original_counts' in checkpoint:
-            print("\n📉 آمار پرونینگ:")
-            for i, (pruned, orig) in enumerate(zip(checkpoint['pruned_counts'], checkpoint['original_counts'])):
-                print(f"  - Layer {i}: پرون شده {pruned}/{orig} ({pruned/orig*100:.1f}%)")
-        
-        # اگر معماری وجود داشته باشه
-        if 'model_architecture' in checkpoint:
-            print(f"🏗️ معماری مدل: {checkpoint['model_architecture']}")
-        
-        # اگر total_params در چک‌پوینت ذخیره شده باشه
-        if 'total_params' in checkpoint:
-            print(f"📊 تعداد پارامترهای ذخیره‌شده: {checkpoint['total_params']:,}")
-        
-        # حجم فایل
-        file_size_mb = os.path.getsize(checkpoint_path) / (1024 * 1024)
-        print(f"💾 حجم فایل: {file_size_mb:.2f} MB")
-        
-        # نمایش نمونه وزن‌ها (برای چک کردن)
-        sample_keys = list(state_dict.keys())[:3]  # سه کلید اول
-        print("\n🔍 نمونه وزن‌ها:")
-        for key in sample_keys:
-            tensor = state_dict[key]
-            print(f"  - {key}: شکل {list(tensor.shape)}, dtype {tensor.dtype}")
-        
-    except Exception as e:
-        print(f"❌ خطا در لود چک‌پوینت: {e}")
-    
-    print("="*70 + "\n")
-
-# مثال استفاده
-if __name__ == "__main__":
-    # چک‌پوینت‌های شما
-    paths = [
-        '/kaggle/input/kdfs-190k-pearson-19-shahrivar-part1/results/run_resnet50_imagenet_prune1/student_model/resnet50_sparse_best.pt',
-        '/kaggle/working/resnet50_pruned_model.pt',
-        '/kaggle/working/resnet50_pruned_weights_only.pt'
-    ]
-    
-    for path in paths:
-        if os.path.exists(path):
-            print_checkpoint_info(path)
-        else:
-            print(f"⚠️ فایل {path} یافت نشد!")
