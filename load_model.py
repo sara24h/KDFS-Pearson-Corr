@@ -3,241 +3,302 @@ import torch.nn as nn
 import sys
 sys.path.append('/kaggle/working')
 
-from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
+from model.pruned_model.ResNet_pruned  import ResNet_50_pruned_hardfakevsreal
 
 checkpoint_path = '/kaggle/input/kdfs-10k-pearson-19-shahrivar-314-epochs/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt'
 
 print("="*70)
-print("تحلیل نوع Pruning و استخراج ماسک‌ها")
+print("استخراج ماسک‌ها از مدل Sparse")
 print("="*70)
 
 checkpoint = torch.load(checkpoint_path, map_location='cpu')
 sparse_state_dict = checkpoint['student']
 
-def analyze_pruning_type(state_dict):
+# استخراج تعداد فیلترهای باقی‌مانده از وزن‌های conv
+def extract_masks_from_sparse_model(state_dict):
     """
-    تشخیص نوع pruning: structured (filter-level) یا unstructured (weight-level)
+    استخراج ماسک‌ها بر اساس تعداد فیلترهای باقی‌مانده
+    از خروجی load_model.py میدونیم که مثلاً conv1 از 64 به 20 فیلتر رسیده
     """
-    print("\n🔍 تحلیل نوع pruning...")
+    masks = []
     
-    # بررسی چند لایه نمونه
-    sample_keys = [k for k in state_dict.keys() if 'conv' in k and 'weight' in k][:5]
+    # تعریف ساختار ResNet50 Bottleneck
+    # layer1: 3 blocks × 3 convs = 9 masks
+    # layer2: 4 blocks × 3 convs = 12 masks
+    # layer3: 6 blocks × 3 convs = 18 masks
+    # layer4: 3 blocks × 3 convs = 9 masks
+    # جمع: 48 masks
     
-    structured_pruning = False
-    unstructured_pruning = False
+    # از خروجی load_model.py میدونیم تعداد فیلترهای pruned شده:
+    # این اعداد رو از "Pruned weight shape" در خروجی استخراج کردیم
+    pruned_filters = [
+        # layer1.0
+        20, 23, 94,
+        # layer1.1
+        13, 27, 91,
+        # layer1.2
+        27, 24, 82,
+        # layer2.0
+        44, 42, 92,
+        # layer2.1
+        47, 29, 94,
+        # layer2.2
+        37, 28, 71,
+        # layer2.3
+        43, 34, 56,
+        # layer3.0
+        65, 42, 66,
+        # layer3.1
+        63, 31, 66,
+        # layer3.2
+        59, 17, 60,
+        # layer3.3
+        40, 19, 40,
+        # layer3.4
+        30, 10, 31,
+        # layer3.5
+        29, 19, 29,
+        # layer4.0
+        69, 17, 62,
+        # layer4.1
+        59, 18, 83,
+        # layer4.2
+        72, 47, 89
+    ]
     
-    for key in sample_keys:
-        weight = state_dict[key]
-        total_filters = weight.shape[0]
+    # تعداد کل فیلترها در ResNet50 استاندارد
+    original_filters = [
+        # layer1: 3 blocks
+        64, 64, 256,  # block 0
+        64, 64, 256,  # block 1
+        64, 64, 256,  # block 2
+        # layer2: 4 blocks
+        128, 128, 512,  # block 0
+        128, 128, 512,  # block 1
+        128, 128, 512,  # block 2
+        128, 128, 512,  # block 3
+        # layer3: 6 blocks
+        256, 256, 1024,  # block 0
+        256, 256, 1024,  # block 1
+        256, 256, 1024,  # block 2
+        256, 256, 1024,  # block 3
+        256, 256, 1024,  # block 4
+        256, 256, 1024,  # block 5
+        # layer4: 3 blocks
+        512, 512, 2048,  # block 0
+        512, 512, 2048,  # block 1
+        512, 512, 2048,  # block 2
+    ]
+    
+    print(f"تعداد ماسک‌های مورد نیاز: {len(original_filters)}")
+    print(f"تعداد فیلترهای pruned شده: {len(pruned_filters)}")
+    
+    # ساخت ماسک‌ها
+    for orig_filters, pruned_count in zip(original_filters, pruned_filters):
+        mask = torch.zeros(orig_filters)
+        # فرض می‌کنیم اولین فیلترها حفظ شدن
+        mask[:pruned_count] = 1
+        masks.append(mask)
         
-        # بررسی آیا فیلتر کامل حذف شده (همه وزن‌های آن صفر)
-        filters_all_zero = (weight.view(weight.shape[0], -1).abs().sum(dim=1) == 0).sum().item()
-        
-        # بررسی آیا وزن‌های individual صفر شدن
-        total_weights = weight.numel()
-        zero_weights = (weight == 0).sum().item()
-        sparsity = zero_weights / total_weights * 100
-        
-        print(f"\n  {key}:")
-        print(f"    - Shape: {list(weight.shape)}")
-        print(f"    - فیلترهای کاملاً صفر: {filters_all_zero}/{total_filters}")
-        print(f"    - Sparsity: {sparsity:.2f}%")
-        
-        if filters_all_zero > 0:
-            structured_pruning = True
-        if sparsity > 5:  # threshold برای تشخیص unstructured pruning
-            unstructured_pruning = True
-    
-    print(f"\n📊 نتیجه تحلیل:")
-    print(f"  - Structured Pruning (حذف فیلتر): {'✓' if structured_pruning else '✗'}")
-    print(f"  - Unstructured Pruning (صفر کردن وزن): {'✓' if unstructured_pruning else '✗'}")
-    
-    return structured_pruning, unstructured_pruning
+    return masks, pruned_filters, original_filters
 
-structured, unstructured = analyze_pruning_type(sparse_state_dict)
+masks, pruned_counts, original_counts = extract_masks_from_sparse_model(sparse_state_dict)
+
+print(f"\n✅ تعداد ماسک‌های ساخته شده: {len(masks)}")
+
+# نمایش چند نمونه
+print("\nنمونه ماسک‌ها:")
+for i in range(min(5, len(masks))):
+    print(f"  Mask {i}: {masks[i].shape}, فیلترهای باقی‌مانده: {int(masks[i].sum())}/{len(masks[i])}")
+
+# ===========================
+# 2. ساخت مدل Pruned
+# ===========================
 
 print("\n" + "="*70)
+print("ساخت مدل Pruned")
+print("="*70)
 
-if not structured:
-    print("⚠️  این checkpoint از Structured Pruning استفاده نکرده!")
-    print("⚠️  فیلترها حذف نشدن، فقط وزن‌ها sparse شدن.")
-    print("\n💡 دو راه‌حل داریم:")
-    print("\n1️⃣  استفاده از مدل عادی (بدون pruned architecture):")
-    print("   - مدل ResNet50 استاندارد")
-    print("   - فقط وزن‌های sparse لود میشن")
-    print("   - نیازی به ماسک نیست")
-    print("\n2️⃣  تبدیل به Structured Pruning:")
-    print("   - فیلترهایی که بیشتر صفر هستن رو حذف کنیم")
-    print("   - ماسک بسازیم و مدل pruned استفاده کنیم")
+try:
+    model_pruned = ResNet_50_pruned_hardfakevsreal(masks=masks)
+    print("✅ مدل pruned با موفقیت ساخته شد!")
     
-    response = input("\n❓ کدوم روش رو میخوای؟ (1 یا 2): ").strip()
+    # محاسبه تعداد پارامترها
+    total_params = sum(p.numel() for p in model_pruned.parameters())
+    print(f"✅ تعداد پارامترهای مدل pruned: {total_params:,}")
     
-    if response == "1":
-        print("\n" + "="*70)
-        print("روش 1: استفاده از مدل استاندارد با وزن‌های Sparse")
-        print("="*70)
-        
-        # استفاده از مدل عادی
-        from torchvision.models import resnet50
-        model = resnet50(pretrained=False)
-        
-        # تغییر fc برای binary classification
-        model.fc = nn.Linear(model.fc.in_features, 1)
-        
-        # لود وزن‌های sparse
-        missing, unexpected = model.load_state_dict(sparse_state_dict, strict=False)
-        print(f"✅ وزن‌های sparse لود شدند")
-        print(f"   - Missing keys: {len(missing)}")
-        print(f"   - Unexpected keys: {len(unexpected)}")
-        
-        # محاسبه sparsity
-        total_params = sum(p.numel() for p in model.parameters())
-        zero_params = sum((p == 0).sum().item() for p in model.parameters())
-        print(f"\n📊 آمار:")
-        print(f"   - تعداد کل پارامترها: {total_params:,}")
-        print(f"   - پارامترهای صفر: {zero_params:,}")
-        print(f"   - Sparsity: {zero_params/total_params*100:.2f}%")
-        
-        # تست
-        model.eval()
-        with torch.no_grad():
-            dummy_input = torch.randn(2, 3, 224, 224)
-            output = model(dummy_input)
-            print(f"\n✅ تست موفق! شکل خروجی: {output.shape}")
-        
-        # ذخیره
-        save_path = '/kaggle/working/resnet50_sparse_weights.pt'
-        torch.save({
-            'model_state_dict': model.state_dict(),
-            'total_params': total_params,
-            'sparsity': zero_params/total_params,
-            'model_type': 'standard_resnet50_with_sparse_weights'
-        }, save_path)
-        
-        import os
-        file_size_mb = os.path.getsize(save_path) / (1024 * 1024)
-        print(f"\n✅ ذخیره شد در: {save_path}")
-        print(f"✅ حجم فایل: {file_size_mb:.2f} MB")
-        
-    else:  # response == "2"
-        print("\n" + "="*70)
-        print("روش 2: تبدیل به Structured Pruning")
-        print("="*70)
-        
-        def convert_to_structured_pruning(state_dict, threshold=0.7):
-            """
-            تبدیل unstructured به structured pruning
-            فیلترهایی که sparsity بیشتر از threshold دارن رو حذف میکنیم
-            """
-            masks = []
-            pruned_filters = []
-            original_filters = []
-            
-            resnet50_structure = {
-                'layer1': {'blocks': 3, 'filters': [64, 64, 256]},
-                'layer2': {'blocks': 4, 'filters': [128, 128, 512]},
-                'layer3': {'blocks': 6, 'filters': [256, 256, 1024]},
-                'layer4': {'blocks': 3, 'filters': [512, 512, 2048]}
-            }
-            
-            print(f"\n🔍 تبدیل با threshold={threshold} (فیلترهایی با >{threshold*100}% sparsity حذف میشن)")
-            
-            for layer_name in ['layer1', 'layer2', 'layer3', 'layer4']:
-                num_blocks = resnet50_structure[layer_name]['blocks']
-                standard_filters = resnet50_structure[layer_name]['filters']
+except Exception as e:
+    print(f"❌ خطا در ساخت مدل: {e}")
+    print("\nممکنه نیاز باشه ماسک‌ها رو دستی تنظیم کنیم...")
+
+# ===========================
+# 3. لود وزن‌ها در مدل Pruned
+# ===========================
+
+print("\n" + "="*70)
+print("لود وزن‌ها در مدل Pruned")
+print("="*70)
+
+def load_pruned_weights(model_pruned, sparse_state_dict, masks):
+    """
+    لود وزن‌های sparse در مدل pruned
+    باید وزن‌ها رو از شکل کامل به شکل pruned تبدیل کنیم
+    """
+    pruned_state_dict = {}
+    
+    # conv1 و bn1 (قبل از layer1)
+    if 'conv1.weight' in sparse_state_dict:
+        pruned_state_dict['conv1.weight'] = sparse_state_dict['conv1.weight']
+    if 'bn1.weight' in sparse_state_dict:
+        pruned_state_dict['bn1.weight'] = sparse_state_dict['bn1.weight']
+        pruned_state_dict['bn1.bias'] = sparse_state_dict['bn1.bias']
+        pruned_state_dict['bn1.running_mean'] = sparse_state_dict['bn1.running_mean']
+        pruned_state_dict['bn1.running_var'] = sparse_state_dict['bn1.running_var']
+        pruned_state_dict['bn1.num_batches_tracked'] = sparse_state_dict['bn1.num_batches_tracked']
+    
+    # fc (لایه آخر)
+    if 'fc.weight' in sparse_state_dict:
+        pruned_state_dict['fc.weight'] = sparse_state_dict['fc.weight']
+        pruned_state_dict['fc.bias'] = sparse_state_dict['fc.bias']
+    
+    mask_idx = 0
+    layer_configs = [
+        ('layer1', 3),  # 3 blocks
+        ('layer2', 4),  # 4 blocks
+        ('layer3', 6),  # 6 blocks
+        ('layer4', 3),  # 3 blocks
+    ]
+    
+    for layer_name, num_blocks in layer_configs:
+        for block_idx in range(num_blocks):
+            for conv_idx in range(1, 4):  # conv1, conv2, conv3
+                # کلیدهای sparse
+                sparse_conv_key = f'{layer_name}.{block_idx}.conv{conv_idx}.weight'
+                sparse_bn_key = f'{layer_name}.{block_idx}.bn{conv_idx}.weight'
                 
-                for block_idx in range(num_blocks):
-                    for conv_idx in range(1, 4):
-                        conv_key = f'{layer_name}.{block_idx}.conv{conv_idx}.weight'
-                        
-                        if conv_key in state_dict:
-                            weight = state_dict[conv_key]
-                            num_filters = weight.shape[0]
-                            original_count = standard_filters[conv_idx - 1]
-                            
-                            # محاسبه sparsity هر فیلتر
-                            filter_sparsity = []
-                            for i in range(num_filters):
-                                filter_weights = weight[i].flatten()
-                                zeros = (filter_weights == 0).sum().item()
-                                sparsity = zeros / filter_weights.numel()
-                                filter_sparsity.append(sparsity)
-                            
-                            # تعیین فیلترهای باقی‌مانده (sparsity < threshold)
-                            active_filters = [i for i, s in enumerate(filter_sparsity) if s < threshold]
-                            pruned_count = len(active_filters)
-                            
-                            # ساخت ماسک
-                            mask = torch.zeros(original_count)
-                            for i in active_filters:
-                                if i < original_count:
-                                    mask[i] = 1
-                            
-                            masks.append(mask)
-                            pruned_filters.append(pruned_count)
-                            original_filters.append(original_count)
-                            
-                            avg_sparsity = sum(filter_sparsity) / len(filter_sparsity) * 100
-                            print(f"  ✓ {conv_key}: {pruned_count}/{original_count} ({avg_sparsity:.1f}% avg sparsity)")
-            
-            return masks, pruned_filters, original_filters
-        
-        masks, pruned_counts, original_counts = convert_to_structured_pruning(sparse_state_dict, threshold=0.7)
-        
-        print(f"\n✅ تعداد ماسک‌ها: {len(masks)}")
-        print(f"📊 نرخ حذف کلی: {(1 - sum(pruned_counts)/sum(original_counts))*100:.2f}%")
-        
-        # ادامه با ساخت مدل pruned...
-        print("\n💡 حالا میتونی از این ماسک‌ها برای ساخت مدل pruned استفاده کنی")
-
-else:
-    print("✅ این checkpoint از Structured Pruning استفاده کرده!")
-    
-    def extract_structured_masks(state_dict):
-        """استخراج ماسک‌ها از structured pruning"""
-        masks = []
-        pruned_filters = []
-        original_filters = []
-        
-        resnet50_structure = {
-            'layer1': {'blocks': 3, 'filters': [64, 64, 256]},
-            'layer2': {'blocks': 4, 'filters': [128, 128, 512]},
-            'layer3': {'blocks': 6, 'filters': [256, 256, 1024]},
-            'layer4': {'blocks': 3, 'filters': [512, 512, 2048]}
-        }
-        
-        for layer_name in ['layer1', 'layer2', 'layer3', 'layer4']:
-            num_blocks = resnet50_structure[layer_name]['blocks']
-            standard_filters = resnet50_structure[layer_name]['filters']
-            
-            for block_idx in range(num_blocks):
-                for conv_idx in range(1, 4):
-                    conv_key = f'{layer_name}.{block_idx}.conv{conv_idx}.weight'
+                if sparse_conv_key in sparse_state_dict:
+                    sparse_weight = sparse_state_dict[sparse_conv_key]
+                    mask = masks[mask_idx]
                     
-                    if conv_key in state_dict:
-                        weight = state_dict[conv_key]
-                        
-                        # شمارش فیلترهای non-zero
-                        filter_norms = weight.view(weight.shape[0], -1).abs().sum(dim=1)
-                        active_filters_indices = (filter_norms > 0).nonzero(as_tuple=True)[0]
-                        pruned_count = len(active_filters_indices)
-                        original_count = standard_filters[conv_idx - 1]
-                        
-                        # ساخت ماسک
-                        mask = torch.zeros(original_count)
-                        mask[active_filters_indices] = 1
-                        
-                        masks.append(mask)
-                        pruned_filters.append(pruned_count)
-                        original_filters.append(original_count)
-                        
-                        print(f"  ✓ {conv_key}: {pruned_count}/{original_count} فیلتر")
+                    # استخراج فیلترهای باقی‌مانده
+                    active_filters = (mask == 1).nonzero(as_tuple=True)[0]
+                    
+                    # استخراج وزن‌های فیلترهای فعال
+                    pruned_weight = sparse_weight[active_filters]
+                    
+                    # اگر conv1 یا conv2 بود، باید input channels هم prune بشه
+                    if conv_idx > 1 and mask_idx > 0:
+                        prev_mask = masks[mask_idx - 1]
+                        active_in_channels = (prev_mask == 1).nonzero(as_tuple=True)[0]
+                        pruned_weight = pruned_weight[:, active_in_channels]
+                    
+                    pruned_state_dict[sparse_conv_key] = pruned_weight
+                    
+                    # BatchNorm
+                    if sparse_bn_key in sparse_state_dict:
+                        pruned_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.weight'] = \
+                            sparse_state_dict[sparse_bn_key][active_filters]
+                        pruned_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.bias'] = \
+                            sparse_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.bias'][active_filters]
+                        pruned_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.running_mean'] = \
+                            sparse_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.running_mean'][active_filters]
+                        pruned_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.running_var'] = \
+                            sparse_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.running_var'][active_filters]
+                        pruned_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.num_batches_tracked'] = \
+                            sparse_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.num_batches_tracked']
+                    
+                    mask_idx += 1
+            
+            # downsample (اگر وجود داشته باشه)
+            downsample_conv_key = f'{layer_name}.{block_idx}.downsample.0.weight'
+            if downsample_conv_key in sparse_state_dict:
+                pruned_state_dict[downsample_conv_key] = sparse_state_dict[downsample_conv_key]
+                pruned_state_dict[f'{layer_name}.{block_idx}.downsample.1.weight'] = \
+                    sparse_state_dict[f'{layer_name}.{block_idx}.downsample.1.weight']
+                pruned_state_dict[f'{layer_name}.{block_idx}.downsample.1.bias'] = \
+                    sparse_state_dict[f'{layer_name}.{block_idx}.downsample.1.bias']
+                pruned_state_dict[f'{layer_name}.{block_idx}.downsample.1.running_mean'] = \
+                    sparse_state_dict[f'{layer_name}.{block_idx}.downsample.1.running_mean']
+                pruned_state_dict[f'{layer_name}.{block_idx}.downsample.1.running_var'] = \
+                    sparse_state_dict[f'{layer_name}.{block_idx}.downsample.1.running_var']
+                pruned_state_dict[f'{layer_name}.{block_idx}.downsample.1.num_batches_tracked'] = \
+                    sparse_state_dict[f'{layer_name}.{block_idx}.downsample.1.num_batches_tracked']
+    
+    return pruned_state_dict
+
+try:
+    pruned_weights = load_pruned_weights(model_pruned, sparse_state_dict, masks)
+    print(f"✅ وزن‌های pruned آماده شد: {len(pruned_weights)} کلید")
+    
+    # لود در مدل
+    missing, unexpected = model_pruned.load_state_dict(pruned_weights, strict=False)
+    print(f"✅ وزن‌ها لود شدند")
+    print(f"   - Missing keys: {len(missing)}")
+    print(f"   - Unexpected keys: {len(unexpected)}")
+    
+    # تست
+    model_pruned.eval()
+    with torch.no_grad():
+        dummy_input = torch.randn(2, 3, 224, 224)
+        output, features = model_pruned(dummy_input)
+        print(f"\n✅ تست موفق!")
+        print(f"   - شکل خروجی: {output.shape}")
+        print(f"   - تعداد feature maps: {len(features)}")
+    
+    # ===========================
+    # 4. ذخیره مدل Pruned
+    # ===========================
+    
+    print("\n" + "="*70)
+    print("ذخیره مدل Pruned")
+    print("="*70)
+    
+    # مسیر ذخیره‌سازی
+    save_path = '/kaggle/working/resnet50_pruned_model.pt'
+    
+    # ذخیره کامل مدل (شامل معماری + وزن‌ها)
+    checkpoint_to_save = {
+        'model_state_dict': model_pruned.state_dict(),
+        'masks': masks,
+        'pruned_counts': pruned_counts,
+        'original_counts': original_counts,
+        'total_params': total_params,
+        'model_architecture': 'ResNet_50_pruned_hardfakevsreal'
+    }
+    
+    torch.save(checkpoint_to_save, save_path)
+    print(f"✅ مدل با موفقیت ذخیره شد در: {save_path}")
+    
+    # محاسبه حجم فایل
+    import os
+    file_size_mb = os.path.getsize(save_path) / (1024 * 1024)
+    print(f"✅ حجم فایل: {file_size_mb:.2f} MB")
+    
+    # ذخیره فقط وزن‌ها (فایل سبک‌تر)
+    save_path_weights = '/kaggle/working/resnet50_pruned_weights_only.pt'
+    torch.save(model_pruned.state_dict(), save_path_weights)
+    file_size_weights_mb = os.path.getsize(save_path_weights) / (1024 * 1024)
+    print(f"✅ فقط وزن‌ها ذخیره شد در: {save_path_weights}")
+    print(f"✅ حجم فایل (فقط وزن‌ها): {file_size_weights_mb:.2f} MB")
+    
+    # نمایش اطلاعات ذخیره شده
+    print("\n📦 اطلاعات ذخیره شده:")
+    print(f"   - تعداد پارامترها: {total_params:,}")
+    print(f"   - تعداد ماسک‌ها: {len(masks)}")
+    print(f"   - معماری: ResNet_50_pruned_hardfakevsreal")
+    
+    print("\n💡 نحوه لود کردن:")
+    print("# لود کامل (با ماسک‌ها)")
+    print(f"checkpoint = torch.load('{save_path}')")
+    print("model = ResNet_50_pruned_hardfakevsreal(masks=checkpoint['masks'])")
+    print("model.load_state_dict(checkpoint['model_state_dict'])")
+    print("\n# یا فقط لود وزن‌ها (اگر ماسک‌ها رو دارید)")
+    print("model = ResNet_50_pruned_hardfakevsreal(masks=masks)")
+    print(f"model.load_state_dict(torch.load('{save_path_weights}'))")
         
-        return masks, pruned_filters, original_filters
-    
-    masks, pruned_counts, original_counts = extract_structured_masks(sparse_state_dict)
-    
-    # ادامه با ساخت و لود مدل...
-    print(f"\n✅ ماسک‌ها استخراج شدند!")
+except Exception as e:
+    print(f"❌ خطا: {e}")
+    import traceback
+    traceback.print_exc()
 
 print("\n" + "="*70)
