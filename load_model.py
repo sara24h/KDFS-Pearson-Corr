@@ -3,12 +3,9 @@ import torch.nn as nn
 import sys
 sys.path.append('/kaggle/working')
 
-# وارد کردن کد مدل pruned شما
-from resnet_pruned import ResNet_50_pruned_hardfakevsreal
+from model.pruned_model  import ResNet_50_pruned_hardfakevsreal
 
-# ===========================
-# 1. استخراج ماسک‌ها از state_dict
-# ===========================
+
 
 checkpoint_path = '/kaggle/input/kdfs-10k-pearson-19-shahrivar-314-epochs/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt'
 
