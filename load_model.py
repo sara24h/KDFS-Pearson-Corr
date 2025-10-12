@@ -1,255 +1,216 @@
 import torch
-import torch.nn as nn
-import sys
-sys.path.append('/kaggle/working')
-
-from model.pruned_model.ResNet_pruned  import ResNet_50_pruned_hardfakevsreal
-
-
-
-checkpoint_path = '/kaggle/input/kdfs-10k-pearson-19-shahrivar-314-epochs/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt'
-
-print("="*70)
-print("استخراج ماسک‌ها از مدل Sparse")
-print("="*70)
-
-checkpoint = torch.load(checkpoint_path, map_location='cpu')
-sparse_state_dict = checkpoint['student']
-
-# استخراج تعداد فیلترهای باقی‌مانده از وزن‌های conv
-def extract_masks_from_sparse_model(state_dict):
-    """
-    استخراج ماسک‌ها بر اساس تعداد فیلترهای باقی‌مانده
-    از خروجی load_model.py میدونیم که مثلاً conv1 از 64 به 20 فیلتر رسیده
-    """
-    masks = []
-    
-    # تعریف ساختار ResNet50 Bottleneck
-    # layer1: 3 blocks × 3 convs = 9 masks
-    # layer2: 4 blocks × 3 convs = 12 masks
-    # layer3: 6 blocks × 3 convs = 18 masks
-    # layer4: 3 blocks × 3 convs = 9 masks
-    # جمع: 48 masks
-    
-    # از خروجی load_model.py میدونیم تعداد فیلترهای pruned شده:
-    # این اعداد رو از "Pruned weight shape" در خروجی استخراج کردیم
-    pruned_filters = [
-        # layer1.0
-        20, 23, 94,
-        # layer1.1
-        13, 27, 91,
-        # layer1.2
-        27, 24, 82,
-        # layer2.0
-        44, 42, 92,
-        # layer2.1
-        47, 29, 94,
-        # layer2.2
-        37, 28, 71,
-        # layer2.3
-        43, 34, 56,
-        # layer3.0
-        65, 42, 66,
-        # layer3.1
-        63, 31, 66,
-        # layer3.2
-        59, 17, 60,
-        # layer3.3
-        40, 19, 40,
-        # layer3.4
-        30, 10, 31,
-        # layer3.5
-        29, 19, 29,
-        # layer4.0
-        69, 17, 62,
-        # layer4.1
-        59, 18, 83,
-        # layer4.2
-        72, 47, 89
-    ]
-    
-    # تعداد کل فیلترها در ResNet50 استاندارد
-    original_filters = [
-        # layer1: 3 blocks
-        64, 64, 256,  # block 0
-        64, 64, 256,  # block 1
-        64, 64, 256,  # block 2
-        # layer2: 4 blocks
-        128, 128, 512,  # block 0
-        128, 128, 512,  # block 1
-        128, 128, 512,  # block 2
-        128, 128, 512,  # block 3
-        # layer3: 6 blocks
-        256, 256, 1024,  # block 0
-        256, 256, 1024,  # block 1
-        256, 256, 1024,  # block 2
-        256, 256, 1024,  # block 3
-        256, 256, 1024,  # block 4
-        256, 256, 1024,  # block 5
-        # layer4: 3 blocks
-        512, 512, 2048,  # block 0
-        512, 512, 2048,  # block 1
-        512, 512, 2048,  # block 2
-    ]
-    
-    print(f"تعداد ماسک‌های مورد نیاز: {len(original_filters)}")
-    print(f"تعداد فیلترهای pruned شده: {len(pruned_filters)}")
-    
-    # ساخت ماسک‌ها
-    for orig_filters, pruned_count in zip(original_filters, pruned_filters):
-        mask = torch.zeros(orig_filters)
-        # فرض می‌کنیم اولین فیلترها حفظ شدن
-        mask[:pruned_count] = 1
-        masks.append(mask)
-        
-    return masks, pruned_filters, original_filters
-
-masks, pruned_counts, original_counts = extract_masks_from_sparse_model(sparse_state_dict)
-
-print(f"\n✅ تعداد ماسک‌های ساخته شده: {len(masks)}")
-
-# نمایش چند نمونه
-print("\nنمونه ماسک‌ها:")
-for i in range(min(5, len(masks))):
-    print(f"  Mask {i}: {masks[i].shape}, فیلترهای باقی‌مانده: {int(masks[i].sum())}/{len(masks[i])}")
+import os
 
 # ===========================
-# 2. ساخت مدل Pruned
+# ذخیره مدل Pruned
 # ===========================
 
 print("\n" + "="*70)
-print("ساخت مدل Pruned")
+print("ذخیره مدل Pruned")
 print("="*70)
 
-try:
-    model_pruned = ResNet_50_pruned_hardfakevsreal(masks=masks)
-    print("✅ مدل pruned با موفقیت ساخته شد!")
-    
-    # محاسبه تعداد پارامترها
-    total_params = sum(p.numel() for p in model_pruned.parameters())
-    print(f"✅ تعداد پارامترهای مدل pruned: {total_params:,}")
-    
-except Exception as e:
-    print(f"❌ خطا در ساخت مدل: {e}")
-    print("\nممکنه نیاز باشه ماسک‌ها رو دستی تنظیم کنیم...")
+# مسیر ذخیره
+save_dir = '/kaggle/working/saved_models'
+os.makedirs(save_dir, exist_ok=True)
+
+# 1. ذخیره کامل (مدل + ماسک‌ها + اطلاعات اضافی)
+full_save_path = os.path.join(save_dir, 'resnet50_pruned_full.pth')
+
+torch.save({
+    'model_state_dict': model_pruned.state_dict(),
+    'masks': masks,
+    'pruned_filters': pruned_counts,
+    'original_filters': original_counts,
+    'architecture': 'ResNet50_Bottleneck_pruned',
+    'num_classes': 1,
+    'num_params': sum(p.numel() for p in model_pruned.parameters()),
+    'best_prec1': checkpoint.get('best_prec1_after_finetune', None),
+    'info': {
+        'pruning_method': 'filter_pruning',
+        'total_params': sum(p.numel() for p in model_pruned.parameters()),
+        'compression_ratio': 23.51e6 / sum(p.numel() for p in model_pruned.parameters()),
+        'params_reduction_percent': (1 - sum(p.numel() for p in model_pruned.parameters()) / 23.51e6) * 100
+    }
+}, full_save_path)
+
+print(f"✅ مدل کامل ذخیره شد: {full_save_path}")
+print(f"   حجم فایل: {os.path.getsize(full_save_path) / (1024**2):.2f} MB")
+
+# 2. ذخیره فقط وزن‌ها (برای inference سبک‌تر)
+weights_only_path = os.path.join(save_dir, 'resnet50_pruned_weights.pth')
+
+torch.save(model_pruned.state_dict(), weights_only_path)
+
+print(f"✅ فقط وزن‌ها ذخیره شد: {weights_only_path}")
+print(f"   حجم فایل: {os.path.getsize(weights_only_path) / (1024**2):.2f} MB")
+
+# 3. ذخیره ماسک‌ها به صورت جداگانه
+masks_path = os.path.join(save_dir, 'resnet50_masks.pth')
+
+torch.save({
+    'masks': masks,
+    'pruned_filters': pruned_counts,
+    'original_filters': original_counts
+}, masks_path)
+
+print(f"✅ ماسک‌ها ذخیره شدند: {masks_path}")
+print(f"   حجم فایل: {os.path.getsize(masks_path) / (1024):.2f} KB")
 
 # ===========================
-# 3. لود وزن‌ها در مدل Pruned
+# توابع لود کردن
 # ===========================
 
 print("\n" + "="*70)
-print("لود وزن‌ها در مدل Pruned")
+print("توابع برای لود کردن مدل ذخیره شده")
 print("="*70)
 
-def load_pruned_weights(model_pruned, sparse_state_dict, masks):
+def load_full_pruned_model(checkpoint_path):
     """
-    لود وزن‌های sparse در مدل pruned
-    باید وزن‌ها رو از شکل کامل به شکل pruned تبدیل کنیم
+    لود کامل مدل pruned (با ماسک‌ها)
+    
+    Args:
+        checkpoint_path: مسیر فایل ذخیره شده
+    
+    Returns:
+        model: مدل pruned لود شده
+        info: اطلاعات اضافی
     """
-    pruned_state_dict = {}
+    print(f"در حال لود مدل از: {checkpoint_path}")
     
-    # conv1 و bn1 (قبل از layer1)
-    if 'conv1.weight' in sparse_state_dict:
-        pruned_state_dict['conv1.weight'] = sparse_state_dict['conv1.weight']
-    if 'bn1.weight' in sparse_state_dict:
-        pruned_state_dict['bn1.weight'] = sparse_state_dict['bn1.weight']
-        pruned_state_dict['bn1.bias'] = sparse_state_dict['bn1.bias']
-        pruned_state_dict['bn1.running_mean'] = sparse_state_dict['bn1.running_mean']
-        pruned_state_dict['bn1.running_var'] = sparse_state_dict['bn1.running_var']
-        pruned_state_dict['bn1.num_batches_tracked'] = sparse_state_dict['bn1.num_batches_tracked']
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
     
-    # fc (لایه آخر)
-    if 'fc.weight' in sparse_state_dict:
-        pruned_state_dict['fc.weight'] = sparse_state_dict['fc.weight']
-        pruned_state_dict['fc.bias'] = sparse_state_dict['fc.bias']
+    # ساخت مدل
+    from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
+    masks = checkpoint['masks']
+    model = ResNet_50_pruned_hardfakevsreal(masks=masks)
     
-    mask_idx = 0
-    layer_configs = [
-        ('layer1', 3),  # 3 blocks
-        ('layer2', 4),  # 4 blocks
-        ('layer3', 6),  # 6 blocks
-        ('layer4', 3),  # 3 blocks
-    ]
+    # لود وزن‌ها
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
     
-    for layer_name, num_blocks in layer_configs:
-        for block_idx in range(num_blocks):
-            for conv_idx in range(1, 4):  # conv1, conv2, conv3
-                # کلیدهای sparse
-                sparse_conv_key = f'{layer_name}.{block_idx}.conv{conv_idx}.weight'
-                sparse_bn_key = f'{layer_name}.{block_idx}.bn{conv_idx}.weight'
-                
-                if sparse_conv_key in sparse_state_dict:
-                    sparse_weight = sparse_state_dict[sparse_conv_key]
-                    mask = masks[mask_idx]
-                    
-                    # استخراج فیلترهای باقی‌مانده
-                    active_filters = (mask == 1).nonzero(as_tuple=True)[0]
-                    
-                    # استخراج وزن‌های فیلترهای فعال
-                    pruned_weight = sparse_weight[active_filters]
-                    
-                    # اگر conv1 یا conv2 بود، باید input channels هم prune بشه
-                    if conv_idx > 1 and mask_idx > 0:
-                        prev_mask = masks[mask_idx - 1]
-                        active_in_channels = (prev_mask == 1).nonzero(as_tuple=True)[0]
-                        pruned_weight = pruned_weight[:, active_in_channels]
-                    
-                    pruned_state_dict[sparse_conv_key] = pruned_weight
-                    
-                    # BatchNorm
-                    if sparse_bn_key in sparse_state_dict:
-                        pruned_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.weight'] = \
-                            sparse_state_dict[sparse_bn_key][active_filters]
-                        pruned_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.bias'] = \
-                            sparse_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.bias'][active_filters]
-                        pruned_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.running_mean'] = \
-                            sparse_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.running_mean'][active_filters]
-                        pruned_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.running_var'] = \
-                            sparse_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.running_var'][active_filters]
-                        pruned_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.num_batches_tracked'] = \
-                            sparse_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.num_batches_tracked']
-                    
-                    mask_idx += 1
-            
-            # downsample (اگر وجود داشته باشه)
-            downsample_conv_key = f'{layer_name}.{block_idx}.downsample.0.weight'
-            if downsample_conv_key in sparse_state_dict:
-                pruned_state_dict[downsample_conv_key] = sparse_state_dict[downsample_conv_key]
-                pruned_state_dict[f'{layer_name}.{block_idx}.downsample.1.weight'] = \
-                    sparse_state_dict[f'{layer_name}.{block_idx}.downsample.1.weight']
-                pruned_state_dict[f'{layer_name}.{block_idx}.downsample.1.bias'] = \
-                    sparse_state_dict[f'{layer_name}.{block_idx}.downsample.1.bias']
-                pruned_state_dict[f'{layer_name}.{block_idx}.downsample.1.running_mean'] = \
-                    sparse_state_dict[f'{layer_name}.{block_idx}.downsample.1.running_mean']
-                pruned_state_dict[f'{layer_name}.{block_idx}.downsample.1.running_var'] = \
-                    sparse_state_dict[f'{layer_name}.{block_idx}.downsample.1.running_var']
-                pruned_state_dict[f'{layer_name}.{block_idx}.downsample.1.num_batches_tracked'] = \
-                    sparse_state_dict[f'{layer_name}.{block_idx}.downsample.1.num_batches_tracked']
+    print(f"✅ مدل با موفقیت لود شد!")
+    print(f"   - تعداد پارامترها: {checkpoint['num_params']:,}")
+    if 'best_prec1' in checkpoint and checkpoint['best_prec1'] is not None:
+        print(f"   - بهترین دقت: {checkpoint['best_prec1']:.2f}%")
     
-    return pruned_state_dict
+    return model, checkpoint.get('info', {})
+
+def load_weights_only(weights_path, masks_path):
+    """
+    لود فقط وزن‌ها (نیاز به فایل ماسک‌ها داره)
+    
+    Args:
+        weights_path: مسیر فایل وزن‌ها
+        masks_path: مسیر فایل ماسک‌ها
+    
+    Returns:
+        model: مدل pruned لود شده
+    """
+    print(f"در حال لود وزن‌ها از: {weights_path}")
+    print(f"در حال لود ماسک‌ها از: {masks_path}")
+    
+    # لود ماسک‌ها
+    masks_data = torch.load(masks_path, map_location='cpu')
+    masks = masks_data['masks']
+    
+    # ساخت مدل
+    from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
+    model = ResNet_50_pruned_hardfakevsreal(masks=masks)
+    
+    # لود وزن‌ها
+    state_dict = torch.load(weights_path, map_location='cpu')
+    model.load_state_dict(state_dict)
+    model.eval()
+    
+    print(f"✅ مدل با موفقیت لود شد!")
+    
+    return model
+
+# نمایش مثال استفاده
+print("\nنحوه استفاده:")
+print("-" * 70)
+print("""
+# روش 1: لود کامل
+model, info = load_full_pruned_model('/kaggle/working/saved_models/resnet50_pruned_full.pth')
+print(f"نسبت فشرده‌سازی: {info['compression_ratio']:.2f}x")
+
+# روش 2: لود فقط وزن‌ها
+model = load_weights_only(
+    '/kaggle/working/saved_models/resnet50_pruned_weights.pth',
+    '/kaggle/working/saved_models/resnet50_masks.pth'
+)
+
+# استفاده برای پیش‌بینی
+from PIL import Image
+from torchvision import transforms
+
+transform = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+image = Image.open('test.jpg').convert('RGB')
+image_tensor = transform(image).unsqueeze(0)
+
+with torch.no_grad():
+    output, _ = model(image_tensor)
+    prob = torch.sigmoid(output).item()
+    prediction = "Fake" if prob > 0.5 else "Real"
+    print(f"Prediction: {prediction} (probability: {prob:.4f})")
+""")
+
+# ===========================
+# تست لود مجدد
+# ===========================
+
+print("\n" + "="*70)
+print("تست لود مجدد مدل")
+print("="*70)
 
 try:
-    pruned_weights = load_pruned_weights(model_pruned, sparse_state_dict, masks)
-    print(f"✅ وزن‌های pruned آماده شد: {len(pruned_weights)} کلید")
+    # تست لود مدل کامل
+    loaded_model, info = load_full_pruned_model(full_save_path)
     
-    # لود در مدل
-    missing, unexpected = model_pruned.load_state_dict(pruned_weights, strict=False)
-    print(f"✅ وزن‌ها لود شدند")
-    print(f"   - Missing keys: {len(missing)}")
-    print(f"   - Unexpected keys: {len(unexpected)}")
-    
-    # تست
-    model_pruned.eval()
+    # تست با ورودی نمونه
     with torch.no_grad():
-        dummy_input = torch.randn(2, 3, 224, 224)
-        output, features = model_pruned(dummy_input)
-        print(f"\n✅ تست موفق!")
-        print(f"   - شکل خروجی: {output.shape}")
-        print(f"   - تعداد feature maps: {len(features)}")
+        test_input = torch.randn(1, 3, 224, 224)
         
+        # خروجی مدل اصلی
+        output_original, _ = model_pruned(test_input)
+        
+        # خروجی مدل لود شده
+        output_loaded, _ = loaded_model(test_input)
+        
+        # مقایسه
+        diff = (output_original - output_loaded).abs().item()
+        
+        print(f"\n✅ تست لود موفق!")
+        print(f"   - خروجی مدل اصلی: {output_original.item():.6f}")
+        print(f"   - خروجی مدل لود شده: {output_loaded.item():.6f}")
+        print(f"   - تفاوت: {diff:.8f}")
+        
+        if diff < 1e-6:
+            print(f"   ✅ خروجی‌ها دقیقاً یکسان هستن!")
+        else:
+            print(f"   ⚠️ تفاوت جزئی وجود داره (قابل قبول)")
+            
+    print(f"\n📊 اطلاعات مدل:")
+    print(f"   - نسبت فشرده‌سازی: {info['compression_ratio']:.2f}x")
+    print(f"   - کاهش پارامترها: {info['params_reduction_percent']:.2f}%")
+    
 except Exception as e:
-    print(f"❌ خطا: {e}")
+    print(f"❌ خطا در تست: {e}")
     import traceback
     traceback.print_exc()
 
 print("\n" + "="*70)
+print("✅ همه چی آماده است!")
+print("="*70)
+print(f"\nفایل‌های ذخیره شده:")
+print(f"  1. {full_save_path}")
+print(f"  2. {weights_only_path}")
+print(f"  3. {masks_path}")
+print("\n🎯 می‌تونی این فایل‌ها رو دانلود کنی و در هر جا استفاده کنی!")
+print("="*70)
