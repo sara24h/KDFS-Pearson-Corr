@@ -3,7 +3,7 @@ import torch.nn as nn
 import sys
 sys.path.append('/kaggle/working')
 
-from model.pruned_model  import ResNet_50_pruned_hardfakevsreal
+from model.pruned_model.ResNet_pruned  import ResNet_50_pruned_hardfakevsreal
 
 
 
