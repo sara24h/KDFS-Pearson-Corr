@@ -15,87 +15,64 @@ checkpoint = torch.load(checkpoint_path, map_location='cpu')
 sparse_state_dict = checkpoint['student']
 
 def extract_masks_from_sparse_model(state_dict):
- 
     masks = []
-    
-    # تعریف ساختار ResNet50 Bottleneck
-    # layer1: 3 blocks × 3 convs = 9 masks
-    # layer2: 4 blocks × 3 convs = 12 masks
-    # layer3: 6 blocks × 3 convs = 18 masks
-    # layer4: 3 blocks × 3 convs = 9 masks
-    # جمع: 48 masks
-    
-    # از خروجی load_model.py میدونیم تعداد فیلترهای pruned شده:
-    # این اعداد رو از "Pruned weight shape" در خروجی استخراج کردیم
-    pruned_filters = [
-        # layer1.0
-        20, 23, 94,
-        # layer1.1
-        13, 27, 91,
-        # layer1.2
-        27, 24, 82,
-        # layer2.0
-        44, 42, 92,
-        # layer2.1
-        47, 29, 94,
-        # layer2.2
-        37, 28, 71,
-        # layer2.3
-        43, 34, 56,
-        # layer3.0
-        65, 42, 66,
-        # layer3.1
-        63, 31, 66,
-        # layer3.2
-        59, 17, 60,
-        # layer3.3
-        40, 19, 40,
-        # layer3.4
-        30, 10, 31,
-        # layer3.5
-        29, 19, 29,
-        # layer4.0
-        69, 17, 62,
-        # layer4.1
-        59, 18, 83,
-        # layer4.2
-        72, 47, 89
-    ]
     
     # تعداد کل فیلترها در ResNet50 استاندارد
     original_filters = [
-        # layer1: 3 blocks
-        64, 64, 256,  # block 0
+        64, 64, 256,  # layer1: block 0
         64, 64, 256,  # block 1
         64, 64, 256,  # block 2
-        # layer2: 4 blocks
-        128, 128, 512,  # block 0
+        128, 128, 512,  # layer2: block 0
         128, 128, 512,  # block 1
         128, 128, 512,  # block 2
         128, 128, 512,  # block 3
-        # layer3: 6 blocks
-        256, 256, 1024,  # block 0
+        256, 256, 1024,  # layer3: block 0
         256, 256, 1024,  # block 1
         256, 256, 1024,  # block 2
         256, 256, 1024,  # block 3
         256, 256, 1024,  # block 4
         256, 256, 1024,  # block 5
-        # layer4: 3 blocks
-        512, 512, 2048,  # block 0
+        512, 512, 2048,  # layer4: block 0
         512, 512, 2048,  # block 1
         512, 512, 2048,  # block 2
     ]
     
-    print(f"تعداد ماسک‌های مورد نیاز: {len(original_filters)}")
-    print(f"تعداد فیلترهای pruned شده: {len(pruned_filters)}")
+    # تعریف ساختار لایه‌ها
+    layer_configs = [
+        ('layer1', 3),  # 3 blocks
+        ('layer2', 4),  # 4 blocks
+        ('layer3', 6),  # 6 blocks
+        ('layer4', 3),  # 3 blocks
+    ]
     
-    # ساخت ماسک‌ها
-    for orig_filters, pruned_count in zip(original_filters, pruned_filters):
-        mask = torch.zeros(orig_filters)
-        # فرض می‌کنیم اولین فیلترها حفظ شدن
-        mask[:pruned_count] = 1
-        masks.append(mask)
-        
+    pruned_filters = []
+    mask_idx = 0
+    
+    # استخراج تعداد فیلترهای پرون‌شده از state_dict
+    for layer_name, num_blocks in layer_configs:
+        for block_idx in range(num_blocks):
+            for conv_idx in range(1, 4):  # conv1, conv2, conv3
+                conv_key = f'{layer_name}.{block_idx}.conv{conv_idx}.weight'
+                if conv_key in state_dict:
+                    weight = state_dict[conv_key]
+                    num_filters = weight.shape[0]  # تعداد فیلترهای خروجی
+                    pruned_filters.append(num_filters)
+                    
+                    # ساخت ماسک
+                    mask = torch.zeros(original_filters[mask_idx])
+                    mask[:num_filters] = 1
+                    masks.append(mask)
+                    mask_idx += 1
+                else:
+                    print(f"Warning: {conv_key} not found in state_dict")
+                    pruned_filters.append(original_filters[mask_idx])  # فرض بدون پرونینگ
+                    masks.append(torch.ones(original_filters[mask_idx]))
+                    mask_idx += 1
+    
+    print(f"تعداد ماسک‌های مورد نیاز: {len(original_filters)}")
+    print(f"تعداد فیلترهای پرون‌شده: {len(pruned_filters)}")
+    print(f"پرون‌شده‌ها: {pruned_filters}")
+    
     return masks, pruned_filters, original_filters
 
 masks, pruned_counts, original_counts = extract_masks_from_sparse_model(sparse_state_dict)
