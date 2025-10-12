@@ -18,45 +18,35 @@ print("="*70)
 checkpoint = torch.load(checkpoint_path, map_location='cpu')
 sparse_state_dict = checkpoint['student']
 
-def extract_masks_from_weights(state_dict):
+def extract_masks_from_model(model):
     """
-    استخراج ماسک‌ها مستقیماً از وزن‌های واقعی
-    فیلترهایی که norm آن‌ها نزدیک صفر است = pruned شده‌اند
+    استخراج ماسک‌های رسمی از mask_modules مدل sparse
     """
     masks = []
     remaining_counts = []
     
-    # ساختار ResNet50
-    layer_configs = [
-        ('layer1', 3),  # 3 blocks
-        ('layer2', 4),  # 4 blocks
-        ('layer3', 6),  # 6 blocks
-        ('layer4', 3),  # 3 blocks
-    ]
+    print("\nاستخراج ماسک‌ها از mask_modules:\n")
     
-    print("\nاستخراج ماسک‌ها:\n")
-    
-    for layer_name, num_blocks in layer_configs:
-        for block_idx in range(num_blocks):
-            for conv_idx in range(1, 4):  # conv1, conv2, conv3
-                weight_key = f'{layer_name}.{block_idx}.conv{conv_idx}.weight'
-                
-                if weight_key in state_dict:
-                    weight = state_dict[weight_key]
-                    num_filters = weight.shape[0]
-                    
-                    # محاسبه نرم هر فیلتر
-                    filter_norms = torch.norm(weight.view(num_filters, -1), p=1, dim=1)
-                    
-                    # ساخت ماسک: 1 برای فیلترهای فعال، 0 برای pruned
-                    mask = (filter_norms >= 1e-6).float()
-                    
-                    remaining = int(mask.sum().item())
-                    
-                    masks.append(mask)
-                    remaining_counts.append(remaining)
-                    
-                    print(f"{layer_name}.{block_idx}.conv{conv_idx}: {remaining}/{num_filters} فیلتر")
+    for i, mask_module in enumerate(model.mask_modules):
+        # فرض: mask_weight شکلی شبیه [1, C, 1, 1] دارد
+        mask_weight = mask_module.mask_weight  # این یک پارامتر یادگیری‌شده است
+        # تبدیل به ماسک باینری: معمولاً با argmax یا threshold
+        # در بسیاری از روش‌ها، mask_weight دو کانال دارد: [keep, prune]
+        if mask_weight.shape[1] == 2:  # binary mask (keep/prune)
+            mask_binary = torch.argmax(mask_weight, dim=1).squeeze()  # 0 یا 1
+        else:
+            # یا اگر مستقیماً ماسک باشد (مثلاً با sigmoid)، آستانه بگذارید
+            mask_binary = (mask_weight.squeeze() > 0.5).float()
+        
+        # تبدیل به فرمت مورد نیاز (float یا bool)
+        mask = mask_binary.float()
+        remaining = int(mask.sum().item())
+        original = mask.shape[0]
+        
+        masks.append(mask)
+        remaining_counts.append(remaining)
+        
+        print(f"Mask {i}: {remaining}/{original} فیلتر فعال")
     
     return masks, remaining_counts
 
