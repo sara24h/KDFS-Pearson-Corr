@@ -16,28 +16,25 @@ sparse_state_dict = checkpoint['student']
 
 def extract_masks_from_sparse_model(state_dict):
     masks = []
-    
-    # تعداد کل فیلترها در ResNet50 استاندارد
     original_filters = [
-        64, 64, 256,  # layer1: block 0
-        64, 64, 256,  # block 1
-        64, 64, 256,  # block 2
-        128, 128, 512,  # layer2: block 0
-        128, 128, 512,  # block 1
-        128, 128, 512,  # block 2
-        128, 128, 512,  # block 3
-        256, 256, 1024,  # layer3: block 0
-        256, 256, 1024,  # block 1
-        256, 256, 1024,  # block 2
-        256, 256, 1024,  # block 3
-        256, 256, 1024,  # block 4
-        256, 256, 1024,  # block 5
-        512, 512, 2048,  # layer4: block 0
-        512, 512, 2048,  # block 1
-        512, 512, 2048,  # block 2
+        64, 64, 256,   # layer1: block 0
+        64, 64, 256,   # block 1
+        64, 64, 256,   # block 2
+        128, 128, 512, # layer2: block 0
+        128, 128, 512, # block 1
+        128, 128, 512, # block 2
+        128, 128, 512, # block 3
+        256, 256, 1024, # layer3: block 0
+        256, 256, 1024, # block 1
+        256, 256, 1024, # block 2
+        256, 256, 1024, # block 3
+        256, 256, 1024, # block 4
+        256, 256, 1024, # block 5
+        512, 512, 2048, # layer4: block 0
+        512, 512, 2048, # block 1
+        512, 512, 2048, # block 2
     ]
     
-    # تعریف ساختار لایه‌ها
     layer_configs = [
         ('layer1', 3),  # 3 blocks
         ('layer2', 4),  # 4 blocks
@@ -48,7 +45,6 @@ def extract_masks_from_sparse_model(state_dict):
     pruned_filters = []
     mask_idx = 0
     
-    # استخراج تعداد فیلترهای پرون‌شده از state_dict
     for layer_name, num_blocks in layer_configs:
         for block_idx in range(num_blocks):
             for conv_idx in range(1, 4):  # conv1, conv2, conv3
@@ -56,22 +52,24 @@ def extract_masks_from_sparse_model(state_dict):
                 if conv_key in state_dict:
                     weight = state_dict[conv_key]
                     num_filters = weight.shape[0]  # تعداد فیلترهای خروجی
+                    if num_filters > original_filters[mask_idx]:
+                        print(f"خطا: تعداد فیلترها ({num_filters}) در {conv_key} بیشتر از حد انتظار ({original_filters[mask_idx]}) است")
+                        num_filters = original_filters[mask_idx]
                     pruned_filters.append(num_filters)
                     
                     # ساخت ماسک
                     mask = torch.zeros(original_filters[mask_idx])
                     mask[:num_filters] = 1
                     masks.append(mask)
-                    mask_idx += 1
                 else:
-                    print(f"Warning: {conv_key} not found in state_dict")
-                    pruned_filters.append(original_filters[mask_idx])  # فرض بدون پرونینگ
+                    print(f"هشدار: کلید {conv_key} در state_dict پیدا نشد")
+                    pruned_filters.append(original_filters[mask_idx])
                     masks.append(torch.ones(original_filters[mask_idx]))
-                    mask_idx += 1
+                mask_idx += 1
     
     print(f"تعداد ماسک‌های مورد نیاز: {len(original_filters)}")
     print(f"تعداد فیلترهای پرون‌شده: {len(pruned_filters)}")
-    print(f"پرون‌شده‌ها: {pruned_filters}")
+    print(f"فیلترهای پرون‌شده: {pruned_filters}")
     
     return masks, pruned_filters, original_filters
 
