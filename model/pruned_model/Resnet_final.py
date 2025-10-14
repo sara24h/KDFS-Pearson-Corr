@@ -56,12 +56,14 @@ class BasicBlock_pruned(nn.Module):
         shortcut_out = self.downsample(x)  # بدون .clone()
         padded_out = torch.zeros_like(shortcut_out)
 
-        # اصلاح: گسترش ماسک برای مطابقت با ابعاد padded_out
-        mask_extended = torch.zeros(padded_out.size(1), dtype=self.masks[1].dtype, device=self.masks[1].device)
-        mask_extended[:self.masks[1].size(0)] = self.masks[1]
-        mask_expanded = mask_extended.view(1, -1, 1, 1).expand_as(padded_out)
-
-        padded_out = torch.where(mask_expanded == 1, out, padded_out)
+        # پیدا کردن ایندکس‌های کانال‌هایی که باید پر شوند
+        idx = torch.nonzero(self.masks[1], as_tuple=False).squeeze(1)
+        if idx.numel() > 0: # اگر هیچ کانالی حفظ نشده، فقط تنسور صفر باقی می‌ماند
+            temp_full = torch.zeros_like(padded_out)
+            for i, ch_idx in enumerate(idx):
+                temp_full[:, ch_idx, :, :] = out[:, i, :, :]
+            padded_out = temp_full
+        # اگر هیچ کانالی حفظ نشده، padded_out همچنان تنسور صفر است
 
         assert padded_out.shape == shortcut_out.shape, "wrong shape"
 
@@ -123,12 +125,14 @@ class Bottleneck_pruned(nn.Module):
         shortcut_out = self.downsample(x)  # بدون .clone()
         padded_out = torch.zeros_like(shortcut_out)
 
-        # اصلاح: گسترش ماسک برای مطابقت با ابعاد padded_out
-        mask_extended = torch.zeros(padded_out.size(1), dtype=self.masks[2].dtype, device=self.masks[2].device)
-        mask_extended[:self.masks[2].size(0)] = self.masks[2]
-        mask_expanded = mask_extended.view(1, -1, 1, 1).expand_as(padded_out)
-
-        padded_out = torch.where(mask_expanded == 1, out, padded_out)
+        # پیدا کردن ایندکس‌های کانال‌هایی که باید پر شوند
+        idx = torch.nonzero(self.masks[2], as_tuple=False).squeeze(1)
+        if idx.numel() > 0: # اگر هیچ کانالی حفظ نشده، فقط تنسور صفر باقی می‌ماند
+            temp_full = torch.zeros_like(padded_out)
+            for i, ch_idx in enumerate(idx):
+                temp_full[:, ch_idx, :, :] = out[:, i, :, :]
+            padded_out = temp_full
+        # اگر هیچ کانالی حفظ نشده، padded_out همچنان تنسور صفر است
 
         assert padded_out.shape == shortcut_out.shape, "wrong shape"
 
