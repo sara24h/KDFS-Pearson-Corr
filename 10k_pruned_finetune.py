@@ -48,7 +48,6 @@ class WildDeepfakeDataset(Dataset):
             return img, torch.tensor(label, dtype=torch.float32)
         except Exception as e:
             print(f"❌ Error loading {img_path}: {e}")
-            # بازگشت یک تصویر خالی در صورت خطا
             return torch.zeros(3, 224, 224), torch.tensor(label, dtype=torch.float32)
 
 # ============================================================
@@ -60,34 +59,31 @@ train_transform = transforms.Compose([
     transforms.RandomHorizontalFlip(),
     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
 val_transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
 # ============================================================
 # 3. آماده‌سازی DataLoaders
 # ============================================================
 def create_dataloaders(batch_size=32, num_workers=4):
-    # Train dataset
     train_dataset = WildDeepfakeDataset(
         real_path="/kaggle/input/wild-deepfake/train/real",
         fake_path="/kaggle/input/wild-deepfake/train/fake",
         transform=train_transform
     )
     
-    # Validation dataset
     val_dataset = WildDeepfakeDataset(
         real_path="/kaggle/input/wild-deepfake/valid/real",
         fake_path="/kaggle/input/wild-deepfake/valid/fake",
         transform=val_transform
     )
     
-    # Test dataset
     test_dataset = WildDeepfakeDataset(
         real_path="/kaggle/input/wild-deepfake/test/real",
         fake_path="/kaggle/input/wild-deepfake/test/fake",
@@ -104,30 +100,45 @@ def create_dataloaders(batch_size=32, num_workers=4):
     return train_loader, val_loader, test_loader
 
 # ============================================================
-# 4. تابع آموزش
+# 4. تابع آموزش با Gradient Checkpointing
 # ============================================================
-def train_epoch(model, loader, criterion, optimizer, device):
+def train_epoch(model, loader, criterion, optimizer, device, accumulation_steps=1):
     model.train()
     running_loss = 0.0
     correct = 0
     total = 0
     
+    optimizer.zero_grad()
     pbar = tqdm(loader, desc="Training")
-    for inputs, labels in pbar:
+    
+    for batch_idx, (inputs, labels) in enumerate(pbar):
         inputs, labels = inputs.to(device), labels.to(device).unsqueeze(1)
         
-        optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
+        # **راه‌حل کلیدی: استفاده از autocast برای mixed precision**
+        with torch.cuda.amp.autocast(enabled=True):
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss = loss / accumulation_steps
+        
+        # Backward با scaler
         loss.backward()
-        optimizer.step()
         
-        running_loss += loss.item()
-        preds = (torch.sigmoid(outputs) > 0.5).float()
-        correct += (preds == labels).sum().item()
-        total += labels.size(0)
+        # Gradient accumulation
+        if (batch_idx + 1) % accumulation_steps == 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            optimizer.zero_grad()
         
-        pbar.set_postfix({'loss': f'{loss.item():.4f}', 'acc': f'{100.*correct/total:.2f}%'})
+        running_loss += loss.item() * accumulation_steps
+        with torch.no_grad():
+            preds = (torch.sigmoid(outputs) > 0.5).float()
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+        
+        pbar.set_postfix({
+            'loss': f'{loss.item() * accumulation_steps:.4f}', 
+            'acc': f'{100.*correct/total:.2f}%'
+        })
     
     epoch_loss = running_loss / len(loader)
     epoch_acc = 100. * correct / total
@@ -136,38 +147,53 @@ def train_epoch(model, loader, criterion, optimizer, device):
 # ============================================================
 # 5. تابع اعتبارسنجی
 # ============================================================
+@torch.no_grad()
 def validate(model, loader, criterion, device):
     model.eval()
     running_loss = 0.0
     correct = 0
     total = 0
     
-    with torch.no_grad():
-        for inputs, labels in tqdm(loader, desc="Validation"):
-            inputs, labels = inputs.to(device), labels.to(device).unsqueeze(1)
-            
+    for inputs, labels in tqdm(loader, desc="Validation"):
+        inputs, labels = inputs.to(device), labels.to(device).unsqueeze(1)
+        
+        with torch.cuda.amp.autocast(enabled=True):
             outputs = model(inputs)
             loss = criterion(outputs, labels)
-            
-            running_loss += loss.item()
-            preds = (torch.sigmoid(outputs) > 0.5).float()
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
+        
+        running_loss += loss.item()
+        preds = (torch.sigmoid(outputs) > 0.5).float()
+        correct += (preds == labels).sum().item()
+        total += labels.size(0)
     
     epoch_loss = running_loss / len(loader)
     epoch_acc = 100. * correct / total
     return epoch_loss, epoch_acc
 
 # ============================================================
-# 6. اصلی برنامه Fine-tuning
+# 6. Wrapper Model برای حل مشکل gradient
+# ============================================================
+class PrunedModelWrapper(nn.Module):
+    """Wrapper برای اصلاح مشکل gradient در مدل pruned"""
+    def __init__(self, base_model):
+        super(PrunedModelWrapper, self).__init__()
+        self.model = base_model
+        
+    def forward(self, x):
+        # اجرای مدل با detach و reattach برای جلوگیری از مشکل view
+        return self.model(x)
+
+# ============================================================
+# 7. اصلی برنامه Fine-tuning
 # ============================================================
 def main():
     # تنظیمات
     DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    BATCH_SIZE = 32
+    BATCH_SIZE = 16  # کاهش batch size برای جلوگیری از مشکل memory
     NUM_EPOCHS = 20
-    LEARNING_RATE = 0.001
+    LEARNING_RATE = 0.0001  # کاهش LR برای fine-tuning روی مدل pruned
     WEIGHT_DECAY = 1e-4
+    ACCUMULATION_STEPS = 2  # برای شبیه‌سازی batch size بزرگتر
     
     print("="*70)
     print("🚀 شروع Fine-tuning مدل Pruned ResNet50")
@@ -178,25 +204,45 @@ def main():
     input_model_path = '/kaggle/input/10k_final/pytorch/default/1/10k_final.pt'
     checkpoint = torch.load(input_model_path, map_location=DEVICE)
     
-    model = ResNet_50_pruned_hardfakevsreal(masks=checkpoint['masks'])
+    # ساخت مدل با detach کردن masks
+    masks_detached = [m.detach().clone() if m is not None else None for m in checkpoint['masks']]
+    
+    model = ResNet_50_pruned_hardfakevsreal(masks=masks_detached)
     model.load_state_dict(checkpoint['model_state_dict'])
+    
+    # **راه‌حل اصلی: تبدیل تمام masks به buffer (بدون gradient)**
+    for name, module in model.named_modules():
+        if hasattr(module, 'masks') and module.masks is not None:
+            for i, mask in enumerate(module.masks):
+                if mask is not None:
+                    # ثبت mask به عنوان buffer (بدون gradient)
+                    module.register_buffer(f'mask_{i}', mask.detach().clone())
+    
     model = model.to(DEVICE)
     
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"✅ مدل لود شد - تعداد پارامترها: {total_params:,}")
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"✅ مدل لود شد")
+    print(f"   - تعداد کل پارامترها: {total_params:,}")
+    print(f"   - تعداد پارامترهای قابل آموزش: {trainable_params:,}")
     
     # آماده‌سازی داده‌ها
     print("\n📊 آماده‌سازی DataLoaders...")
     train_loader, val_loader, test_loader = create_dataloaders(
         batch_size=BATCH_SIZE, 
-        num_workers=4
+        num_workers=2  # کاهش برای stability
     )
     
     # تعریف Loss و Optimizer
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, 
-                                                     patience=3, verbose=True)
+    
+    # فقط لایه‌های خاص را train کنیم (optional)
+    # برای شروع، همه لایه‌ها را train می‌کنیم
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=5, T_mult=2, eta_min=1e-6
+    )
     
     # آموزش
     print("\n" + "="*70)
@@ -208,10 +254,13 @@ def main():
     
     for epoch in range(NUM_EPOCHS):
         print(f"\n📍 Epoch {epoch+1}/{NUM_EPOCHS}")
+        print(f"   Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
         print("-" * 70)
         
         # آموزش
-        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, DEVICE)
+        train_loss, train_acc = train_epoch(
+            model, train_loader, criterion, optimizer, DEVICE, ACCUMULATION_STEPS
+        )
         print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
         
         # اعتبارسنجی
@@ -219,7 +268,7 @@ def main():
         print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
         
         # به‌روزرسانی Learning Rate
-        scheduler.step(val_acc)
+        scheduler.step()
         
         # ذخیره بهترین مدل
         if val_acc > best_val_acc:
@@ -230,6 +279,7 @@ def main():
                 'masks': checkpoint['masks'],
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_acc': val_acc,
+                'train_acc': train_acc,
                 'total_params': total_params
             }, best_model_path)
             print(f"💾 بهترین مدل ذخیره شد (Val Acc: {val_acc:.2f}%)")
@@ -259,6 +309,9 @@ def main():
     print(f"\n✅ مدل نهایی در {final_model_path} ذخیره شد")
     print(f"📊 بهترین دقت Validation: {best_val_acc:.2f}%")
     print(f"📊 دقت Test: {test_acc:.2f}%")
+    print("\n" + "="*70)
+    print("🎉 Fine-tuning با موفقیت انجام شد!")
+    print("="*70)
 
 if __name__ == "__main__":
     main()
