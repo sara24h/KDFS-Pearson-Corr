@@ -7,7 +7,7 @@ from PIL import Image
 import os
 from tqdm import tqdm
 import numpy as np
-from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
+from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal # یا نام فایل شما
 
 # ============================================================
 # 1. تعریف Dataset سفارشی
@@ -45,6 +45,7 @@ class WildDeepfakeDataset(Dataset):
             img = Image.open(img_path).convert('RGB')
             if self.transform:
                 img = self.transform(img)
+            # برای BCEWithLogitsLoss با num_classes=1، لیبل باید float باشد
             return img, torch.tensor(label, dtype=torch.float32)
         except Exception as e:
             print(f"❌ Error loading {img_path}: {e}")
@@ -100,7 +101,7 @@ def create_dataloaders(batch_size=32, num_workers=4):
     return train_loader, val_loader, test_loader
 
 # ============================================================
-# 4. تابع آموزش با Gradient Checkpointing
+# 4. تابع آموزش
 # ============================================================
 def train_epoch(model, loader, criterion, optimizer, device, accumulation_steps=1):
     model.train()
@@ -112,11 +113,13 @@ def train_epoch(model, loader, criterion, optimizer, device, accumulation_steps=
     pbar = tqdm(loader, desc="Training")
     
     for batch_idx, (inputs, labels) in enumerate(pbar):
-        inputs, labels = inputs.to(device), labels.to(device).unsqueeze(1)
-        
+        inputs, labels = inputs.to(device), labels.to(device) # بدون unsqueeze
+
+        # فقط خروجی اول مدل را بگیر
+        outputs, _ = model(inputs) # <--- تغییر اینجا
+
         # **راه‌حل کلیدی: استفاده از autocast برای mixed precision**
         with torch.cuda.amp.autocast(enabled=True):
-            outputs = model(inputs)
             loss = criterion(outputs, labels)
             loss = loss / accumulation_steps
         
@@ -155,10 +158,12 @@ def validate(model, loader, criterion, device):
     total = 0
     
     for inputs, labels in tqdm(loader, desc="Validation"):
-        inputs, labels = inputs.to(device), labels.to(device).unsqueeze(1)
+        inputs, labels = inputs.to(device), labels.to(device) # بدون unsqueeze
+
+        # فقط خروجی اول مدل را بگیر
+        outputs, _ = model(inputs) # <--- تغییر اینجا
         
         with torch.cuda.amp.autocast(enabled=True):
-            outputs = model(inputs)
             loss = criterion(outputs, labels)
         
         running_loss += loss.item()
@@ -171,26 +176,13 @@ def validate(model, loader, criterion, device):
     return epoch_loss, epoch_acc
 
 # ============================================================
-# 6. Wrapper Model برای حل مشکل gradient
-# ============================================================
-class PrunedModelWrapper(nn.Module):
-    """Wrapper برای اصلاح مشکل gradient در مدل pruned"""
-    def __init__(self, base_model):
-        super(PrunedModelWrapper, self).__init__()
-        self.model = base_model
-        
-    def forward(self, x):
-        # اجرای مدل با detach و reattach برای جلوگیری از مشکل view
-        return self.model(x)
-
-# ============================================================
-# 7. اصلی برنامه Fine-tuning
+# 6. اصلی برنامه Fine-tuning
 # ============================================================
 def main():
     # تنظیمات
     DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     BATCH_SIZE = 16  # کاهش batch size برای جلوگیری از مشکل memory
-    NUM_EPOCHS = 20
+    NUM_EPOCHS = 10
     LEARNING_RATE = 0.0001  # کاهش LR برای fine-tuning روی مدل pruned
     WEIGHT_DECAY = 1e-4
     ACCUMULATION_STEPS = 2  # برای شبیه‌سازی batch size بزرگتر
@@ -210,14 +202,6 @@ def main():
     model = ResNet_50_pruned_hardfakevsreal(masks=masks_detached)
     model.load_state_dict(checkpoint['model_state_dict'])
     
-    # **راه‌حل اصلی: تبدیل تمام masks به buffer (بدون gradient)**
-    for name, module in model.named_modules():
-        if hasattr(module, 'masks') and module.masks is not None:
-            for i, mask in enumerate(module.masks):
-                if mask is not None:
-                    # ثبت mask به عنوان buffer (بدون gradient)
-                    module.register_buffer(f'mask_{i}', mask.detach().clone())
-    
     model = model.to(DEVICE)
     
     total_params = sum(p.numel() for p in model.parameters())
@@ -234,6 +218,7 @@ def main():
     )
     
     # تعریف Loss و Optimizer
+    # چون num_classes=1 است، BCEWithLogitsLoss مناسب است
     criterion = nn.BCEWithLogitsLoss()
     
     # فقط لایه‌های خاص را train کنیم (optional)
@@ -276,7 +261,7 @@ def main():
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
-                'masks': checkpoint['masks'],
+                'masks': checkpoint['masks'], # ذخیره ماسک‌ها
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_acc': val_acc,
                 'train_acc': train_acc,
@@ -299,7 +284,7 @@ def main():
     final_model_path = '/kaggle/working/final_pruned_finetuned.pt'
     torch.save({
         'model_state_dict': model.state_dict(),
-        'masks': checkpoint['masks'],
+        'masks': checkpoint['masks'], # ذخیره ماسک‌ها
         'test_acc': test_acc,
         'best_val_acc': best_val_acc,
         'total_params': total_params,
