@@ -13,13 +13,13 @@ from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
 
 # ==================== تنظیمات اولیه ====================
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"دستگاه استفاده شده: {DEVICE}")
+print(f"🖥️ دستگاه استفاده شده: {DEVICE}")
 
 EPOCHS = 5
 BATCH_SIZE = 32
 LEARNING_RATE = 0.0001
 MODEL_PATH = "/kaggle/working/finetuned_pruned_model.pt"
-INPUT_MODEL_PATH = '/kaggle/input/10k_pruned_model_resnet50/pytorch/default/1/resnet50_pruned_model_learnable_masks.pt'
+INPUT_MODEL_PATH = '/kaggle/input/10k_final/pytorch/default/1/10k_final.pt'
 
 DATA_PATHS = {
     "test": [
@@ -81,15 +81,15 @@ transform_train = transforms.Compose([
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.RandomRotation(10),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                        std=[0.229, 0.224, 0.225])
+    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159],
+                        std=[0.1854, 0.1623, 0.1562])
 ])
 
 transform_test = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                        std=[0.229, 0.224, 0.225])
+    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159],
+                        std=[0.1854, 0.1623, 0.1562])
 ])
 
 print("\n📊 بارگذاری دیتاست...")
@@ -155,6 +155,7 @@ try:
     model.load_state_dict(model_state_dict)
     
     model = model.to(DEVICE)
+    model.eval()
     
     total_params = sum(p.numel() for p in model.parameters())
     print("✅ مدل هرس‌شده با موفقیت بازسازی و لود شد!")
