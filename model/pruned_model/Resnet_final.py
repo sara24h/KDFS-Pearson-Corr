@@ -54,9 +54,13 @@ class BasicBlock_pruned(nn.Module):
 
         # padding 0 for feature map to get the same shape of short cut
         shortcut_out = self.downsample(x)  # بدون .clone()
-        # ایجاد تنسور جدید به جای تغییر inplace
         padded_out = torch.zeros_like(shortcut_out)
-        mask_expanded = self.masks[1].view(1, -1, 1, 1).expand_as(padded_out)
+
+        # اصلاح: گسترش ماسک برای مطابقت با ابعاد padded_out
+        mask_extended = torch.zeros(padded_out.size(1), dtype=self.masks[1].dtype, device=self.masks[1].device)
+        mask_extended[:self.masks[1].size(0)] = self.masks[1]
+        mask_expanded = mask_extended.view(1, -1, 1, 1).expand_as(padded_out)
+
         padded_out = torch.where(mask_expanded == 1, out, padded_out)
 
         assert padded_out.shape == shortcut_out.shape, "wrong shape"
@@ -117,9 +121,13 @@ class Bottleneck_pruned(nn.Module):
 
         # padding 0 for feature map to get the same shape of short cut
         shortcut_out = self.downsample(x)  # بدون .clone()
-        # ایجاد تنسور جدید به جای تغییر inplace
         padded_out = torch.zeros_like(shortcut_out)
-        mask_expanded = self.masks[2].view(1, -1, 1, 1).expand_as(padded_out)
+
+        # اصلاح: گسترش ماسک برای مطابقت با ابعاد padded_out
+        mask_extended = torch.zeros(padded_out.size(1), dtype=self.masks[2].dtype, device=self.masks[2].device)
+        mask_extended[:self.masks[2].size(0)] = self.masks[2]
+        mask_expanded = mask_extended.view(1, -1, 1, 1).expand_as(padded_out)
+
         padded_out = torch.where(mask_expanded == 1, out, padded_out)
 
         assert padded_out.shape == shortcut_out.shape, "wrong shape"
