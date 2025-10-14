@@ -257,7 +257,7 @@ def ResNet_34_pruned_imagenet(masks):
     )
 
 
-def ResNet_50_pruned_hardfakevsreal(masks):
+def ResNet_50_pruned_hardfakevsreal(masks): 
     return ResNet_pruned(
         block=Bottleneck_pruned, num_blocks=[3, 4, 6, 3], masks=masks, num_classes=1
     )
