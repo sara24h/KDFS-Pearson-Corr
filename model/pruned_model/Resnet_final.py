@@ -142,7 +142,7 @@ class Bottleneck_pruned(nn.Module):
 
 
 class ResNet_pruned(nn.Module):
-    def __init__(self, block, num_blocks, masks=[], num_classes=1): # num_classes=1 برای BCE
+    def __init__(self, block, num_blocks, masks=[], num_classes=1):
         super().__init__()
         self.in_planes = 64
 
@@ -242,7 +242,7 @@ class ResNet_pruned(nn.Module):
         out = self.avgpool(out)
         out = out.view(out.size(0), -1)
         out = self.fc(out)
-        return out, feature_list # خروجی 1: logits, خروجی 2: feature list
+        return out, feature_list
 
 
 def ResNet_18_pruned_imagenet(masks):
@@ -259,5 +259,5 @@ def ResNet_34_pruned_imagenet(masks):
 
 def ResNet_50_pruned_hardfakevsreal(masks):
     return ResNet_pruned(
-        block=Bottleneck_pruned, num_blocks=[3, 4, 6, 3], masks=masks, num_classes=1 # num_classes=1
+        block=Bottleneck_pruned, num_blocks=[3, 4, 6, 3], masks=masks, num_classes=1
     )
