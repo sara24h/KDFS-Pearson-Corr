@@ -87,29 +87,35 @@ test_dataset = DeepfakeDataset(
     real_dir=os.path.join(BASE_DIR, "test/real"), fake_dir=os.path.join(BASE_DIR, "test/fake"), transform=test_transform
 )
 
-print(f"تعداد تصاویر Train: {len(train_dataset)}")
-print(f"تعداد تصاویر Validation: {len(valid_dataset)}")
-print(f"تعداد تصاویر Test: {len(test_dataset)}")
-
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=2)
 valid_loader = DataLoader(valid_dataset, batch_size=32, shuffle=False, num_workers=2)
 test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=2)
 
-# ==================== ۳. بارگذاری و بازسازی مدل هرس‌شده (Fix) ====================
+# ==================== ۳. بارگذاری و بازسازی مدل هرس‌شده (نسخه نهایی اصلاح‌شده) ====================
 print("\n🔄 در حال بازسازی و لود مدل هرس‌شده...")
 
-# ⚠️ مسیر فایل چک‌پوینت شما (که دیکشنری شامل کلید 'student' و 'masks' بود)
+# ⚠️ مسیر فایل چک‌پوینت شما
 CHECKPOINT_PATH = '/kaggle/input/10k_final/pytorch/default/1/10k_final.pt' 
 
 try:
     # 1. لود چک‌پوینت (دیکشنری کامل)
     checkpoint_loaded = torch.load(CHECKPOINT_PATH, map_location=device)
     
-    # 2. استخراج وزن‌ها (کلید 'student' بر اساس اطلاعات شما) و ماسک‌ها
-    model_state_dict = checkpoint_loaded['student'] 
-    masks = checkpoint_loaded.get('masks')
+    # 2. استخراج وزن‌ها و ماسک‌ها با بررسی کلیدهای محتمل
     
+    # اولویت اول: کلید صحیح که در آخرین خروجی شما (model_state_dict) مشاهده شد
+    if 'model_state_dict' in checkpoint_loaded:
+        model_state_dict = checkpoint_loaded['model_state_dict']
+    # اولویت دوم: کلید student (اگر فایل چک‌پوینت از مرحله KD/Pruning باشد)
+    elif 'student' in checkpoint_loaded:
+        model_state_dict = checkpoint_loaded['student']
+    else:
+        raise KeyError("هیچ یک از کلیدهای 'model_state_dict' یا 'student' برای وزن‌های مدل یافت نشد.")
+
+    # ماسک‌ها
+    masks = checkpoint_loaded.get('masks')
     if masks is None:
+        # اگر ماسک‌ها پیدا نشدند، مدل را نمی‌توان به درستی بازسازی کرد
         raise KeyError("کلید 'masks' در چک‌پوینت برای بازسازی مدل هرس‌شده یافت نشد.")
 
     # 3. ساخت مدل هرس‌شده با استفاده از ماسک‌ها
@@ -126,7 +132,8 @@ try:
 
 except Exception as e:
     print(f"❌ خطا در لود و بازسازی مدل هرس‌شده: {e}")
-    # در صورت خطا، برنامه متوقف می‌شود تا از Fine-tuning روی مدل ناصحیح جلوگیری شود
+    print(f"⚠️ جزئیات خطا: {type(e).__name__}: {e}")
+    # خروج از برنامه در صورت عدم موفقیت در لود مدل
     exit() 
 
 # ==================== ۴. تنظیمات Fine-tuning ====================
@@ -229,9 +236,8 @@ try:
     model_test = model_test.to(device)
     model_test.eval()
 except Exception as e:
-    print(f"❌ خطا در لود مدل نهایی برای تست: {e}")
-    # اگر مدل ذخیره‌شده پیدا نشد یا لود نشد، از مدل فعلی استفاده می‌کنیم (ممکن است بهترین مدل نباشد)
-    model_test = model
+    print(f"❌ خطا در لود مدل نهایی برای تست: {e}. استفاده از آخرین مدل آموزش‌دیده.")
+    model_test = model # استفاده از مدل فعلی در حافظه
     model_test.eval()
 
 all_preds = []
