@@ -113,20 +113,19 @@ def train_epoch(model, loader, criterion, optimizer, device, accumulation_steps=
     pbar = tqdm(loader, desc="Training")
     
     for batch_idx, (inputs, labels) in enumerate(pbar):
-        inputs, labels = inputs.to(device), labels.to(device) # بدون unsqueeze
+        inputs, labels = inputs.to(device), labels.to(device) # این خط هم تغییر نمی‌کند
+        # اما اینجا باید شکل لیبل را تغییر دهیم
+        labels = labels.unsqueeze(1) # <--- این خط جدید اضافه می‌شود
 
         # فقط خروجی اول مدل را بگیر
-        outputs, _ = model(inputs) # <--- تغییر اینجا
+        outputs, _ = model(inputs)
 
-        # **راه‌حل کلیدی: استفاده از autocast برای mixed precision**
         with torch.cuda.amp.autocast(enabled=True):
-            loss = criterion(outputs, labels)
+            loss = criterion(outputs, labels) # اکنون outputs: [B, 1], labels: [B, 1] - مطابقت دارند
             loss = loss / accumulation_steps
         
-        # Backward با scaler
         loss.backward()
         
-        # Gradient accumulation
         if (batch_idx + 1) % accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -135,7 +134,7 @@ def train_epoch(model, loader, criterion, optimizer, device, accumulation_steps=
         running_loss += loss.item() * accumulation_steps
         with torch.no_grad():
             preds = (torch.sigmoid(outputs) > 0.5).float()
-            correct += (preds == labels).sum().item()
+            correct += (preds == labels).sum().item() # اکنون مطابقت دارند
             total += labels.size(0)
         
         pbar.set_postfix({
@@ -147,9 +146,6 @@ def train_epoch(model, loader, criterion, optimizer, device, accumulation_steps=
     epoch_acc = 100. * correct / total
     return epoch_loss, epoch_acc
 
-# ============================================================
-# 5. تابع اعتبارسنجی
-# ============================================================
 @torch.no_grad()
 def validate(model, loader, criterion, device):
     model.eval()
@@ -159,16 +155,16 @@ def validate(model, loader, criterion, device):
     
     for inputs, labels in tqdm(loader, desc="Validation"):
         inputs, labels = inputs.to(device), labels.to(device) # بدون unsqueeze
+        labels = labels.unsqueeze(1) # <--- این خط جدید اضافه می‌شود
 
-        # فقط خروجی اول مدل را بگیر
         outputs, _ = model(inputs) # <--- تغییر اینجا
         
         with torch.cuda.amp.autocast(enabled=True):
-            loss = criterion(outputs, labels)
+            loss = criterion(outputs, labels) # اکنون outputs: [B, 1], labels: [B, 1] - مطابقت دارند
         
         running_loss += loss.item()
         preds = (torch.sigmoid(outputs) > 0.5).float()
-        correct += (preds == labels).sum().item()
+        correct += (preds == labels).sum().item() # اکنون مطابقت دارند
         total += labels.size(0)
     
     epoch_loss = running_loss / len(loader)
