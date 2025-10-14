@@ -7,7 +7,7 @@ from PIL import Image
 import os
 from tqdm import tqdm
 import numpy as np
-from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
+from model.pruned_model.ResNet_final import ResNet_50_pruned_hardfakevsreal
 
 # ============================================================
 # 1. تعریف Dataset سفارشی
