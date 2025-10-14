@@ -201,7 +201,7 @@ def main():
     
     # لود مدل
     print("\n📦 لود مدل Pruned...")
-    input_model_path = '/kaggle/input/10k_final/pytorch/default/1/10k_final.pt'
+    input_model_path = '/kaggle/input/m/saraaskari/10k_final/pytorch/default/1/10k_final.pt'
     checkpoint = torch.load(input_model_path, map_location=DEVICE)
     
     # ساخت مدل با detach کردن masks
