@@ -1,416 +1,301 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
 import os
 from tqdm import tqdm
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-import json
-from datetime import datetime
-from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
+import numpy as np
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-# ==================== تنظیمات اولیه ====================
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"🖥️ دستگاه استفاده شده: {DEVICE}")
+# ⚠️ اطمینان حاصل کنید که این کلاس مدل در محیط شما تعریف شده و قابل Import است
+# این مدل از 'masks' برای ساختار هرس‌شده استفاده می‌کند
+from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal 
 
-EPOCHS = 5
-BATCH_SIZE = 32
-LEARNING_RATE = 0.0001
-MODEL_PATH = "/kaggle/working/finetuned_pruned_model.pt"
-INPUT_MODEL_PATH = '/kaggle/input/10k_final/pytorch/default/1/10k_final.pt'
 
-DATA_PATHS = {
-    "test": [
-        "/kaggle/input/wild-deepfake/test/real",
-        "/kaggle/input/wild-deepfake/test/fake",
-    ],
-    "train": [
-        "/kaggle/input/wild-deepfake/train/real",
-        "/kaggle/input/wild-deepfake/train/fake",
-    ],
-    "valid": [
-        "/kaggle/input/wild-deepfake/valid/real",
-        "/kaggle/input/wild-deepfake/valid/fake",
-    ]
-}
-
-# ==================== تعریف Dataset Custom ====================
+# ==================== ۱. دیتاست سفارشی ====================
 class DeepfakeDataset(Dataset):
     def __init__(self, real_dir, fake_dir, transform=None):
-        self.images = []
+        self.image_paths = []
         self.labels = []
         self.transform = transform
         
         # بارگذاری تصاویر Real
-        for img in os.listdir(real_dir):
-            if img.lower().endswith(('.png', '.jpg', '.jpeg')):
-                self.images.append(os.path.join(real_dir, img))
-                self.labels.append(0)  # 0 = Real
+        if os.path.exists(real_dir):
+            for img_name in os.listdir(real_dir):
+                if img_name.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    self.image_paths.append(os.path.join(real_dir, img_name))
+                    self.labels.append(0)  # Real = 0
         
         # بارگذاری تصاویر Fake
-        for img in os.listdir(fake_dir):
-            if img.lower().endswith(('.png', '.jpg', '.jpeg')):
-                self.images.append(os.path.join(fake_dir, img))
-                self.labels.append(1)  # 1 = Fake
-    
+        if os.path.exists(fake_dir):
+            for img_name in os.listdir(fake_dir):
+                if img_name.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    self.image_paths.append(os.path.join(fake_dir, img_name))
+                    self.labels.append(1)  # Fake = 1
+
     def __len__(self):
-        return len(self.images)
-    
+        return len(self.image_paths)
+
     def __getitem__(self, idx):
-        try:
-            img = Image.open(self.images[idx]).convert('RGB')
-            if self.transform:
-                img = self.transform(img)
-            return img, torch.tensor(self.labels[idx], dtype=torch.float32)
-        except Exception as e:
-            print(f"خطا در خواندن تصویر {self.images[idx]}: {e}")
-            return None, None
+        img_path = self.image_paths[idx]
+        label = self.labels[idx]
+        
+        image = Image.open(img_path).convert('RGB')
+        
+        if self.transform:
+            image = self.transform(image)
+        
+        return image, label
 
-# ==================== تحویل Dataset ====================
-def collate_fn(batch):
-    batch = [item for item in batch if item[0] is not None]
-    if len(batch) == 0:
-        return None, None
-    imgs, labels = zip(*batch)
-    return torch.stack(imgs), torch.stack(labels)
+# ==================== ۲. تنظیمات عمومی و داده‌ها ====================
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"استفاده از دستگاه: {device}")
 
-# ==================== تحضیر داده ====================
-transform_train = transforms.Compose([
+# Transformations (با استفاده از آمار دیتاست شما)
+mean = [0.4414, 0.3448, 0.3159]
+std = [0.1854, 0.1623, 0.1562]
+
+train_transform = transforms.Compose([
     transforms.Resize((224, 224)),
-    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomHorizontalFlip(),
     transforms.RandomRotation(10),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159],
-                        std=[0.1854, 0.1623, 0.1562])
+    transforms.Normalize(mean=mean, std=std)
 ])
 
-transform_test = transforms.Compose([
+test_transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159],
-                        std=[0.1854, 0.1623, 0.1562])
+    transforms.Normalize(mean=mean, std=std)
 ])
 
-print("\n📊 بارگذاری دیتاست...")
+# مسیرهای دیتاست
+BASE_DIR = "/kaggle/input/wild-deepfake"
 
 train_dataset = DeepfakeDataset(
-    DATA_PATHS["train"][0], 
-    DATA_PATHS["train"][1], 
-    transform_train
+    real_dir=os.path.join(BASE_DIR, "train/real"), fake_dir=os.path.join(BASE_DIR, "train/fake"), transform=train_transform
 )
-train_loader = DataLoader(
-    train_dataset, 
-    batch_size=BATCH_SIZE, 
-    shuffle=True,
-    collate_fn=collate_fn,
-    num_workers=2,
-    pin_memory=True
-)
-
 valid_dataset = DeepfakeDataset(
-    DATA_PATHS["valid"][0], 
-    DATA_PATHS["valid"][1], 
-    transform_test
+    real_dir=os.path.join(BASE_DIR, "valid/real"), fake_dir=os.path.join(BASE_DIR, "valid/fake"), transform=test_transform
 )
-valid_loader = DataLoader(
-    valid_dataset, 
-    batch_size=BATCH_SIZE, 
-    shuffle=False,
-    collate_fn=collate_fn,
-    num_workers=2,
-    pin_memory=True
-)
-
 test_dataset = DeepfakeDataset(
-    DATA_PATHS["test"][0], 
-    DATA_PATHS["test"][1], 
-    transform_test
-)
-test_loader = DataLoader(
-    test_dataset, 
-    batch_size=BATCH_SIZE, 
-    shuffle=False,
-    collate_fn=collate_fn,
-    num_workers=2,
-    pin_memory=True
+    real_dir=os.path.join(BASE_DIR, "test/real"), fake_dir=os.path.join(BASE_DIR, "test/fake"), transform=test_transform
 )
 
-print(f"✅ تعداد نمونه‌های آموزش: {len(train_dataset)}")
-print(f"✅ تعداد نمونه‌های اعتبارسنجی: {len(valid_dataset)}")
-print(f"✅ تعداد نمونه‌های تست: {len(test_dataset)}")
+print(f"تعداد تصاویر Train: {len(train_dataset)}")
+print(f"تعداد تصاویر Validation: {len(valid_dataset)}")
+print(f"تعداد تصاویر Test: {len(test_dataset)}")
 
-# ==================== لود مدل ====================
-print("\n🔧 لود مدل هرس‌شده...")
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=2)
+valid_loader = DataLoader(valid_dataset, batch_size=32, shuffle=False, num_workers=2)
+test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=2)
+
+# ==================== ۳. بارگذاری و بازسازی مدل هرس‌شده (Fix) ====================
+print("\n🔄 در حال بازسازی و لود مدل هرس‌شده...")
+
+# ⚠️ مسیر فایل چک‌پوینت شما (که دیکشنری شامل کلید 'student' و 'masks' بود)
+CHECKPOINT_PATH = '/kaggle/input/10k_final/pytorch/default/1/10k_final.pt' 
 
 try:
-    # لود چک‌پوینت کامل ورودی
-    checkpoint_loaded = torch.load(INPUT_MODEL_PATH, map_location=DEVICE)
+    # 1. لود چک‌پوینت (دیکشنری کامل)
+    checkpoint_loaded = torch.load(CHECKPOINT_PATH, map_location=device)
     
-    # استخراج اطلاعات کلیدی
-    model_state_dict = checkpoint_loaded['model_state_dict']
-    masks = checkpoint_loaded['masks']
+    # 2. استخراج وزن‌ها (کلید 'student' بر اساس اطلاعات شما) و ماسک‌ها
+    model_state_dict = checkpoint_loaded['student'] 
+    masks = checkpoint_loaded.get('masks')
     
-    # تبدیل ماسک‌ها به requires_grad=False
-    # این کار جلوی مشکل view را می‌گیرد
-    if isinstance(masks, dict):
-        masks = {k: v.detach().clone() if isinstance(v, torch.Tensor) else v 
-                 for k, v in masks.items()}
-    elif isinstance(masks, list):
-        masks = [m.detach().clone() if isinstance(m, torch.Tensor) else m 
-                 for m in masks]
-    
-    # ساخت مدل هرس‌شده با استفاده از ماسک‌ها
+    if masks is None:
+        raise KeyError("کلید 'masks' در چک‌پوینت برای بازسازی مدل هرس‌شده یافت نشد.")
+
+    # 3. ساخت مدل هرس‌شده با استفاده از ماسک‌ها
     model = ResNet_50_pruned_hardfakevsreal(masks=masks)
     
-    # لود وزن‌های هرس‌شده
-    model.load_state_dict(model_state_dict, strict=False)
+    # 4. لود وزن‌ها
+    model.load_state_dict(model_state_dict)
     
-    model = model.to(DEVICE)
-    
-    # اطمینان از اینکه مدل در حالت train است
-    model.train()
-    
+    # 5. انتقال مدل به دستگاه (GPU/CPU)
+    model = model.to(device)
+
     total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
-    print("✅ مدل هرس‌شده با موفقیت بازسازی و لود شد!")
-    print(f"📊 تعداد کل پارامترها: {total_params:,}")
-    print(f"📊 تعداد پارامترهای قابل آموزش: {trainable_params:,}")
-    
+    print(f"✅ مدل هرس‌شده با موفقیت لود و بازسازی شد! تعداد پارامترها: {total_params:,}")
+
 except Exception as e:
-    print(f"❌ خطا در لود مدل: {e}")
-    import traceback
-    traceback.print_exc()
-    raise
+    print(f"❌ خطا در لود و بازسازی مدل هرس‌شده: {e}")
+    # در صورت خطا، برنامه متوقف می‌شود تا از Fine-tuning روی مدل ناصحیح جلوگیری شود
+    exit() 
 
-# ==================== تنظیمات آموزش ====================
+# ==================== ۴. تنظیمات Fine-tuning ====================
 criterion = nn.BCEWithLogitsLoss()
-optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), 
-                       lr=LEARNING_RATE)
-scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=2, gamma=0.1)
+optimizer = optim.Adam(model.parameters(), lr=0.0001)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
 
-# ==================== تابع آموزش ====================
-def train_epoch(model, train_loader, criterion, optimizer, epoch, device):
+num_epochs = 20
+best_val_loss = float('inf')
+
+# ==================== ۵. توابع آموزش و ارزیابی ====================
+def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
-    total_loss = 0
+    running_loss = 0.0
     correct = 0
     total = 0
     
-    progress_bar = tqdm(train_loader, desc=f"آموزش Epoch {epoch+1}/{EPOCHS}", 
-                       unit='batch', colour='green')
-    
-    for batch_idx, (images, labels) in enumerate(progress_bar):
-        if images is None:
-            continue
+    progress_bar = tqdm(loader, desc='Training', leave=False)
+    for images, labels in progress_bar:
+        images, labels = images.to(device), labels.to(device).float().unsqueeze(1)
         
-        try:
-            images = images.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True).unsqueeze(1)
-            
-            # پاک کردن gradients
-            optimizer.zero_grad(set_to_none=True)
-            
-            # Forward pass
-            outputs = model(images)
-            
-            # محاسبه loss
-            loss = criterion(outputs, labels)
-            
-            # Backward pass
-            loss.backward()
-            
-            # بروزرسانی وزن‌ها
-            optimizer.step()
-            
-            # محاسبه آمار
-            total_loss += loss.item()
-            with torch.no_grad():
-                predictions = (torch.sigmoid(outputs) > 0.5).float()
-                correct += (predictions == labels).sum().item()
-                total += labels.size(0)
-            
-            accuracy = (correct / total) * 100 if total > 0 else 0
-            progress_bar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'accuracy': f'{accuracy:.2f}%'
-            })
-            
-        except RuntimeError as e:
-            print(f"\n❌ خطا در batch {batch_idx}: {e}")
-            continue
+        optimizer.zero_grad()
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        
+        running_loss += loss.item()
+        predicted = (torch.sigmoid(outputs) > 0.5).float()
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+        
+        progress_bar.set_postfix({'loss': f'{loss.item():.4f}', 'acc': f'{100.*correct/total:.2f}%'})
     
-    avg_loss = total_loss / len(train_loader) if len(train_loader) > 0 else 0
-    avg_accuracy = (correct / total) * 100 if total > 0 else 0
-    
-    return avg_loss, avg_accuracy
+    return running_loss / len(loader), 100. * correct / total
 
-# ==================== تابع اعتبارسنجی ====================
-def validate(model, val_loader, criterion, device, phase="Validation"):
+def validate(model, loader, criterion, device):
     model.eval()
-    total_loss = 0
-    all_preds = []
-    all_labels = []
+    running_loss = 0.0
+    correct = 0
+    total = 0
     
     with torch.no_grad():
-        progress_bar = tqdm(val_loader, desc=f"{phase}", 
-                           unit='batch', colour='blue')
-        
+        progress_bar = tqdm(loader, desc='Validation', leave=False)
         for images, labels in progress_bar:
-            if images is None:
-                continue
+            images, labels = images.to(device), labels.to(device).float().unsqueeze(1)
             
-            try:
-                images = images.to(device, non_blocking=True)
-                labels = labels.to(device, non_blocking=True).unsqueeze(1)
-                
-                outputs = model(images)
-                loss = criterion(outputs, labels)
-                
-                total_loss += loss.item()
-                predictions = (torch.sigmoid(outputs) > 0.5).float()
-                
-                all_preds.extend(predictions.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
-                
-            except RuntimeError as e:
-                print(f"\n❌ خطا در validation: {e}")
-                continue
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            
+            running_loss += loss.item()
+            predicted = (torch.sigmoid(outputs) > 0.5).float()
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+            
+            progress_bar.set_postfix({'loss': f'{loss.item():.4f}', 'acc': f'{100.*correct/total:.2f}%'})
     
-    avg_loss = total_loss / len(val_loader) if len(val_loader) > 0 else 0
-    
-    if len(all_labels) > 0:
-        accuracy = accuracy_score(all_labels, all_preds) * 100
-        precision = precision_score(all_labels, all_preds, zero_division=0) * 100
-        recall = recall_score(all_labels, all_preds, zero_division=0) * 100
-        f1 = f1_score(all_labels, all_preds, zero_division=0) * 100
-    else:
-        accuracy = precision = recall = f1 = 0
-    
-    return avg_loss, accuracy, precision, recall, f1
+    return running_loss / len(loader), 100. * correct / total
 
-# ==================== حلقه آموزش ====================
-print("\n🚀 شروع فاین‌تیون مدل...")
-print("=" * 80)
+# ==================== ۶. اجرای Fine-tuning ====================
+print("\n🚀 شروع Fine-tuning مدل هرس‌شده...")
+train_losses, val_losses = [], []
+train_accs, val_accs = [], []
 
-history = {
-    'train_loss': [],
-    'train_acc': [],
-    'val_loss': [],
-    'val_acc': [],
-    'val_precision': [],
-    'val_recall': [],
-    'val_f1': []
-}
-
-best_accuracy = 0
-best_epoch = 0
-
-for epoch in range(EPOCHS):
-    print(f"\n📅 Epoch {epoch+1}/{EPOCHS}")
-    print("-" * 80)
+for epoch in range(num_epochs):
+    print(f"\n📊 Epoch {epoch+1}/{num_epochs}")
+    print("-" * 50)
     
-    # آموزش
-    train_loss, train_acc = train_epoch(model, train_loader, criterion, 
-                                        optimizer, epoch, DEVICE)
+    train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
+    val_loss, val_acc = validate(model, valid_loader, criterion, device)
     
-    # اعتبارسنجی
-    val_loss, val_acc, val_prec, val_recall, val_f1 = validate(
-        model, valid_loader, criterion, DEVICE, "اعتبارسنجی"
-    )
+    train_losses.append(train_loss)
+    val_losses.append(val_loss)
+    train_accs.append(train_acc)
+    val_accs.append(val_acc)
     
-    # ذخیره‌ی نتایج
-    history['train_loss'].append(train_loss)
-    history['train_acc'].append(train_acc)
-    history['val_loss'].append(val_loss)
-    history['val_acc'].append(val_acc)
-    history['val_precision'].append(val_prec)
-    history['val_recall'].append(val_recall)
-    history['val_f1'].append(val_f1)
+    print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
+    print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
     
-    print(f"\n✅ آموزش - Loss: {train_loss:.4f} | دقت: {train_acc:.2f}%")
-    print(f"✅ اعتبارسنجی - Loss: {val_loss:.4f} | دقت: {val_acc:.2f}%")
-    print(f"   Precision: {val_prec:.2f}% | Recall: {val_recall:.2f}% | F1: {val_f1:.2f}%")
+    scheduler.step(val_loss)
     
-    scheduler.step()
-    
-    # ذخیره بهترین مدل
-    if val_acc > best_accuracy:
-        best_accuracy = val_acc
-        best_epoch = epoch
-        checkpoint_to_save = {
-            'epoch': epoch,
+    # ذخیره بهترین مدل (فقط state_dict)
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        # ذخیره وزن‌ها و ماسک‌ها برای بارگذاری آسان در آینده
+        torch.save({
             'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'masks': masks,
-            'accuracy': val_acc,
-            'model_architecture': 'ResNet_50_pruned_hardfakevsreal',
-            'hyperparameters': {
-                'learning_rate': LEARNING_RATE,
-                'batch_size': BATCH_SIZE
-            }
-        }
-        torch.save(checkpoint_to_save, MODEL_PATH)
-        print(f"💾 بهترین مدل ذخیره شد! (دقت: {best_accuracy:.2f}%)")
+            'masks': masks 
+        }, 'best_finetuned_model_weights.pt')
+        print("✅ مدل بهبود یافت و ذخیره شد!")
 
-print(f"\n🏆 بهترین دقت: {best_accuracy:.2f}% در epoch {best_epoch+1}")
+# ==================== ۷. تست نهایی ====================
+print("\n🧪 شروع تست نهایی...")
 
-# ==================== تست نهایی ====================
-print("\n" + "=" * 80)
-print("🧪 شروع تست نهایی...")
-print("=" * 80)
+# بازسازی مدل برای تست با بهترین وزن‌ها
+try:
+    model_test = ResNet_50_pruned_hardfakevsreal(masks=masks)
+    best_weights = torch.load('best_finetuned_model_weights.pt', map_location=device)
+    model_test.load_state_dict(best_weights['model_state_dict'])
+    model_test = model_test.to(device)
+    model_test.eval()
+except Exception as e:
+    print(f"❌ خطا در لود مدل نهایی برای تست: {e}")
+    # اگر مدل ذخیره‌شده پیدا نشد یا لود نشد، از مدل فعلی استفاده می‌کنیم (ممکن است بهترین مدل نباشد)
+    model_test = model
+    model_test.eval()
 
-# لود بهترین مدل
-checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
-model.load_state_dict(checkpoint['model_state_dict'])
+all_preds = []
+all_labels = []
 
-test_loss, test_acc, test_prec, test_recall, test_f1 = validate(
-    model, test_loader, criterion, DEVICE, "تست نهایی"
-)
+with torch.no_grad():
+    for images, labels in tqdm(test_loader, desc='Testing'):
+        images = images.to(device)
+        outputs = model_test(images)
+        predicted = (torch.sigmoid(outputs) > 0.5).float().cpu().numpy()
+        
+        all_preds.extend(predicted.flatten())
+        all_labels.extend(labels.numpy())
 
-print("\n" + "=" * 80)
-print("📊 نتایج نهایی:")
-print("=" * 80)
-print(f"✅ دقت کلی: {test_acc:.2f}%")
-print(f"✅ Precision: {test_prec:.2f}%")
-print(f"✅ Recall: {test_recall:.2f}%")
-print(f"✅ F1-Score: {test_f1:.2f}%")
-print(f"✅ Loss: {test_loss:.4f}")
+# محاسبه متریک‌ها
+accuracy = accuracy_score(all_labels, all_preds)
+precision = precision_score(all_labels, all_preds)
+recall = recall_score(all_labels, all_preds)
+f1 = f1_score(all_labels, all_preds)
+cm = confusion_matrix(all_labels, all_preds)
 
-# ==================== ذخیره‌ی گزارش ====================
-report = {
-    'timestamp': datetime.now().isoformat(),
-    'model_path': MODEL_PATH,
-    'best_epoch': best_epoch + 1,
-    'best_epoch_accuracy': best_accuracy,
-    'test_results': {
-        'accuracy': test_acc,
-        'precision': test_prec,
-        'recall': test_recall,
-        'f1_score': test_f1,
-        'loss': test_loss
-    },
-    'hyperparameters': {
-        'epochs': EPOCHS,
-        'batch_size': BATCH_SIZE,
-        'learning_rate': LEARNING_RATE,
-        'optimizer': 'Adam',
-        'scheduler': 'StepLR (step_size=2, gamma=0.1)'
-    },
-    'training_history': history,
-    'dataset_sizes': {
-        'train': len(train_dataset),
-        'validation': len(valid_dataset),
-        'test': len(test_dataset)
-    }
-}
+print("\n" + "="*60)
+print("📈 نتایج تست نهایی:")
+print("="*60)
+print(f"Accuracy:  {accuracy*100:.2f}%")
+print(f"Precision: {precision*100:.2f}%")
+print(f"Recall:    {recall*100:.2f}%")
+print(f"F1-Score:  {f1*100:.2f}%")
+print("\nConfusion Matrix:")
+print(cm)
 
-report_path = '/kaggle/working/training_report.json'
-with open(report_path, 'w', encoding='utf-8') as f:
-    json.dump(report, f, indent=2, ensure_ascii=False)
+# رسم نمودارها
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-print("\n💾 گزارش نهایی ذخیره شد!")
-print(f"📁 مدل: {MODEL_PATH}")
-print(f"📁 گزارش: {report_path}")
-print("\n✅ فاین‌تیونینگ با موفقیت به پایان رسید!")
+# Loss curve
+axes[0].plot(train_losses, label='Train Loss', marker='o')
+axes[0].plot(val_losses, label='Val Loss', marker='s')
+axes[0].set_xlabel('Epoch')
+axes[0].set_ylabel('Loss')
+axes[0].set_title('Training and Validation Loss')
+axes[0].legend()
+axes[0].grid(True)
+
+# Accuracy curve
+axes[1].plot(train_accs, label='Train Acc', marker='o')
+axes[1].plot(val_accs, label='Val Acc', marker='s')
+axes[1].set_xlabel('Epoch')
+axes[1].set_ylabel('Accuracy (%)')
+axes[1].set_title('Training and Validation Accuracy')
+axes[1].legend()
+axes[1].grid(True)
+
+# Confusion matrix
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=axes[2])
+axes[2].set_xlabel('Predicted')
+axes[2].set_ylabel('Actual')
+axes[2].set_title('Confusion Matrix')
+axes[2].set_xticklabels(['Real', 'Fake'])
+axes[2].set_yticklabels(['Real', 'Fake'])
+
+plt.tight_layout()
+plt.savefig('training_results.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+print("\n✅ فرآیند Fine-tuning و تست با موفقیت به پایان رسید!")
+print(f"📁 مدل نهایی (وزن‌ها) در 'best_finetuned_model_weights.pt' ذخیره شد")
+print(f"📊 نمودارها در 'training_results.png' ذخیره شدند")
