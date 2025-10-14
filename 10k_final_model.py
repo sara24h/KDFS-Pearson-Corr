@@ -4,11 +4,11 @@ from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
 
 
 # 1. مسیر و لود فایل چک‌پوینت ورودی
-input_save_path = '/kaggle/input/kdfs-10k-pearson-19-shahrivar-314-epochs/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt'
+input_save_path = '/kaggle/input/10k_pruned_model_resnet50/pytorch/default/1/resnet50_pruned_model_learnable_masks.pt'
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 # 2. مسیر خروجی برای ذخیره‌سازی مجدد (مهم: باید در /kaggle/working باشد)
-output_save_path = '/kaggle/working/140k_final.pt'
+output_save_path = '/kaggle/working/10k_final.pt'
 
 # ----------------------------------------------------
 # 3. لود، بازسازی و ذخیره‌سازی مدل
