@@ -230,9 +230,9 @@ def main():
     global_rank = dist.get_rank()
 
     DEVICE = torch.device(f"cuda:{local_rank}")
-    BATCH_SIZE_PER_GPU = 256
+    BATCH_SIZE_PER_GPU = 128
     BATCH_SIZE = BATCH_SIZE_PER_GPU * world_size
-    NUM_EPOCHS = 5
+    NUM_EPOCHS = 1
     LEARNING_RATE = 0.0001
     WEIGHT_DECAY = 1e-4
 
