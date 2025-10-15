@@ -247,7 +247,7 @@ def main():
 
     # تنظیمات
     DEVICE = torch.device(f"cuda:{local_rank}")
-    BATCH_SIZE_PER_GPU = 256  # اگر OOM گرفتید، این را کم کنید (مثلاً 128 یا 64)
+    BATCH_SIZE_PER_GPU = 512  # اگر OOM گرفتید، این را کم کنید (مثلاً 128 یا 64)
     BATCH_SIZE = BATCH_SIZE_PER_GPU * world_size
     NUM_EPOCHS = 5
     LEARNING_RATE = 0.0001
