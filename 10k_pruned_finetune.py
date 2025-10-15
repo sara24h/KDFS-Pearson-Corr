@@ -60,24 +60,22 @@ class WildDeepfakeDataset(Dataset):
 # 2. تعریف Transforms
 # ============================================================
 train_transform = transforms.Compose([
-    transforms.Resize((256, 256)),
     transforms.RandomCrop(224),
     transforms.RandomHorizontalFlip(),
     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
 ])
 
 val_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
 ])
 
 # ============================================================
 # 3. آماده‌سازی DataLoaders
 # ============================================================
-def create_dataloaders(batch_size=32, num_workers=4):
+def create_dataloaders(batch_size=64, num_workers=4):
     train_dataset = WildDeepfakeDataset(
         real_path="/kaggle/input/wild-deepfake/train/real",
         fake_path="/kaggle/input/wild-deepfake/train/fake",
