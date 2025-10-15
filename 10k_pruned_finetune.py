@@ -15,7 +15,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
 from PIL import Image
 from tqdm import tqdm
-from torch.amp import autocast, GradScaler  # تغییر این خط
+from torch.amp import autocast, GradScaler
 import argparse
 
 from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
@@ -115,15 +115,13 @@ def create_dataloaders(batch_size=64, num_workers=4):
     return train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler
 
 # ============================================================
-# 4. تابع آموزش
+# 4. تابع آموزش (حذف ACCUMULATION_STEPS)
 # ============================================================
-def train_epoch(model, loader, criterion, optimizer, device, accumulation_steps, scaler, writer, epoch, rank=0):
+def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epoch, rank=0):
     model.train()
     running_loss = 0.0
     correct = 0
     total = 0
-
-    optimizer.zero_grad()
 
     # فقط یک پیشرفت نشانگر در یک rank نمایش داده شود
     pbar = tqdm(loader, desc="Training", disable=rank != 0)
@@ -132,21 +130,21 @@ def train_epoch(model, loader, criterion, optimizer, device, accumulation_steps,
         inputs, labels = inputs.to(device), labels.to(device)
         labels = labels.unsqueeze(1)
 
-        with autocast(device_type='cuda', dtype=torch.float16):  # تغییر این خط
+        with autocast(device_type='cuda', dtype=torch.float16):
             outputs, _ = model(inputs)
             loss = criterion(outputs, labels)
-            loss = loss / accumulation_steps
 
+        # مقیاس‌گذاری و بک‌پراپ بدون تجمع
         scaler.scale(loss).backward()
 
-        if (batch_idx + 1) % accumulation_steps == 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
+        # به‌روزرسانی مستقیم پارامترها و گرادیان‌ها
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad() # صفر کردن گرادیان‌ها بعد از هر به‌روزرسانی
 
-        running_loss += loss.item() * accumulation_steps
+        running_loss += loss.item()
         with torch.no_grad():
             preds = (torch.sigmoid(outputs) > 0.5).float()
             correct += (preds == labels).sum().item()
@@ -154,7 +152,7 @@ def train_epoch(model, loader, criterion, optimizer, device, accumulation_steps,
 
         if rank == 0:
             pbar.set_postfix({
-                'loss': f'{loss.item() * accumulation_steps:.4f}',
+                'loss': f'{loss.item():.4f}',
                 'acc': f'{100.*correct/total:.2f}%'
             })
 
@@ -169,7 +167,7 @@ def train_epoch(model, loader, criterion, optimizer, device, accumulation_steps,
     avg_acc = avg_acc.item() / dist.get_world_size()
 
     # فقط rank 0 writer را دارد
-    if rank == 0 and writer is not None:  # تغییر این خط
+    if rank == 0 and writer is not None:
         writer.add_scalar("train/loss", avg_loss, epoch)
         writer.add_scalar("train/acc", avg_acc, epoch)
 
@@ -186,7 +184,7 @@ def validate(model, loader, criterion, device, writer, epoch, rank=0):
         inputs, labels = inputs.to(device), labels.to(device)
         labels = labels.unsqueeze(1)
 
-        with autocast(device_type='cuda', dtype=torch.float16):  # تغییر این خط
+        with autocast(device_type='cuda', dtype=torch.float16):
             outputs, _ = model(inputs)
             loss = criterion(outputs, labels)
 
@@ -205,7 +203,7 @@ def validate(model, loader, criterion, device, writer, epoch, rank=0):
     avg_acc = avg_acc.item() / dist.get_world_size()
 
     # فقط rank 0 writer را دارد
-    if rank == 0 and writer is not None:  # تغییر این خط
+    if rank == 0 and writer is not None:
         writer.add_scalar("val/loss", avg_loss, epoch)
         writer.add_scalar("val/acc", avg_acc, epoch)
 
@@ -238,7 +236,7 @@ def cleanup_ddp():
     dist.destroy_process_group()
 
 # ============================================================
-# 6. اصلی برنامه Fine-tuning
+# 6. اصلی برنامه Fine-tuning (حذف ACCUMULATION_STEPS)
 # ============================================================
 def main():
     # اضافه کردن seed
@@ -249,12 +247,12 @@ def main():
 
     # تنظیمات
     DEVICE = torch.device(f"cuda:{local_rank}")
-    BATCH_SIZE_PER_GPU = 256
+    BATCH_SIZE_PER_GPU = 256  # اگر OOM گرفتید، این را کم کنید (مثلاً 128 یا 64)
     BATCH_SIZE = BATCH_SIZE_PER_GPU * world_size
     NUM_EPOCHS = 10
     LEARNING_RATE = 0.0001
     WEIGHT_DECAY = 1e-4
-    ACCUMULATION_STEPS = 2
+    # ACCUMULATION_STEPS = 2  # حذف شد
 
     # تنظیمات TensorBoard
     result_dir = f'/kaggle/working/runs_ddp_rank_{global_rank}'
@@ -312,7 +310,7 @@ def main():
     )
 
     # اضافه کردن GradScaler برای Mixed Precision
-    scaler = GradScaler(enabled=True) # تغییر این خط
+    scaler = GradScaler(enabled=True)
 
     # آموزش
     if global_rank == 0:
@@ -332,9 +330,9 @@ def main():
             print(f"   Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
             print("-" * 70)
 
-        # آموزش
+        # آموزش - بدون ACCUMULATION_STEPS
         train_loss, train_acc = train_epoch(
-            model, train_loader, criterion, optimizer, DEVICE, ACCUMULATION_STEPS, scaler, writer, epoch, global_rank
+            model, train_loader, criterion, optimizer, DEVICE, scaler, writer, epoch, global_rank
         )
         if global_rank == 0:
             print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
