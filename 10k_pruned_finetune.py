@@ -113,7 +113,7 @@ def create_dataloaders(batch_size=32, num_workers=4):
 # ============================================================
 # 4. تابع آموزش
 # ============================================================
-def train_epoch(model, loader, criterion, optimizer, device, accumulation_steps=1, rank=0):
+def train_epoch(model, loader, criterion, optimizer, device, accumulation_steps, scaler, rank=0):
     model.train()
     running_loss = 0.0
     correct = 0
@@ -128,20 +128,21 @@ def train_epoch(model, loader, criterion, optimizer, device, accumulation_steps=
         inputs, labels = inputs.to(device), labels.to(device)
         labels = labels.unsqueeze(1)
 
-        outputs, _ = model(inputs)
-
         with torch.cuda.amp.autocast(enabled=True):
+            outputs, _ = model(inputs)
             loss = criterion(outputs, labels)
             loss = loss / accumulation_steps
         
-        loss.backward()
+        scaler.scale(loss).backward()
         
         if (batch_idx + 1) % accumulation_steps == 0:
+            scaler.unscale_(optimizer)  # unscale گرادیان‌ها قبل از grad_norm
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             optimizer.zero_grad()
         
-        running_loss += loss.item() * accumulation_steps
+        running_loss += loss.item() * accumulation_steps  # loss قبل از scale برای نمایش
         with torch.no_grad():
             preds = (torch.sigmoid(outputs) > 0.5).float()
             correct += (preds == labels).sum().item()
@@ -176,9 +177,8 @@ def validate(model, loader, criterion, device, rank=0):
         inputs, labels = inputs.to(device), labels.to(device)
         labels = labels.unsqueeze(1)
 
-        outputs, _ = model(inputs)
-        
         with torch.cuda.amp.autocast(enabled=True):
+            outputs, _ = model(inputs)
             loss = criterion(outputs, labels)
         
         running_loss += loss.item()
@@ -230,7 +230,7 @@ def main():
     
     if global_rank == 0:
         print("="*70)
-        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 با DDP")
+        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 با DDP و Mixed Precision")
         print(f"   تعداد گرافیک: {world_size}")
         print(f"   Batch Size کل: {BATCH_SIZE}")
         print("="*70)
@@ -273,6 +273,9 @@ def main():
         optimizer, T_0=5, T_mult=2, eta_min=1e-6
     )
     
+    # اضافه کردن GradScaler برای Mixed Precision
+    scaler = torch.cuda.amp.GradScaler(enabled=True)
+    
     # آموزش
     if global_rank == 0:
         print("\n" + "="*70)
@@ -293,7 +296,7 @@ def main():
         
         # آموزش
         train_loss, train_acc = train_epoch(
-            model, train_loader, criterion, optimizer, DEVICE, ACCUMULATION_STEPS, global_rank
+            model, train_loader, criterion, optimizer, DEVICE, ACCUMULATION_STEPS, scaler, global_rank
         )
         if global_rank == 0:
             print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
@@ -316,7 +319,8 @@ def main():
                     'optimizer_state_dict': optimizer.state_dict(),
                     'val_acc': val_acc,
                     'train_acc': train_acc,
-                    'total_params': total_params
+                    'total_params': total_params,
+                    'scaler_state_dict': scaler.state_dict()  # ذخیره scaler
                 }, best_model_path)
                 print(f"💾 بهترین مدل ذخیره شد (Val Acc: {val_acc:.2f}%)")
     
@@ -328,6 +332,7 @@ def main():
         
         best_checkpoint = torch.load(best_model_path)
         model.module.load_state_dict(best_checkpoint['model_state_dict'])
+        scaler.load_state_dict(best_checkpoint.get('scaler_state_dict', {}))  # بارگذاری scaler (اگر وجود داشته باشد)
         
         test_loss, test_acc = validate(model, test_loader, criterion, DEVICE, global_rank)
         print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.2f}%")
