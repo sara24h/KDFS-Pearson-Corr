@@ -81,7 +81,7 @@ val_transform = transforms.Compose([
 # ============================================================
 # 3. آماده‌سازی DataLoaders
 # ============================================================
-def create_dataloaders(batch_size=64, num_workers=4):
+def create_dataloaders(batch_size=256, num_workers=4):
     train_dataset = WildDeepfakeDataset(
         real_path="/kaggle/input/wild-deepfake/train/real",
         fake_path="/kaggle/input/wild-deepfake/train/fake",
