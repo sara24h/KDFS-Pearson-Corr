@@ -81,7 +81,7 @@ val_transform = transforms.Compose([
 # ============================================================
 # 3. آماده‌سازی DataLoaders
 # ============================================================
-def create_dataloaders(batch_size=512, num_workers=4):
+def create_dataloaders(batch_size=256, num_workers=4):
     train_dataset = WildDeepfakeDataset(
         real_path="/kaggle/input/wild-deepfake/train/real",
         fake_path="/kaggle/input/wild-deepfake/train/fake",
@@ -247,7 +247,7 @@ def main():
 
     # تنظیمات
     DEVICE = torch.device(f"cuda:{local_rank}")
-    BATCH_SIZE_PER_GPU = 512  # اگر OOM گرفتید، این را کم کنید (مثلاً 128 یا 64)
+    BATCH_SIZE_PER_GPU = 256  # اگر OOM گرفتید، این را کم کنید (مثلاً 128 یا 64)
     BATCH_SIZE = BATCH_SIZE_PER_GPU * world_size
     NUM_EPOCHS = 5
     LEARNING_RATE = 0.0001
