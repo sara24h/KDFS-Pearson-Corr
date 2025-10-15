@@ -15,7 +15,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
 from PIL import Image
 from tqdm import tqdm
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler  # تغییر این خط
 import argparse
 
 from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
@@ -132,7 +132,7 @@ def train_epoch(model, loader, criterion, optimizer, device, accumulation_steps,
         inputs, labels = inputs.to(device), labels.to(device)
         labels = labels.unsqueeze(1)
 
-        with autocast():
+        with autocast(device_type='cuda', dtype=torch.float16):  # تغییر این خط
             outputs, _ = model(inputs)
             loss = criterion(outputs, labels)
             loss = loss / accumulation_steps
@@ -168,7 +168,8 @@ def train_epoch(model, loader, criterion, optimizer, device, accumulation_steps,
     avg_loss = avg_loss.item() / dist.get_world_size()
     avg_acc = avg_acc.item() / dist.get_world_size()
 
-    if rank == 0:
+    # فقط rank 0 writer را دارد
+    if rank == 0 and writer is not None:  # تغییر این خط
         writer.add_scalar("train/loss", avg_loss, epoch)
         writer.add_scalar("train/acc", avg_acc, epoch)
 
@@ -185,7 +186,7 @@ def validate(model, loader, criterion, device, writer, epoch, rank=0):
         inputs, labels = inputs.to(device), labels.to(device)
         labels = labels.unsqueeze(1)
 
-        with autocast():
+        with autocast(device_type='cuda', dtype=torch.float16):  # تغییر این خط
             outputs, _ = model(inputs)
             loss = criterion(outputs, labels)
 
@@ -203,7 +204,8 @@ def validate(model, loader, criterion, device, writer, epoch, rank=0):
     avg_loss = avg_loss.item() / dist.get_world_size()
     avg_acc = avg_acc.item() / dist.get_world_size()
 
-    if rank == 0:
+    # فقط rank 0 writer را دارد
+    if rank == 0 and writer is not None:  # تغییر این خط
         writer.add_scalar("val/loss", avg_loss, epoch)
         writer.add_scalar("val/acc", avg_acc, epoch)
 
@@ -258,6 +260,8 @@ def main():
     result_dir = f'/kaggle/working/runs_ddp_rank_{global_rank}'
     if global_rank == 0:
         writer = SummaryWriter(result_dir)
+    else:
+        writer = None # rankهای دیگر writer ندارند
 
     if global_rank == 0:
         print("="*70)
@@ -308,7 +312,7 @@ def main():
     )
 
     # اضافه کردن GradScaler برای Mixed Precision
-    scaler = torch.cuda.amp.GradScaler(enabled=True)
+    scaler = GradScaler(enabled=True) # تغییر این خط
 
     # آموزش
     if global_rank == 0:
