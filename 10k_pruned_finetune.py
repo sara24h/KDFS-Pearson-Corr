@@ -101,7 +101,6 @@ def create_dataloaders(batch_size=256, num_workers=4):
     val_sampler = DistributedSampler(val_dataset, shuffle=False)
     test_sampler = DistributedSampler(test_dataset, shuffle=False)
 
-    # ⚠️ drop_last=True برای جلوگیری از عدم تقارن در آخرین بچ
     train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler,
                               num_workers=num_workers, pin_memory=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler,
@@ -198,7 +197,6 @@ def validate(model, loader, criterion, device, writer, epoch, rank=0):
 # 5. تابع setup DDP و seed
 # ============================================================
 def setup_ddp(seed):
-    # ⚠️ افزایش تایم‌اوت NCCL برای محیط‌های کند (مثل Kaggle)
     os.environ['TORCH_NCCL_TIMEOUT_MS'] = '1800000'  # 30 دقیقه
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -221,7 +219,7 @@ def cleanup_ddp():
     dist.destroy_process_group()
 
 # ============================================================
-# 6. اصلی برنامه Fine-tuning
+# 6. اصلی برنامه Fine-tuning (فقط fc قابل آموزش)
 # ============================================================
 def main():
     SEED = 42
@@ -244,7 +242,7 @@ def main():
 
     if global_rank == 0:
         print("="*70)
-        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 با DDP و Mixed Precision")
+        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 — فقط لایه FC قابل آموزش")
         print(f"   تعداد گرافیک: {world_size}")
         print(f"   Batch Size کل: {BATCH_SIZE}")
         print("="*70)
@@ -261,26 +259,35 @@ def main():
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(DEVICE)
 
-    # فریز کردن تمام لایه‌ها
+    # 🔒 فریز کردن تمام لایه‌ها
     for param in model.parameters():
         param.requires_grad = False
 
-    # باز کردن لایه آخر کانولوشنی (layer4) و لایه Fully Connected (fc)
-    for name, param in model.named_parameters():
-        if 'layer4' in name or 'fc' in name:
-            param.requires_grad = True
+    # ✅ فقط لایه fc را باز کن — و Dropout اضافه کن اگر وجود ندارد
+    # بررسی: آیا لایه fc از قبل Dropout دارد؟
+    # برای اطمینان، یک wrapper با Dropout اضافه می‌کنیم (اگر مدل شما خروجی مستقیم از fc می‌دهد)
+
+    # جایگزینی لایه fc با یک نسخه شامل Dropout
+    in_features = model.fc.in_features
+    model.fc = nn.Sequential(
+        nn.Dropout(0.5),
+        nn.Linear(in_features, 1)
+    )
+
+    # حالا فقط پارامترهای جدید fc را فعال کن
+    for param in model.fc.parameters():
+        param.requires_grad = True
 
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
-    # محاسبه تعداد پارامترها
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     if global_rank == 0:
-        print(f"✅ مدل لود شد")
+        print(f"✅ مدل لود و تنظیم شد")
         print(f"   - تعداد کل پارامترها: {total_params:,}")
         print(f"   - تعداد پارامترهای قابل آموزش: {trainable_params:,}")
-        print(f"   - لایه‌های قابل آموزش: layer4 و fc")
+        print(f"   - فقط لایه fc (با Dropout) قابل آموزش است")
 
     if global_rank == 0:
         print("\n📊 آماده‌سازی DataLoaders...")
@@ -291,7 +298,6 @@ def main():
     )
 
     criterion = nn.BCEWithLogitsLoss()
-    # فقط پارامترهای قابل آموزش به optimizer اضافه می‌شوند
     optimizer = optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
     scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2, eta_min=1e-6)
@@ -299,7 +305,7 @@ def main():
 
     if global_rank == 0:
         print("\n" + "="*70)
-        print("🎓 شروع آموزش")
+        print("🎓 شروع آموزش (فقط FC)")
         print("="*70)
 
     best_val_acc = 0.0
@@ -323,6 +329,12 @@ def main():
         if global_rank == 0:
             print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
 
+            # ذخیره بهترین مدل (اختیاری)
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                torch.save(model.module.state_dict(), '/kaggle/working/best_fc_only.pt')
+                print(f"✅ بهترین مدل ذخیره شد با Val Acc: {val_acc:.2f}%")
+
         scheduler.step()
 
     # تست نهایی
@@ -336,24 +348,28 @@ def main():
 
         # بازسازی مدل روی CPU برای inference
         model_inference = ResNet_50_pruned_hardfakevsreal(masks=checkpoint['masks'])
+        # جایگزینی fc با نسخه جدید (با Dropout)
+        in_features = model_inference.fc.in_features
+        model_inference.fc = nn.Sequential(
+            nn.Dropout(0.5),
+            nn.Linear(in_features, 1)
+        )
         model_inference.load_state_dict(model.module.state_dict())
         model_inference = model_inference.to('cpu')
         model_inference.eval()
 
         total_params_inf = sum(p.numel() for p in model_inference.parameters())
 
-        # فقط 4 کلید مورد نظر
         checkpoint_inference = {
             'model_state_dict': model_inference.state_dict(),
             'total_params': total_params_inf,
             'masks': checkpoint['masks'],
-            'model_architecture': 'ResNet_50_pruned_hardfakevsreal'
+            'model_architecture': 'ResNet_50_pruned_hardfakevsreal (FC-only fine-tuned)'
         }
 
-        inference_save_path = '/kaggle/working/final_pruned_finetuned_inference_ready.pt'
+        inference_save_path = '/kaggle/working/final_pruned_fc_only_finetuned.pt'
         torch.save(checkpoint_inference, inference_save_path)
 
-        # چاپ اطلاعات
         print("فایل شامل یک دیکشنری وزن‌ها است.")
         print("کلیدهای موجود در دیکشنری:")
         for key in checkpoint_inference.keys():
@@ -366,20 +382,19 @@ def main():
             else:
                 print(f"{key}: نوع = {type(value)}")
 
-        print("✅ مدل هرس‌شده با موفقیت بازسازی و لود شد!")
+        print("✅ مدل هرس‌شده (فقط FC fine-tuned) با موفقیت بازسازی و لود شد!")
         print(f"تعداد پارامترها: {total_params_inf:,}")
 
         print("\n" + "="*70)
-        print("معماری نهایی مدل هرس‌شده (ResNet_50_pruned_hardfakevsreal)")
+        print("معماری نهایی مدل:")
         print("="*70)
         print(model_inference)
         print("\n" + "="*70)
-        print("توجه: ابعاد هر لایه، معماری فشرده‌شده (هرس‌شده) را نشان می‌دهد.")
-        print("="*70)
+        print("توجه: فقط لایه FC قابل آموزش بوده است.")
 
         file_size_mb = os.path.getsize(inference_save_path) / (1024 * 1024)
-        print(f"✅ مدل inference-ready با موفقیت در {inference_save_path} ذخیره شد.")
-        print(f"حجم فایل ذخیره شده: {file_size_mb:.2f} MB")
+        print(f"✅ مدل inference-ready در {inference_save_path} ذخیره شد.")
+        print(f"حجم فایل: {file_size_mb:.2f} MB")
 
         writer.close()
 
