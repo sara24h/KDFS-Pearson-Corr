@@ -232,7 +232,7 @@ def main():
     DEVICE = torch.device(f"cuda:{local_rank}")
     BATCH_SIZE_PER_GPU = 256
     BATCH_SIZE = BATCH_SIZE_PER_GPU * world_size
-    NUM_EPOCHS = 10
+    NUM_EPOCHS = 1
     LEARNING_RATE = 0.0001
     WEIGHT_DECAY = 1e-4
 
@@ -252,7 +252,7 @@ def main():
     if global_rank == 0:
         print("\n📦 لود مدل Pruned...")
 
-    input_model_path = '/kaggle/input/10k_final/pytorch/default/1/10k_final.pt'
+    input_model_path = '/kaggle/input/m/saraaskari/10k_final/pytorch/default/1/10k_final.pt'
     checkpoint = torch.load(input_model_path, map_location=DEVICE)
 
     masks_detached = [m.detach().clone() if m is not None else None for m in checkpoint['masks']]
