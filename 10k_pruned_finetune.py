@@ -260,8 +260,19 @@ def main():
     model = ResNet_50_pruned_hardfakevsreal(masks=masks_detached)
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(DEVICE)
+
+    # فریز کردن تمام لایه‌ها
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # باز کردن لایه آخر کانولوشنی (layer4) و لایه Fully Connected (fc)
+    for name, param in model.named_parameters():
+        if 'layer4' in name or 'fc' in name:
+            param.requires_grad = True
+
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
+    # محاسبه تعداد پارامترها
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -269,6 +280,7 @@ def main():
         print(f"✅ مدل لود شد")
         print(f"   - تعداد کل پارامترها: {total_params:,}")
         print(f"   - تعداد پارامترهای قابل آموزش: {trainable_params:,}")
+        print(f"   - لایه‌های قابل آموزش: layer4 و fc")
 
     if global_rank == 0:
         print("\n📊 آماده‌سازی DataLoaders...")
@@ -279,7 +291,8 @@ def main():
     )
 
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    # فقط پارامترهای قابل آموزش به optimizer اضافه می‌شوند
+    optimizer = optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
     scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2, eta_min=1e-6)
     scaler = GradScaler(enabled=True)
@@ -312,9 +325,7 @@ def main():
 
         scheduler.step()
 
-    # ============================================================
-    # 🧪 تست نهایی — باید توسط همه رنک‌ها اجرا شود (نه فقط رنک 0)
-    # ============================================================
+    # تست نهایی
     test_loss, test_acc = validate(model, test_loader, criterion, DEVICE, writer, NUM_EPOCHS, global_rank)
 
     if global_rank == 0:
