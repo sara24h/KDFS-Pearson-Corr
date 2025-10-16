@@ -263,16 +263,12 @@ def main():
     for param in model.parameters():
         param.requires_grad = False
 
-    # ✅ فقط لایه fc را باز کن — و Dropout اضافه کن اگر وجود ندارد
-    # بررسی: آیا لایه fc از قبل Dropout دارد؟
-    # برای اطمینان، یک wrapper با Dropout اضافه می‌کنیم (اگر مدل شما خروجی مستقیم از fc می‌دهد)
-
-    # جایگزینی لایه fc با یک نسخه شامل Dropout
+    # جایگزینی لایه fc با یک نسخه شامل Dropout — و انتقال به DEVICE
     in_features = model.fc.in_features
     model.fc = nn.Sequential(
         nn.Dropout(0.5),
         nn.Linear(in_features, 1)
-    )
+    ).to(DEVICE)  # ⬅️ این خط کلیدی است!
 
     # حالا فقط پارامترهای جدید fc را فعال کن
     for param in model.fc.parameters():
