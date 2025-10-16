@@ -201,18 +201,14 @@ def setup_ddp(seed):
     torch.cuda.set_device(local_rank)
     dist.init_process_group(backend='nccl')
 
-    # 🔴 حذف خط زیر که باعث کُند شدن و تایم‌اوت می‌شد
-    # torch.use_deterministic_algorithms(True)
-
-    # ✅ تنظیمات پایدار و سریع‌تر برای چند GPU
     seed = seed + dist.get_rank()
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = False  # ← تغییر اصلی
-    torch.backends.cudnn.benchmark = True       # ← تغییر اصلی
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.enabled = True
 
     return local_rank
@@ -290,7 +286,6 @@ def main():
         print("="*70)
 
     best_val_acc = 0.0
-    best_model_path = f'/kaggle/working/best_pruned_finetuned_ddp_rank_{global_rank}.pt'
 
     for epoch in range(NUM_EPOCHS):
         train_sampler.set_epoch(epoch)
@@ -313,67 +308,52 @@ def main():
 
         scheduler.step()
 
-        if global_rank == 0:
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model.module.state_dict(),
-                    'masks': checkpoint['masks'],
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'val_acc': val_acc,
-                    'train_acc': train_acc,
-                    'total_params': total_params,
-                    'scaler_state_dict': scaler.state_dict()
-                }, best_model_path)
-                print(f"💾 بهترین مدل ذخیره شد (Val Acc: {val_acc:.2f}%)")
+        # ذخیره موقت فقط برای ادامه آموزش نیاز نیست — چون فقط می‌خواهیم مدل نهایی را ذخیره کنیم
 
-    # تست نهایی و ذخیره مدل inference-ready
+    # ذخیره مدل نهایی فقط با 4 مورد مورد نظر
     if global_rank == 0:
         print("\n" + "="*70)
-        print("🧪 تست نهایی با بهترین مدل")
+        print("🧪 تست نهایی و ذخیره مدل inference-ready")
         print("="*70)
 
-        best_checkpoint = torch.load(best_model_path)
-        model.module.load_state_dict(best_checkpoint['model_state_dict'])
-        scaler.load_state_dict(best_checkpoint.get('scaler_state_dict', {}))
-
+        # تست نهایی
         test_loss, test_acc = validate(model, test_loader, criterion, DEVICE, writer, NUM_EPOCHS, global_rank)
         print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.2f}%")
 
-        final_model_path = '/kaggle/working/final_pruned_finetuned_ddp.pt'
-        torch.save({
-            'model_state_dict': model.module.state_dict(),
-            'masks': checkpoint['masks'],
-            'test_acc': test_acc,
-            'best_val_acc': best_val_acc,
-            'total_params': total_params,
-            'model_architecture': 'ResNet_50_pruned_hardfakevsreal'
-        }, final_model_path)
-
-        print("\n" + "="*70)
-        print("💾 ذخیره‌سازی مدل نهایی برای inference (همانند فرمت اولیه)...")
-        print("="*70)
-
+        # بازسازی مدل روی CPU برای inference
         model_inference = ResNet_50_pruned_hardfakevsreal(masks=checkpoint['masks'])
         model_inference.load_state_dict(model.module.state_dict())
         model_inference = model_inference.to('cpu')
         model_inference.eval()
 
         total_params_inf = sum(p.numel() for p in model_inference.parameters())
-        print("✅ مدل هرس‌شده با موفقیت بازسازی و لود شد!")
-        print(f"تعداد پارامترها: {total_params_inf:,}")
 
-        inference_save_path = '/kaggle/working/final_pruned_finetuned_inference_ready.pt'
+        # فقط 4 کلید مورد نظر
         checkpoint_inference = {
             'model_state_dict': model_inference.state_dict(),
-            'masks': checkpoint['masks'],
             'total_params': total_params_inf,
-            'model_architecture': 'ResNet_50_pruned_hardfakevsreal',
-            'test_acc': test_acc,
-            'best_val_acc': best_val_acc
+            'masks': checkpoint['masks'],
+            'model_architecture': 'ResNet_50_pruned_hardfakevsreal'
         }
+
+        inference_save_path = '/kaggle/working/final_pruned_finetuned_inference_ready.pt'
         torch.save(checkpoint_inference, inference_save_path)
+
+        # چاپ اطلاعات مشابه نمونه شما
+        print("فایل شامل یک دیکشنری وزن‌ها است.")
+        print("کلیدهای موجود در دیکشنری:")
+        for key in checkpoint_inference.keys():
+            print(f"- {key}")
+
+        print("\nجزئیات وزن‌ها:")
+        for key, value in checkpoint_inference.items():
+            if key == 'masks':
+                print(f"{key}: نوع = {type(value)} (list of {len(value)} masks)")
+            else:
+                print(f"{key}: نوع = {type(value)}")
+
+        print("✅ مدل هرس‌شده با موفقیت بازسازی و لود شد!")
+        print(f"تعداد پارامترها: {total_params_inf:,}")
 
         print("\n" + "="*70)
         print("معماری نهایی مدل هرس‌شده (ResNet_50_pruned_hardfakevsreal)")
@@ -386,13 +366,6 @@ def main():
         file_size_mb = os.path.getsize(inference_save_path) / (1024 * 1024)
         print(f"✅ مدل inference-ready با موفقیت در {inference_save_path} ذخیره شد.")
         print(f"حجم فایل ذخیره شده: {file_size_mb:.2f} MB")
-
-        print(f"\n✅ مدل نهایی در {final_model_path} نیز ذخیره شد (برای استفاده در DDP یا ادامه آموزش)")
-        print(f"📊 بهترین دقت Validation: {best_val_acc:.2f}%")
-        print(f"📊 دقت Test: {test_acc:.2f}%")
-        print("\n" + "="*70)
-        print("🎉 Fine-tuning با موفقیت انجام شد!")
-        print("="*70)
 
         writer.close()
 
