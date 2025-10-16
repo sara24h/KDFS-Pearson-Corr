@@ -76,7 +76,7 @@ val_transform = transforms.Compose([
 ])
 
 # ============================================================
-# 3. آماده‌سازی DataLoaders
+# 3. آماده‌سازی DataLoaders (با drop_last=True)
 # ============================================================
 def create_dataloaders(batch_size=256, num_workers=4):
     train_dataset = WildDeepfakeDataset(
@@ -101,12 +101,13 @@ def create_dataloaders(batch_size=256, num_workers=4):
     val_sampler = DistributedSampler(val_dataset, shuffle=False)
     test_sampler = DistributedSampler(test_dataset, shuffle=False)
 
+    # ⚠️ drop_last=True برای جلوگیری از عدم تقارن در آخرین بچ
     train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler,
-                            num_workers=num_workers, pin_memory=True)
+                              num_workers=num_workers, pin_memory=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler,
-                          num_workers=num_workers, pin_memory=True)
+                            num_workers=num_workers, pin_memory=True, drop_last=True)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, sampler=test_sampler,
-                           num_workers=num_workers, pin_memory=True)
+                             num_workers=num_workers, pin_memory=True, drop_last=True)
 
     return train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler
 
@@ -194,9 +195,12 @@ def validate(model, loader, criterion, device, writer, epoch, rank=0):
     return avg_loss, avg_acc
 
 # ============================================================
-# 5. تابع setup DDP و seed (اصلاح‌شده: deterministic غیرفعال شد)
+# 5. تابع setup DDP و seed
 # ============================================================
 def setup_ddp(seed):
+    # ⚠️ افزایش تایم‌اوت NCCL برای محیط‌های کند (مثل Kaggle)
+    os.environ['TORCH_NCCL_TIMEOUT_MS'] = '1800000'  # 30 دقیقه
+
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
     dist.init_process_group(backend='nccl')
@@ -308,16 +312,15 @@ def main():
 
         scheduler.step()
 
-        # ذخیره موقت فقط برای ادامه آموزش نیاز نیست — چون فقط می‌خواهیم مدل نهایی را ذخیره کنیم
+    # ============================================================
+    # 🧪 تست نهایی — باید توسط همه رنک‌ها اجرا شود (نه فقط رنک 0)
+    # ============================================================
+    test_loss, test_acc = validate(model, test_loader, criterion, DEVICE, writer, NUM_EPOCHS, global_rank)
 
-    # ذخیره مدل نهایی فقط با 4 مورد مورد نظر
     if global_rank == 0:
         print("\n" + "="*70)
         print("🧪 تست نهایی و ذخیره مدل inference-ready")
         print("="*70)
-
-        # تست نهایی
-        test_loss, test_acc = validate(model, test_loader, criterion, DEVICE, writer, NUM_EPOCHS, global_rank)
         print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.2f}%")
 
         # بازسازی مدل روی CPU برای inference
@@ -339,7 +342,7 @@ def main():
         inference_save_path = '/kaggle/working/final_pruned_finetuned_inference_ready.pt'
         torch.save(checkpoint_inference, inference_save_path)
 
-        # چاپ اطلاعات مشابه نمونه شما
+        # چاپ اطلاعات
         print("فایل شامل یک دیکشنری وزن‌ها است.")
         print("کلیدهای موجود در دیکشنری:")
         for key in checkpoint_inference.keys():
