@@ -1,4 +1,4 @@
-from Resnet_final import ResNet_50_pruned_hardfakevsreal, Bottleneck_pruned, BasicBlock_pruned, ResNet_pruned, get_preserved_filter_num
+from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal, Bottleneck_pruned, BasicBlock_pruned, ResNet_pruned, get_preserved_filter_num
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
