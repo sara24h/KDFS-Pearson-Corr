@@ -53,38 +53,38 @@ class WildDeepfakeDataset(Dataset):
             return img, torch.tensor(label, dtype=torch.float32)
         except Exception as e:
             print(f"❌ Error loading {img_path}: {e}")
-            return torch.zeros(3, 224, 224), torch.tensor(label, dtype=torch.float32)
+            return torch.zeros(3, 556, 256), torch.tensor(label, dtype=torch.float32)
 
 
 train_transform = transforms.Compose([
-    transforms.CenterCrop(224),
+    transforms.CenterCrop(256),
     transforms.RandomHorizontalFlip(p=0.3),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
+    transforms.Normalize(mean=[0.4668, 0.3816, 0.3414], std=[0.2410, 0.2161, 0.2081])
 ])
 
 val_transform = transforms.Compose([
-    transforms.CenterCrop(224),
+    transforms.CenterCrop(256),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
+    transforms.Normalize(mean=[0.4668, 0.3816, 0.3414], std=[0.2410, 0.2161, 0.2081])
 ])
 
 def create_dataloaders(batch_size=256, num_workers=4):
     train_dataset = WildDeepfakeDataset(
-        real_path="/kaggle/input/wild-deepfake/train/real",
-        fake_path="/kaggle/input/wild-deepfake/train/fake",
+        real_path="/kaggle/input/deepfake-and-real-images/Dataset/Train/Real",
+        fake_path="/kaggle/input/deepfake-and-real-images/Dataset/Train/Fake",
         transform=train_transform
     )
 
     val_dataset = WildDeepfakeDataset(
-        real_path="/kaggle/input/wild-deepfake/valid/real",
-        fake_path="/kaggle/input/wild-deepfake/valid/fake",
+        real_path="/kaggle/input/deepfake-and-real-images/Dataset/Validation/Real",
+        fake_path="/kaggle/input/deepfake-and-real-images/Dataset/Validation/Fake",
         transform=val_transform
     )
 
     test_dataset = WildDeepfakeDataset(
-        real_path="/kaggle/input/wild-deepfake/test/real",
-        fake_path="/kaggle/input/wild-deepfake/test/fake",
+        real_path="/kaggle/input/deepfake-and-real-images/Dataset/Test/Real",
+        fake_path="/kaggle/input/deepfake-and-real-images/Dataset/Test/Fake",
         transform=val_transform
     )
 
