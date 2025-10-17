@@ -244,7 +244,7 @@ def print_detailed_results(labels, predictions, model1_probs, model2_probs):
 
 def main():
     # تنظیمات
-    BATCH_SIZE = 32
+    BATCH_SIZE = 256
     IMG_SIZE = 224
     NUM_WORKERS = 4
     
