@@ -542,7 +542,7 @@ def main():
     # لود کردن مدل‌ها
     print("\n🔄 در حال بارگذاری مدل‌ها...")
     
-    MODEL1_PATH = "/kaggle/input/10k_finetuned_wd/pytorch/default/1/10k_final_pruned_finetuned_inference_ready.pt"
+    MODEL1_PATH = "/kaggle/input/10k_finetune_wd/pytorch/default/1/10k_final_pruned_finetuned_inference_ready (1).pt"
     MODEL2_PATH = "/kaggle/input/140k_finetuned_wd/pytorch/default/1/140k_final_pruned_finetuned_inference_ready (1).pt"
     
     model1 = load_pruned_model(MODEL1_PATH, device)
