@@ -57,17 +57,16 @@ class WildDeepfakeDataset(Dataset):
             return torch.zeros(3, 224, 224), torch.tensor(label, dtype=torch.float32)
 
 
-# ✅ Data Augmentation بهبود یافته
 train_transform = transforms.Compose([
     transforms.Resize(256),
     transforms.RandomCrop(224),
     transforms.RandomHorizontalFlip(p=0.5),
-    transforms.RandomRotation(15),  # ✅ افزایش به 15
-    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),  # ✅ افزایش شدت
-    transforms.RandomGrayscale(p=0.1),  # ✅ افزایش
-    transforms.RandomApply([transforms.GaussianBlur(kernel_size=3)], p=0.3),  # ✅ اضافه شد
+    transforms.RandomRotation(15),
+    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
+    transforms.RandomGrayscale(p=0.1),
+    transforms.RandomApply([transforms.GaussianBlur(kernel_size=3)], p=0.3),
     transforms.ToTensor(),
-    transforms.RandomErasing(p=0.3, scale=(0.02, 0.15)),  # ✅ افزایش
+    transforms.RandomErasing(p=0.3, scale=(0.02, 0.15)),
     transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
 ])
 
@@ -196,30 +195,6 @@ def validate(model, loader, criterion, device, writer, epoch, rank=0):
     return avg_loss, avg_acc
 
 
-# ✅ Focal Loss برای تشخیص بهتر
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.25, gamma=2.0):
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        
-    def forward(self, outputs, targets):
-        bce_loss = nn.functional.binary_cross_entropy_with_logits(outputs, targets, reduction='none')
-        pt = torch.exp(-bce_loss)
-        focal_loss = self.alpha * (1-pt)**self.gamma * bce_loss
-        return focal_loss.mean()
-
-
-class LabelSmoothingBCELoss(nn.Module):
-    def __init__(self, smoothing=0.05):  # ✅ کاهش از 0.1 به 0.05
-        super().__init__()
-        self.smoothing = smoothing
-        
-    def forward(self, outputs, targets):
-        targets = targets * (1 - self.smoothing) + 0.5 * self.smoothing
-        return nn.functional.binary_cross_entropy_with_logits(outputs, targets)
-
-
 class EarlyStopping:
     def __init__(self, patience=5, min_delta=0.001):
         self.patience = patience
@@ -265,6 +240,8 @@ def cleanup_ddp():
     dist.destroy_process_group()
 
 
+# ... (previous code remains unchanged until the scheduler part)
+
 def main(args):
     SEED = 42
     local_rank = setup_ddp(SEED)
@@ -287,7 +264,7 @@ def main(args):
 
     if global_rank == 0:
         print("="*70)
-        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 — Layer4 + FC (Optimized)")
+        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 — Layer4 + FC (BCE Loss)")
         print(f"   تعداد گرافیک: {world_size}")
         print(f"   Batch Size کل: {BATCH_SIZE}")
         print(f"   Gradient Accumulation Steps: {ACCUM_STEPS}")
@@ -346,26 +323,24 @@ def main(args):
         num_workers=2
     )
 
-    # ✅ استفاده از Focal Loss
-    criterion = LabelSmoothingBCELoss(smoothing=0.05)
+    # ✅ استفاده از BCE Loss
+    criterion = nn.BCEWithLogitsLoss()
     
     # ✅ افزایش Learning Rate به 2x
     optimizer = optim.AdamW([
-        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY},  # 2x افزایش
-        {'params': model.module.fc.parameters(), 'lr': BASE_LR * 4, 'weight_decay': WEIGHT_DECAY * 2}  # 2x افزایش
+        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY},
+        {'params': model.module.fc.parameters(), 'lr': BASE_LR * 4, 'weight_decay': WEIGHT_DECAY * 2}
     ])
     
-    # ✅ OneCycleLR scheduler
-    from torch.optim.lr_scheduler import OneCycleLR
-    scheduler = OneCycleLR(
-        optimizer, 
-        max_lr=[BASE_LR * 1.0, BASE_LR * 4],
-        epochs=NUM_EPOCHS,
-        steps_per_epoch=len(train_loader) // ACCUM_STEPS,
-        pct_start=0.3,
-        anneal_strategy='cos',
-        div_factor=25.0,
-        final_div_factor=10000.0
+    # ✅ ReduceLROnPlateau scheduler
+    from torch.optim.lr_scheduler import ReduceLROnPlateau
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode='max',  # Maximize validation accuracy
+        factor=0.5,  # Reduce learning rate by half
+        patience=3,  # Wait 3 epochs for improvement
+        min_lr=[BASE_LR * 1e-3, BASE_LR * 4e-3],  # Minimum learning rates for each param group
+        verbose=True  # Print when learning rate is reduced
     )
     
     scaler = GradScaler(enabled=True)
@@ -373,7 +348,7 @@ def main(args):
 
     if global_rank == 0:
         print("\n" + "="*70)
-        print("🎓 شروع آموزش (Layer4 + FC - Optimized)")
+        print("🎓 شروع آموزش (Layer4 + FC - BCE Loss)")
         print("="*70)
 
     best_val_acc = 0.0
@@ -390,7 +365,7 @@ def main(args):
 
         train_loss, train_acc = train_epoch(
             model, train_loader, criterion, optimizer, DEVICE, scaler, writer, 
-            epoch, global_rank, ACCUM_STEPS, scheduler
+            epoch, global_rank, ACCUM_STEPS, scheduler=None  # Pass None since ReduceLROnPlateau is stepped after validation
         )
         if global_rank == 0:
             print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
@@ -401,8 +376,11 @@ def main(args):
 
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-                torch.save(model.module.state_dict(), '/kaggle/working/best_layer4_fc_optimized.pt')
+                torch.save(model.module.state_dict(), '/kaggle/working/best_layer4_fc_bce.pt')
                 print(f"✅ بهترین مدل ذخیره شد با Val Acc: {val_acc:.2f}%")
+
+        # Step the scheduler based on validation accuracy
+        scheduler.step(val_acc)
 
         if early_stopping(val_acc):
             if global_rank == 0:
@@ -411,7 +389,7 @@ def main(args):
             break
 
     if global_rank == 0:
-        model.module.load_state_dict(torch.load('/kaggle/working/best_layer4_fc_optimized.pt'))
+        model.module.load_state_dict(torch.load('/kaggle/working/best_layer4_fc_bce.pt'))
     
     test_loss, test_acc = validate(model, test_loader, criterion, DEVICE, writer, NUM_EPOCHS, global_rank)
 
@@ -437,7 +415,7 @@ def main(args):
             'model_state_dict': model_inference.state_dict(),
             'total_params': total_params_inf,
             'masks': checkpoint['masks'],
-            'model_architecture': 'ResNet_50_pruned_hardfakevsreal (Layer4+FC Optimized)',
+            'model_architecture': 'ResNet_50_pruned_hardfakevsreal (Layer4+FC BCE)',
             'best_val_acc': best_val_acc,
             'test_acc': test_acc,
             'training_config': {
@@ -446,15 +424,15 @@ def main(args):
                 'batch_size': BATCH_SIZE,
                 'accum_steps': ACCUM_STEPS,
                 'epochs': NUM_EPOCHS,
-                'loss': 'FocalLoss',
+                'loss': 'BCEWithLogitsLoss',
                 'dropout': 0.3
             }
         }
 
-        inference_save_path = '/kaggle/working/final_pruned_layer4_fc_optimized.pt'
+        inference_save_path = '/kaggle/working/final_pruned_layer4_fc_bce.pt'
         torch.save(checkpoint_inference, inference_save_path)
 
-        print("✅ مدل هرس‌شده (Layer4+FC Optimized) با موفقیت ذخیره شد!")
+        print("✅ مدل هرس‌شده (Layer4+FC BCE) با موفقیت ذخیره شد!")
         print(f"تعداد پارامترها: {total_params_inf:,}")
         print(f"بهترین Val Acc: {best_val_acc:.2f}%")
         print(f"Test Acc: {test_acc:.2f}%")
@@ -465,10 +443,9 @@ def main(args):
         writer.close()
 
     cleanup_ddp()
-
-
+    
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Fine-tune Pruned ResNet50 for WildDeepfake Dataset (Optimized)")
+    parser = argparse.ArgumentParser(description="Fine-tune Pruned ResNet50 for WildDeepfake Dataset (BCE Loss)")
     parser.add_argument('--num_epochs', type=int, default=15, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size per GPU')
     parser.add_argument('--learning_rate', type=float, default=0.0001, help='Base learning rate')
