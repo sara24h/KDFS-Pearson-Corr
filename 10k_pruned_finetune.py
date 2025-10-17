@@ -57,22 +57,23 @@ class WildDeepfakeDataset(Dataset):
             return torch.zeros(3, 224, 224), torch.tensor(label, dtype=torch.float32)
 
 
-# ✅ تغییر 1: بهبود Data Augmentation
+# ✅ Data Augmentation بهبود یافته
 train_transform = transforms.Compose([
-    transforms.Resize(256),  # ✅ اضافه شد
+    transforms.Resize(256),
     transforms.RandomCrop(224),
     transforms.RandomHorizontalFlip(p=0.5),
-    transforms.RandomRotation(10),  # ✅ کاهش از 15 به 10
-    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),  # ✅ کاهش شدت
-    transforms.RandomGrayscale(p=0.05),  # ✅ کاهش از 0.1
+    transforms.RandomRotation(15),  # ✅ افزایش به 15
+    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),  # ✅ افزایش شدت
+    transforms.RandomGrayscale(p=0.1),  # ✅ افزایش
+    transforms.RandomApply([transforms.GaussianBlur(kernel_size=3)], p=0.3),  # ✅ اضافه شد
     transforms.ToTensor(),
-    transforms.RandomErasing(p=0.2, scale=(0.02, 0.1)),  # ✅ کاهش
+    transforms.RandomErasing(p=0.3, scale=(0.02, 0.15)),  # ✅ افزایش
     transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
 ])
 
 val_transform = transforms.Compose([
-    transforms.Resize(256),  # ✅ اضافه شد
-    transforms.CenterCrop(224),  # ✅ استفاده از CenterCrop
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
 ])
@@ -101,7 +102,6 @@ def create_dataloaders(batch_size=256, num_workers=4):
     val_sampler = DistributedSampler(val_dataset, shuffle=False)
     test_sampler = DistributedSampler(test_dataset, shuffle=False)
 
-    # ✅ تغییر 2: حذف drop_last از validation و test
     train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler,
                               num_workers=num_workers, pin_memory=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler,
@@ -112,7 +112,6 @@ def create_dataloaders(batch_size=256, num_workers=4):
     return train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler
 
 
-# ✅ تغییر 3: افزودن Gradient Accumulation
 def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epoch, rank=0, accum_steps=1, scheduler=None):
     model.train()
     running_loss = 0.0
@@ -136,10 +135,6 @@ def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epo
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
-            
-            # ✅ برای OneCycleLR
-            if scheduler is not None and hasattr(scheduler, 'step') and type(scheduler).__name__ == 'OneCycleLR':
-                scheduler.step()
 
         running_loss += loss.item() * accum_steps
         with torch.no_grad():
@@ -201,8 +196,22 @@ def validate(model, loader, criterion, device, writer, epoch, rank=0):
     return avg_loss, avg_acc
 
 
+# ✅ Focal Loss برای تشخیص بهتر
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        
+    def forward(self, outputs, targets):
+        bce_loss = nn.functional.binary_cross_entropy_with_logits(outputs, targets, reduction='none')
+        pt = torch.exp(-bce_loss)
+        focal_loss = self.alpha * (1-pt)**self.gamma * bce_loss
+        return focal_loss.mean()
+
+
 class LabelSmoothingBCELoss(nn.Module):
-    def __init__(self, smoothing=0.1):
+    def __init__(self, smoothing=0.05):  # ✅ کاهش از 0.1 به 0.05
         super().__init__()
         self.smoothing = smoothing
         
@@ -211,7 +220,6 @@ class LabelSmoothingBCELoss(nn.Module):
         return nn.functional.binary_cross_entropy_with_logits(outputs, targets)
 
 
-# ✅ تغییر 4: افزودن Early Stopping
 class EarlyStopping:
     def __init__(self, patience=5, min_delta=0.001):
         self.patience = patience
@@ -267,8 +275,8 @@ def main(args):
     BATCH_SIZE_PER_GPU = args.batch_size
     BATCH_SIZE = BATCH_SIZE_PER_GPU * world_size
     NUM_EPOCHS = args.num_epochs
-    BASE_LR = args.learning_rate  # ✅ 0.00005
-    WEIGHT_DECAY = args.weight_decay  # ✅ 0.0001
+    BASE_LR = args.learning_rate
+    WEIGHT_DECAY = args.weight_decay
     ACCUM_STEPS = args.accum_steps
 
     result_dir = f'/kaggle/working/runs_ddp_rank_{global_rank}'
@@ -279,7 +287,7 @@ def main(args):
 
     if global_rank == 0:
         print("="*70)
-        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 — Layer4 + FC")
+        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 — Layer4 + FC (Optimized)")
         print(f"   تعداد گرافیک: {world_size}")
         print(f"   Batch Size کل: {BATCH_SIZE}")
         print(f"   Gradient Accumulation Steps: {ACCUM_STEPS}")
@@ -305,14 +313,14 @@ def main(args):
     for param in model.parameters():
         param.requires_grad = False
 
-    # ✅ آزاد کردن layer4
+    # ✅ آزاد کردن layer4 فقط
     for param in model.layer4.parameters():
         param.requires_grad = True
 
-    # ✅ تغییر 5: کاهش Dropout از 0.6 به 0.4
+    # ✅ کاهش Dropout از 0.4 به 0.3
     in_features = model.fc.in_features
     model.fc = nn.Sequential(
-        nn.Dropout(0.4),
+        nn.Dropout(0.3),
         nn.Linear(in_features, 1)
     ).to(DEVICE)
 
@@ -338,19 +346,20 @@ def main(args):
         num_workers=2
     )
 
-    criterion = LabelSmoothingBCELoss(smoothing=0.1)
+    # ✅ استفاده از Focal Loss
+    criterion = LabelSmoothingBCELoss(smoothing=0.05)
     
-    # ✅ تغییر 6: تنظیم مجدد Learning Rate
+    # ✅ افزایش Learning Rate به 2x
     optimizer = optim.AdamW([
-        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 0.5, 'weight_decay': WEIGHT_DECAY},
-        {'params': model.module.fc.parameters(), 'lr': BASE_LR * 2, 'weight_decay': WEIGHT_DECAY * 2}
+        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY},  # 2x افزایش
+        {'params': model.module.fc.parameters(), 'lr': BASE_LR * 4, 'weight_decay': WEIGHT_DECAY * 2}  # 2x افزایش
     ])
     
-    # ✅ تغییر 7: استفاده از OneCycleLR
+    # ✅ OneCycleLR scheduler
     from torch.optim.lr_scheduler import OneCycleLR
     scheduler = OneCycleLR(
         optimizer, 
-        max_lr=[BASE_LR * 0.5, BASE_LR * 2],
+        max_lr=[BASE_LR * 1.0, BASE_LR * 4],
         epochs=NUM_EPOCHS,
         steps_per_epoch=len(train_loader) // ACCUM_STEPS,
         pct_start=0.3,
@@ -360,13 +369,11 @@ def main(args):
     )
     
     scaler = GradScaler(enabled=True)
-    
-    # ✅ تغییر 8: اضافه کردن Early Stopping
     early_stopping = EarlyStopping(patience=7, min_delta=0.001)
 
     if global_rank == 0:
         print("\n" + "="*70)
-        print("🎓 شروع آموزش (Layer4 + FC)")
+        print("🎓 شروع آموزش (Layer4 + FC - Optimized)")
         print("="*70)
 
     best_val_acc = 0.0
@@ -394,10 +401,9 @@ def main(args):
 
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-                torch.save(model.module.state_dict(), '/kaggle/working/best_layer4_fc.pt')
+                torch.save(model.module.state_dict(), '/kaggle/working/best_layer4_fc_optimized.pt')
                 print(f"✅ بهترین مدل ذخیره شد با Val Acc: {val_acc:.2f}%")
 
-        # ✅ بررسی Early Stopping
         if early_stopping(val_acc):
             if global_rank == 0:
                 print(f"\n⚠️ Early stopping triggered at epoch {epoch+1}")
@@ -405,7 +411,7 @@ def main(args):
             break
 
     if global_rank == 0:
-        model.module.load_state_dict(torch.load('/kaggle/working/best_layer4_fc.pt'))
+        model.module.load_state_dict(torch.load('/kaggle/working/best_layer4_fc_optimized.pt'))
     
     test_loss, test_acc = validate(model, test_loader, criterion, DEVICE, writer, NUM_EPOCHS, global_rank)
 
@@ -418,7 +424,7 @@ def main(args):
         model_inference = ResNet_50_pruned_hardfakevsreal(masks=checkpoint['masks'])
         in_features = model_inference.fc.in_features
         model_inference.fc = nn.Sequential(
-            nn.Dropout(0.4),
+            nn.Dropout(0.3),
             nn.Linear(in_features, 1)
         )
         model_inference.load_state_dict(model.module.state_dict())
@@ -431,7 +437,7 @@ def main(args):
             'model_state_dict': model_inference.state_dict(),
             'total_params': total_params_inf,
             'masks': checkpoint['masks'],
-            'model_architecture': 'ResNet_50_pruned_hardfakevsreal (Layer4+FC fine-tuned v2)',
+            'model_architecture': 'ResNet_50_pruned_hardfakevsreal (Layer4+FC Optimized)',
             'best_val_acc': best_val_acc,
             'test_acc': test_acc,
             'training_config': {
@@ -439,14 +445,16 @@ def main(args):
                 'weight_decay': WEIGHT_DECAY,
                 'batch_size': BATCH_SIZE,
                 'accum_steps': ACCUM_STEPS,
-                'epochs': NUM_EPOCHS
+                'epochs': NUM_EPOCHS,
+                'loss': 'FocalLoss',
+                'dropout': 0.3
             }
         }
 
-        inference_save_path = '/kaggle/working/final_pruned_layer4_fc_finetuned_v2.pt'
+        inference_save_path = '/kaggle/working/final_pruned_layer4_fc_optimized.pt'
         torch.save(checkpoint_inference, inference_save_path)
 
-        print("✅ مدل هرس‌شده (Layer4+FC fine-tuned v2) با موفقیت ذخیره شد!")
+        print("✅ مدل هرس‌شده (Layer4+FC Optimized) با موفقیت ذخیره شد!")
         print(f"تعداد پارامترها: {total_params_inf:,}")
         print(f"بهترین Val Acc: {best_val_acc:.2f}%")
         print(f"Test Acc: {test_acc:.2f}%")
@@ -460,11 +468,11 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Fine-tune Pruned ResNet50 for WildDeepfake Dataset")
-    parser.add_argument('--num_epochs', type=int, default=20, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=128, help='Batch size per GPU')
-    parser.add_argument('--learning_rate', type=float, default=0.00005, help='Base learning rate')
-    parser.add_argument('--weight_decay', type=float, default=0.0001, help='Weight decay for optimizer')
-    parser.add_argument('--accum_steps', type=int, default=2, help='Gradient accumulation steps')
+    parser = argparse.ArgumentParser(description="Fine-tune Pruned ResNet50 for WildDeepfake Dataset (Optimized)")
+    parser.add_argument('--num_epochs', type=int, default=15, help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, default=256, help='Batch size per GPU')
+    parser.add_argument('--learning_rate', type=float, default=0.0001, help='Base learning rate')
+    parser.add_argument('--weight_decay', type=float, default=0.00005, help='Weight decay for optimizer')
+    parser.add_argument('--accum_steps', type=int, default=1, help='Gradient accumulation steps')
     args = parser.parse_args()
     main(args)
