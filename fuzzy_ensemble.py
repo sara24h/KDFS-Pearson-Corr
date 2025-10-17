@@ -1,63 +1,292 @@
+"""
+Fuzzy Ensemble for Binary Classification - Standalone Version
+این نسخه شامل تمام کدهای لازم است و نیازی به فایل جداگانه ندارد
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as transforms
+from torchvision import transforms
 from PIL import Image
 import numpy as np
-import pandas as pd
 import os
 from tqdm import tqdm
-import glob
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 
-# تنظیمات GPU
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-if torch.cuda.device_count() > 1:
-    print(f"Using {torch.cuda.device_count()} GPUs")
+# ============================================================
+# بخش 1: معماری مدل Pruned ResNet
+# ============================================================
 
-# ==================== Import Model Architecture ====================
-# شما باید کلاس ResNet_50_pruned_hardfakevsreal را از فایل اصلی خود import کنید
-# برای مثال:
-from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
+def get_preserved_filter_num(mask):
+    return int(mask.sum())
 
-# اگر فایل مدل را ندارید، مسیر آن را به sys.path اضافه کنید:
-import sys
-# sys.path.append('/path/to/your/model/directory')
 
-# برای Kaggle:
-# اگر مدل در input قرار دارد:
-#sys.path.append('/kaggle/input/your-model-code-dataset')
+class BasicBlock_pruned(nn.Module):
+    expansion = 1
 
-# سپس import کنید:
-try:
-    from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
-    print("✅ Model architecture imported successfully")
-except ImportError as e:
-    print(f"⚠️  Could not import ResNet_50_pruned_hardfakevsreal: {e}")
-    print("Please ensure the model architecture file is available")
-    ResNet_50_pruned_hardfakevsreal = None
+    def __init__(self, in_planes, planes, masks=[], stride=1):
+        super().__init__()
+        self.masks = masks
 
-# ==================== Dataset ====================
-class DeepfakeDataset(Dataset):
-    """Dataset برای بارگذاری تصاویر Deepfake"""
+        preserved_filter_num1 = get_preserved_filter_num(masks[0])
+        self.conv1 = nn.Conv2d(
+            in_planes,
+            preserved_filter_num1,
+            kernel_size=3,
+            stride=stride,
+            padding=1,
+            bias=False,
+        )
+        self.bn1 = nn.BatchNorm2d(preserved_filter_num1)
+        preserved_filter_num2 = get_preserved_filter_num(masks[1])
+        self.conv2 = nn.Conv2d(
+            preserved_filter_num1,
+            preserved_filter_num2,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+        )
+        self.bn2 = nn.BatchNorm2d(preserved_filter_num2)
+
+        self.downsample = nn.Sequential()
+        if stride != 1 or in_planes != self.expansion * planes:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(
+                    in_planes,
+                    self.expansion * planes,
+                    kernel_size=1,
+                    stride=stride,
+                    bias=False,
+                ),
+                nn.BatchNorm2d(self.expansion * planes),
+            )
+
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+
+        shortcut_out = self.downsample(x)
+        padded_out = torch.zeros_like(shortcut_out)
+
+        idx = torch.nonzero(self.masks[1], as_tuple=False).squeeze(1)
+        if idx.numel() > 0:
+            temp_full = torch.zeros_like(padded_out)
+            for i, ch_idx in enumerate(idx):
+                temp_full[:, ch_idx, :, :] = out[:, i, :, :]
+            padded_out = temp_full
+
+        assert padded_out.shape == shortcut_out.shape, "wrong shape"
+
+        padded_out += shortcut_out
+        padded_out = F.relu(padded_out)
+        return padded_out
+
+
+class Bottleneck_pruned(nn.Module):
+    expansion = 4
+
+    def __init__(self, in_planes, planes, masks=[], stride=1):
+        super().__init__()
+        self.masks = masks
+
+        preserved_filter_num1 = get_preserved_filter_num(masks[0])
+        self.conv1 = nn.Conv2d(
+            in_planes, preserved_filter_num1, kernel_size=1, bias=False
+        )
+        self.bn1 = nn.BatchNorm2d(preserved_filter_num1)
+        preserved_filter_num2 = get_preserved_filter_num(masks[1])
+        self.conv2 = nn.Conv2d(
+            preserved_filter_num1,
+            preserved_filter_num2,
+            kernel_size=3,
+            stride=stride,
+            padding=1,
+            bias=False,
+        )
+        self.bn2 = nn.BatchNorm2d(preserved_filter_num2)
+        preserved_filter_num3 = get_preserved_filter_num(masks[2])
+        self.conv3 = nn.Conv2d(
+            preserved_filter_num2,
+            preserved_filter_num3,
+            kernel_size=1,
+            bias=False,
+        )
+        self.bn3 = nn.BatchNorm2d(preserved_filter_num3)
+
+        self.downsample = nn.Sequential()
+        if stride != 1 or in_planes != self.expansion * planes:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(
+                    in_planes,
+                    self.expansion * planes,
+                    kernel_size=1,
+                    stride=stride,
+                    bias=False,
+                ),
+                nn.BatchNorm2d(self.expansion * planes),
+            )
+
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = F.relu(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+
+        shortcut_out = self.downsample(x)
+        padded_out = torch.zeros_like(shortcut_out)
+
+        idx = torch.nonzero(self.masks[2], as_tuple=False).squeeze(1)
+        if idx.numel() > 0:
+            temp_full = torch.zeros_like(padded_out)
+            for i, ch_idx in enumerate(idx):
+                temp_full[:, ch_idx, :, :] = out[:, i, :, :]
+            padded_out = temp_full
+
+        assert padded_out.shape == shortcut_out.shape, "wrong shape"
+
+        padded_out += shortcut_out
+        padded_out = F.relu(padded_out)
+        return padded_out
+
+
+class ResNet_pruned(nn.Module):
+    def __init__(self, block, num_blocks, masks=[], num_classes=1):
+        super().__init__()
+        self.in_planes = 64
+
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+
+        coef = 0
+        if block == BasicBlock_pruned:
+            coef = 2
+        elif block == Bottleneck_pruned:
+            coef = 3
+        num = 0
+        self.layer1 = self._make_layer(
+            block,
+            64,
+            num_blocks[0],
+            stride=1,
+            masks=masks[0 : coef * num_blocks[0]],
+        )
+        num = num + coef * num_blocks[0]
+
+        self.layer2 = self._make_layer(
+            block,
+            128,
+            num_blocks[1],
+            stride=2,
+            masks=masks[num : num + coef * num_blocks[1]],
+        )
+        num = num + coef * num_blocks[1]
+
+        self.layer3 = self._make_layer(
+            block,
+            256,
+            num_blocks[2],
+            stride=2,
+            masks=masks[num : num + coef * num_blocks[2]],
+        )
+        num = num + coef * num_blocks[2]
+
+        self.layer4 = self._make_layer(
+            block,
+            512,
+            num_blocks[3],
+            stride=2,
+            masks=masks[num : num + coef * num_blocks[3]],
+        )
+        num = num + coef * num_blocks[3]
+
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(512 * block.expansion, num_classes)
+
+    def _make_layer(self, block, planes, num_blocks, stride, masks=[]):
+        strides = [stride] + [1] * (num_blocks - 1)
+        layers = []
+
+        coef = 0
+        if block == BasicBlock_pruned:
+            coef = 2
+        elif block == Bottleneck_pruned:
+            coef = 3
+
+        for i, stride in enumerate(strides):
+            layers.append(
+                block(
+                    self.in_planes,
+                    planes,
+                    masks[coef * i : coef * i + coef],
+                    stride,
+                )
+            )
+            self.in_planes = planes * block.expansion
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        feature_list = []
+
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.maxpool(out)
+
+        for block in self.layer1:
+            out = block(out)
+        feature_list.append(out)
+
+        for block in self.layer2:
+            out = block(out)
+        feature_list.append(out)
+
+        for block in self.layer3:
+            out = block(out)
+        feature_list.append(out)
+
+        for block in self.layer4:
+            out = block(out)
+        feature_list.append(out)
+
+        out = self.avgpool(out)
+        out = out.view(out.size(0), -1)
+        out = self.fc(out)
+        return out, feature_list
+
+
+def ResNet_50_pruned_hardfakevsreal(masks): 
+    return ResNet_pruned(
+        block=Bottleneck_pruned, num_blocks=[3, 4, 6, 3], masks=masks, num_classes=1
+    )
+
+
+# ============================================================
+# بخش 2: Dataset و توابع کمکی
+# ============================================================
+
+class WildDeepfakeDataset(Dataset):
+    """دیتاست سفارشی برای Wild-Deepfake"""
     def __init__(self, real_path, fake_path, transform=None):
         self.transform = transform
         self.images = []
         self.labels = []
         
-        # بارگذاری تصاویر Real (label=0)
-        real_images = glob.glob(os.path.join(real_path, "*.*"))
-        self.images.extend(real_images)
-        self.labels.extend([0] * len(real_images))
+        # خواندن تصاویر real (label=0)
+        if os.path.exists(real_path):
+            real_files = [f for f in os.listdir(real_path) if f.endswith(('.jpg', '.jpeg', '.png'))]
+            for fname in real_files:
+                self.images.append(os.path.join(real_path, fname))
+                self.labels.append(0)
         
-        # بارگذاری تصاویر Fake (label=1)
-        fake_images = glob.glob(os.path.join(fake_path, "*.*"))
-        self.images.extend(fake_images)
-        self.labels.extend([1] * len(fake_images))
+        # خواندن تصاویر fake (label=1)
+        if os.path.exists(fake_path):
+            fake_files = [f for f in os.listdir(fake_path) if f.endswith(('.jpg', '.jpeg', '.png'))]
+            for fname in fake_files:
+                self.images.append(os.path.join(fake_path, fname))
+                self.labels.append(1)
         
-        print(f"Loaded {len(real_images)} real and {len(fake_images)} fake images")
+        print(f"تعداد تصاویر Real: {len([l for l in self.labels if l==0])}")
+        print(f"تعداد تصاویر Fake: {len([l for l in self.labels if l==1])}")
+        print(f"مجموع تصاویر: {len(self.images)}")
     
     def __len__(self):
         return len(self.images)
@@ -72,292 +301,325 @@ class DeepfakeDataset(Dataset):
                 image = self.transform(image)
             return image, label, img_path
         except Exception as e:
-            print(f"Error loading {img_path}: {e}")
-            if self.transform:
-                return self.transform(Image.new('RGB', (224, 224))), label, img_path
-            return Image.new('RGB', (224, 224)), label, img_path
+            print(f"❌ خطا در لود {img_path}: {e}")
+            return torch.zeros(3, 224, 224), label, img_path
 
-# ==================== Fuzzy Ensemble ====================
-class FuzzyEnsemble:
-    """کلاس ترکیب‌کننده فازی برای دو مدل"""
-    
-    @staticmethod
-    def generate_rank1(score, class_no=2):
-        """محاسبه رتبه با تابع Gaussian"""
-        rank = np.zeros([class_no, 1])
-        scores = score.reshape(-1, 1)
-        for i in range(class_no):
-            rank[i] = 1 - np.exp(-((scores[i] - 1) ** 2) / 2.0)
-        return rank
-    
-    @staticmethod
-    def generate_rank2(score, class_no=2):
-        """محاسبه رتبه با تابع Tanh"""
-        rank = np.zeros([class_no, 1])
-        scores = score.reshape(-1, 1)
-        for i in range(class_no):
-            rank[i] = 1 - np.tanh(((scores[i] - 1) ** 2) / 2)
-        return rank
-    
-    @staticmethod
-    def fuse_two_models(res1, res2, labels, class_no=2):
-        """ترکیب نتایج دو مدل با منطق فازی"""
-        cnt = 0
-        predictions = []
-        fused_scores = []
-        
-        for i in range(len(res1)):
-            # محاسبه رتبه‌ها برای مدل اول
-            rank1_m1 = FuzzyEnsemble.generate_rank1(res1[i], class_no)
-            rank2_m1 = FuzzyEnsemble.generate_rank2(res1[i], class_no)
-            rank_m1 = rank1_m1 * rank2_m1
-            
-            # محاسبه رتبه‌ها برای مدل دوم
-            rank1_m2 = FuzzyEnsemble.generate_rank1(res2[i], class_no)
-            rank2_m2 = FuzzyEnsemble.generate_rank2(res2[i], class_no)
-            rank_m2 = rank1_m2 * rank2_m2
-            
-            # جمع رتبه‌ها
-            rank_sum = rank_m1 + rank_m2
-            rank_sum = np.array(rank_sum)
-            
-            # محاسبه میانگین امتیازات
-            score_sum = 1 - (res1[i] + res2[i]) / 2
-            score_sum = np.array(score_sum).reshape(-1, 1)
-            
-            # امتیاز نهایی فازی
-            fused_score = (rank_sum.T) * score_sum
-            fused_scores.append(fused_score[0])
-            
-            # پیش‌بینی کلاس (کمترین رتبه)
-            cls = np.argmin(rank_sum)
-            predictions.append(cls)
-            
-            # شمارش پیش‌بینی‌های صحیح
-            if cls < class_no and labels[i] == cls:
-                cnt += 1
-        
-        accuracy = cnt / len(res1)
-        print(f"Fuzzy Ensemble Accuracy: {accuracy:.4f}")
-        
-        return predictions, fused_scores, accuracy
 
-# ==================== بارگذاری مدل Pruned ====================
-def load_pruned_model_with_masks(model_path, model_class):
-    """بارگذاری مدل Pruned با استفاده از masks"""
-    print(f"\n{'='*70}")
-    print(f"📥 Loading pruned model from: {model_path}")
+def load_pruned_model(checkpoint_path, device):
+    """لود کردن مدل pruned از checkpoint"""
+    print(f"🔄 در حال لود مدل از: {checkpoint_path}")
     
-    try:
-        # بارگذاری checkpoint
-        checkpoint = torch.load(model_path, map_location='cpu')
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    if isinstance(checkpoint, dict):
+        print(f"✅ Checkpoint شامل کلیدهای: {list(checkpoint.keys())}")
         
-        # استخراج اطلاعات
-        if isinstance(checkpoint, dict):
-            model_state_dict = checkpoint.get('model_state_dict')
-            masks = checkpoint.get('masks')
-            model_arch = checkpoint.get('model_architecture', 'Unknown')
-            total_params = checkpoint.get('total_params', 0)
-            
-            print(f"✓ Model architecture: {model_arch}")
-            print(f"✓ Total parameters: {total_params:,}")
-            print(f"✓ Number of masks: {len(masks) if masks else 0}")
-            
-            if model_state_dict is None or masks is None:
-                raise ValueError("model_state_dict or masks not found in checkpoint")
-            
-            # ساخت مدل با استفاده از masks
-            if model_class is None:
-                raise ImportError("Model class not imported. Please check import statement.")
-            
-            model = model_class(masks=masks)
-            
-            # بارگذاری وزن‌ها
-            model.load_state_dict(model_state_dict)
-            
-            print(f"✅ Model loaded successfully!")
-            
-            return model
+        # استخراج masks
+        masks = checkpoint.get('masks', None)
+        if masks is not None:
+            masks_detached = [m.detach().clone() if m is not None else None for m in masks]
         else:
-            raise ValueError(f"Expected dict, got {type(checkpoint)}")
-            
-    except Exception as e:
-        print(f"❌ Error loading model: {e}")
-        raise
-
-def setup_model_for_inference(model):
-    """آماده‌سازی مدل برای inference با DataParallel"""
+            masks_detached = None
+            print("⚠️ هیچ mask در checkpoint یافت نشد")
+        
+        # ساخت مدل با masks
+        model = ResNet_50_pruned_hardfakevsreal(masks=masks_detached)
+        
+        # لود کردن وزن‌ها
+        if 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'])
+            print("✅ وزن‌ها از 'model_state_dict' لود شدند")
+        elif 'state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['state_dict'])
+            print("✅ وزن‌ها از 'state_dict' لود شدند")
+        else:
+            model.load_state_dict(checkpoint)
+            print("✅ وزن‌ها مستقیماً از checkpoint لود شدند")
+        
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"📊 تعداد کل پارامترها: {total_params:,}")
+        
+    else:
+        raise ValueError("❌ فرمت checkpoint نامعتبر است!")
     
-    # استفاده از DataParallel برای چند GPU
-    if torch.cuda.device_count() > 1:
-        print(f"🔀 Using DataParallel with {torch.cuda.device_count()} GPUs")
-        model = nn.DataParallel(model)
-    
-    model.to(device)
+    model = model.to(device)
     model.eval()
     
     return model
 
-def get_predictions_binary(model, dataloader):
-    """استخراج پیش‌بینی‌های مدل برای دسته‌بندی باینری"""
+
+def get_predictions(model, dataloader, device):
+    """پیش‌بینی احتمالات برای دسته‌بندی باینری"""
     all_probs = []
     all_labels = []
-    all_paths = []
     
     model.eval()
     with torch.no_grad():
-        for images, labels, paths in tqdm(dataloader, desc="Predicting"):
+        for images, labels, _ in tqdm(dataloader, desc="Getting predictions"):
             images = images.to(device)
-            outputs = model(images)
             
-            # برای خروجی تک‌کلاسه (binary classification with sigmoid)
-            if outputs.dim() == 1 or (outputs.dim() == 2 and outputs.shape[1] == 1):
-                # خروجی: [batch_size] یا [batch_size, 1]
-                outputs = outputs.squeeze()
-                probs_fake = torch.sigmoid(outputs)
-                probs_real = 1 - probs_fake
-                probs = torch.stack([probs_real, probs_fake], dim=1)
-            else:
-                # خروجی: [batch_size, 2]
-                probs = F.softmax(outputs, dim=1)
+            # پیش‌بینی (مدل یک خروجی و feature map برمی‌گرداند)
+            outputs, _ = model(images)
             
-            all_probs.append(probs.cpu().numpy())
-            all_labels.extend(labels.numpy())
-            all_paths.extend(paths)
+            # تبدیل logits به احتمالات
+            probs_fake = torch.sigmoid(outputs).squeeze()
+            
+            if probs_fake.dim() == 0:
+                probs_fake = probs_fake.unsqueeze(0)
+            
+            probs_real = 1 - probs_fake
+            probs_2class = torch.stack([probs_real, probs_fake], dim=1)
+            
+            all_probs.append(probs_2class.cpu().numpy())
+            all_labels.append(labels.numpy())
     
     all_probs = np.vstack(all_probs)
-    all_labels = np.array(all_labels)
+    all_labels = np.concatenate(all_labels)
     
-    return all_probs, all_labels, all_paths
+    return all_probs, all_labels
+
+
+# ============================================================
+# بخش 3: توابع Fuzzy Ensemble
+# ============================================================
+
+def generateRank1(score, class_no=2):
+    """تابع رتبه‌بندی فازی اول"""
+    rank = np.zeros([class_no, 1])
+    scores = score.reshape(-1, 1)
+    
+    for i in range(class_no):
+        rank[i] = 1 - np.exp(-((scores[i] - 1) ** 2) / 2.0)
+    
+    return rank
+
+
+def generateRank2(score, class_no=2):
+    """تابع رتبه‌بندی فازی دوم"""
+    rank = np.zeros([class_no, 1])
+    scores = score.reshape(-1, 1)
+    
+    for i in range(class_no):
+        rank[i] = 1 - np.tanh(((scores[i] - 1) ** 2) / 2)
+    
+    return rank
+
+
+def fuzzy_ensemble_binary(res1, res2, labels, class_no=2):
+    """ترکیب فازی برای دسته‌بندی باینری"""
+    correct = 0
+    predictions = []
+    fusion_details = []
+    
+    for i in range(len(res1)):
+        # محاسبه رتبه‌های فازی
+        rank1 = generateRank1(res1[i], class_no) * generateRank2(res1[i], class_no)
+        rank2 = generateRank1(res2[i], class_no) * generateRank2(res2[i], class_no)
+        
+        # جمع رتبه‌ها
+        rankSum = rank1 + rank2
+        rankSum = np.array(rankSum)
+        
+        # محاسبه میانگین امتیازات
+        scoreSum = 1 - (res1[i] + res2[i]) / 2
+        scoreSum = np.array(scoreSum).reshape(-1, 1)
+        
+        # محاسبه امتیاز نهایی فازی
+        fusedScore = (rankSum.T) * scoreSum
+        
+        # انتخاب کلاس با کمترین رتبه
+        cls = np.argmin(rankSum)
+        predictions.append(cls)
+        
+        # ذخیره جزئیات
+        fusion_details.append({
+            'sample_idx': i,
+            'model1_probs': res1[i],
+            'model2_probs': res2[i],
+            'rank1': rank1.flatten(),
+            'rank2': rank2.flatten(),
+            'rankSum': rankSum.flatten(),
+            'fusedScore': fusedScore.flatten(),
+            'prediction': cls,
+            'true_label': labels[i]
+        })
+        
+        if cls < class_no and labels[i] == cls:
+            correct += 1
+    
+    accuracy = correct / len(res1)
+    
+    return np.array(predictions), accuracy, fusion_details
+
+
+def print_detailed_results(labels, predictions, model1_probs, model2_probs):
+    """نمایش نتایج تفصیلی"""
+    from sklearn.metrics import classification_report, confusion_matrix
+    
+    print("\n" + "="*70)
+    print("📊 گزارش دسته‌بندی:")
+    print("="*70)
+    print(classification_report(labels, predictions, 
+                                target_names=['Real', 'Fake'],
+                                digits=4))
+    
+    print("\n" + "="*70)
+    print("📈 ماتریس درهم‌ریختگی:")
+    print("="*70)
+    cm = confusion_matrix(labels, predictions)
+    print(f"\n{'':15} {'Predicted Real':>15} {'Predicted Fake':>15}")
+    print(f"{'Actual Real':15} {cm[0,0]:>15} {cm[0,1]:>15}")
+    print(f"{'Actual Fake':15} {cm[1,0]:>15} {cm[1,1]:>15}")
+    
+    print("\n" + "="*70)
+    print("📊 آمار تفصیلی:")
+    print("="*70)
+    print(f"✅ Real correctly classified: {cm[0,0]} / {cm[0,0] + cm[0,1]}")
+    print(f"❌ Real misclassified as Fake: {cm[0,1]} / {cm[0,0] + cm[0,1]}")
+    print(f"✅ Fake correctly classified: {cm[1,1]} / {cm[1,0] + cm[1,1]}")
+    print(f"❌ Fake misclassified as Real: {cm[1,0]} / {cm[1,0] + cm[1,1]}")
+    
+    # محاسبه دقت هر مدل
+    model1_preds = np.argmax(model1_probs, axis=1)
+    model2_preds = np.argmax(model2_probs, axis=1)
+    
+    model1_acc = (model1_preds == labels).sum() / len(labels)
+    model2_acc = (model2_preds == labels).sum() / len(labels)
+    ensemble_acc = (predictions == labels).sum() / len(labels)
+    
+    print("\n" + "="*70)
+    print("🔬 مقایسه عملکرد مدل‌ها:")
+    print("="*70)
+    print(f"Model 1 Accuracy: {model1_acc*100:.2f}%")
+    print(f"Model 2 Accuracy: {model2_acc*100:.2f}%")
+    print(f"Fuzzy Ensemble Accuracy: {ensemble_acc*100:.2f}%")
+    improvement = (ensemble_acc - max(model1_acc, model2_acc))*100
+    print(f"بهبود نسبت به بهترین مدل: {improvement:+.2f}%")
+
+
+# ============================================================
+# بخش 4: Main Function
+# ============================================================
 
 def main():
-    # بررسی import مدل
-    if ResNet_50_pruned_hardfakevsreal is None:
-        print("\n" + "="*70)
-        print("❌ CRITICAL ERROR: Model architecture not imported!")
-        print("\n📋 TO FIX THIS:")
-        print("1. Upload your model architecture code to Kaggle as a dataset")
-        print("2. Add the dataset to your notebook")
-        print("3. Update the import path in line ~30 of this code")
-        print("\n   Example:")
-        print("   sys.path.append('/kaggle/input/your-model-architecture-dataset')")
-        print("   from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal")
-        print("="*70)
-        return
-    
-    # مسیر دیتاست
-    real_path = "/kaggle/input/wild-deepfake/test/real"
-    fake_path = "/kaggle/input/wild-deepfake/test/fake"
-    
     # تنظیمات
-    batch_size = 32
-    num_workers = 4
-    class_no = 2
+    BATCH_SIZE = 32
+    IMG_SIZE = 224
+    NUM_WORKERS = 4
     
-    # Transforms
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
+    # تنظیم دستگاه
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"📱 دستگاه: {device}")
+    
+    if torch.cuda.is_available():
+        print(f"🚀 GPU: {torch.cuda.get_device_name(0)}")
+        print(f"💾 حافظه GPU: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+    
+    # تعریف transforms
+    val_transform = transforms.Compose([
+        transforms.Resize((IMG_SIZE, IMG_SIZE)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                           std=[0.229, 0.224, 0.225])
+        transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], 
+                           std=[0.1854, 0.1623, 0.1562])
     ])
     
-    # ساخت Dataset و DataLoader
-    print("="*70)
-    print("📊 Loading test dataset...")
-    test_dataset = DeepfakeDataset(real_path, fake_path, transform=transform)
-    test_loader = DataLoader(
-        test_dataset, 
-        batch_size=batch_size, 
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=True
+    # ایجاد dataset و dataloader
+    print("\n📂 در حال بارگذاری دیتاست...")
+    test_dataset = WildDeepfakeDataset(
+        real_path="/kaggle/input/wild-deepfake/test/real",
+        fake_path="/kaggle/input/wild-deepfake/test/fake",
+        transform=val_transform
     )
     
-    # مسیر مدل‌ها
-    model1_path = "/kaggle/input/10k_finetune_wd/pytorch/default/1/10k_final_pruned_finetuned_inference_ready (1).pt"
-    model2_path = "/kaggle/input/140k_finetuned_wd/pytorch/default/1/140k_final_pruned_finetuned_inference_ready (1).pt"
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+        pin_memory=True if torch.cuda.is_available() else False
+    )
     
-    # بارگذاری مدل 1
-    print("\n" + "="*70)
-    print("🔧 Loading Model 1...")
-    model1 = load_pruned_model_with_masks(model1_path, ResNet_50_pruned_hardfakevsreal)
-    model1 = setup_model_for_inference(model1)
+    # لود کردن مدل‌ها
+    print("\n🔄 در حال بارگذاری مدل‌ها...")
     
-    # بارگذاری مدل 2
-    print("\n" + "="*70)
-    print("🔧 Loading Model 2...")
-    model2 = load_pruned_model_with_masks(model2_path, ResNet_50_pruned_hardfakevsreal)
-    model2 = setup_model_for_inference(model2)
+    MODEL1_PATH = "/kaggle/input/10k_finetuned_wd/pytorch/default/1/10k_final_pruned_finetuned_inference_ready.pt"
+    MODEL2_PATH = "/kaggle/input/140k_finetuned_wd/pytorch/default/1/140k_final_pruned_finetuned_inference_ready (1).pt"
     
-    # استخراج پیش‌بینی‌ها
-    print("\n" + "="*70)
-    print("🔮 Getting predictions from Model 1...")
-    probs1, labels, paths = get_predictions_binary(model1, test_loader)
+    model1 = load_pruned_model(MODEL1_PATH, device)
+    print("✅ Model 1 لود شد\n")
     
-    print("\n🔮 Getting predictions from Model 2...")
-    probs2, _, _ = get_predictions_binary(model2, test_loader)
+    model2 = load_pruned_model(MODEL2_PATH, device)
+    print("✅ Model 2 لود شد\n")
     
-    # ارزیابی مدل‌های جداگانه
-    print("\n" + "="*70)
-    print("📊 Model 1 Performance:")
-    preds1 = np.argmax(probs1, axis=1)
-    acc1 = accuracy_score(labels, preds1)
-    print(f"Accuracy: {acc1:.4f}")
-    print(classification_report(labels, preds1, target_names=['Real', 'Fake']))
+    # دریافت پیش‌بینی‌ها
+    print("🔮 Model 1: در حال پیش‌بینی...")
+    predictions1, labels = get_predictions(model1, test_loader, device)
     
-    print("\n" + "="*70)
-    print("📊 Model 2 Performance:")
-    preds2 = np.argmax(probs2, axis=1)
-    acc2 = accuracy_score(labels, preds2)
-    print(f"Accuracy: {acc2:.4f}")
-    print(classification_report(labels, preds2, target_names=['Real', 'Fake']))
+    print("🔮 Model 2: در حال پیش‌بینی...")
+    predictions2, _ = get_predictions(model2, test_loader, device)
+    
+    print(f"\n✅ پیش‌بینی‌ها دریافت شد")
+    print(f"   - تعداد نمونه‌ها: {len(predictions1)}")
+    print(f"   - شکل احتمالات: {predictions1.shape}")
     
     # ترکیب فازی
     print("\n" + "="*70)
-    print("🔥 Fuzzy Ensemble Fusion...")
-    fuzzy_ensemble = FuzzyEnsemble()
-    predictions, fused_scores, ensemble_acc = fuzzy_ensemble.fuse_two_models(
-        probs1, probs2, labels, class_no
+    print("🎯 در حال ترکیب فازی مدل‌ها...")
+    print("="*70)
+    
+    final_predictions, accuracy, fusion_details = fuzzy_ensemble_binary(
+        predictions1, 
+        predictions2, 
+        labels,
+        class_no=2
     )
     
-    # گزارش نهایی
-    print("\n" + "="*70)
-    print("🎯 Final Ensemble Performance:")
-    print(classification_report(labels, predictions, target_names=['Real', 'Fake']))
-    print("\n📈 Confusion Matrix:")
-    cm = confusion_matrix(labels, predictions)
-    print(cm)
-    print(f"\n   Real predicted as Real: {cm[0,0]}")
-    print(f"   Real predicted as Fake: {cm[0,1]}")
-    print(f"   Fake predicted as Real: {cm[1,0]}")
-    print(f"   Fake predicted as Fake: {cm[1,1]}")
+    print(f"\n✅ دقت ترکیب فازی: {accuracy * 100:.2f}%")
+    print(f"✅ تعداد پیش‌بینی صحیح: {int(accuracy * len(labels))}/{len(labels)}")
+    
+    # نمایش نتایج تفصیلی
+    print_detailed_results(labels, final_predictions, predictions1, predictions2)
     
     # ذخیره نتایج
-    results_df = pd.DataFrame({
-        'image_path': paths,
-        'true_label': ['Real' if l == 0 else 'Fake' for l in labels],
-        'model1_pred': ['Real' if p == 0 else 'Fake' for p in preds1],
-        'model2_pred': ['Real' if p == 0 else 'Fake' for p in preds2],
-        'ensemble_pred': ['Real' if p == 0 else 'Fake' for p in predictions],
-        'model1_prob_real': probs1[:, 0],
-        'model1_prob_fake': probs1[:, 1],
-        'model2_prob_real': probs2[:, 0],
-        'model2_prob_fake': probs2[:, 1],
+    print("\n💾 در حال ذخیره نتایج...")
+    
+    results = {
+        'final_predictions': final_predictions,
+        'true_labels': labels,
+        'accuracy': accuracy,
+        'model1_probabilities': predictions1,
+        'model2_probabilities': predictions2,
+        'fusion_details': fusion_details[:100],
+        'dataset_info': {
+            'total_samples': len(labels),
+            'real_samples': int((labels == 0).sum()),
+            'fake_samples': int((labels == 1).sum())
+        }
+    }
+    
+    torch.save(results, 'fuzzy_ensemble_results.pt')
+    print("✅ نتایج در 'fuzzy_ensemble_results.pt' ذخیره شد")
+    
+    # ذخیره CSV
+    import pandas as pd
+    
+    df_results = pd.DataFrame({
+        'true_label': labels,
+        'fuzzy_prediction': final_predictions,
+        'model1_prob_real': predictions1[:, 0],
+        'model1_prob_fake': predictions1[:, 1],
+        'model2_prob_real': predictions2[:, 0],
+        'model2_prob_fake': predictions2[:, 1],
+        'is_correct': (final_predictions == labels).astype(int)
     })
     
-    results_df.to_csv('fuzzy_ensemble_results.csv', index=False)
-    print("\n💾 Results saved to 'fuzzy_ensemble_results.csv'")
+    df_results.to_csv('fuzzy_ensemble_results.csv', index=False)
+    print("✅ نتایج در 'fuzzy_ensemble_results.csv' ذخیره شد")
     
-    # مقایسه عملکرد
     print("\n" + "="*70)
-    print("📊 Performance Comparison:")
-    print(f"   Model 1 Accuracy      : {acc1:.4f}")
-    print(f"   Model 2 Accuracy      : {acc2:.4f}")
-    print(f"   Fuzzy Ensemble Accuracy: {ensemble_acc:.4f}")
-    print(f"   Improvement over M1   : {(ensemble_acc - acc1)*100:+.2f}%")
-    print(f"   Improvement over M2   : {(ensemble_acc - acc2)*100:+.2f}%")
+    print("🎉 پردازش با موفقیت انجام شد!")
     print("="*70)
+
 
 if __name__ == "__main__":
     main()
