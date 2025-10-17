@@ -19,7 +19,6 @@ from torch.amp import autocast, GradScaler
 import argparse
 from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
 
-
 class WildDeepfakeDataset(Dataset):
     def __init__(self, real_path, fake_path, transform=None):
         self.transform = transform
@@ -58,25 +57,17 @@ class WildDeepfakeDataset(Dataset):
 
 
 train_transform = transforms.Compose([
-    transforms.Resize(256),
-    transforms.RandomCrop(224),
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.RandomRotation(15),
-    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
-    transforms.RandomGrayscale(p=0.1),
-    transforms.RandomApply([transforms.GaussianBlur(kernel_size=3)], p=0.3),
+    transforms.CenterCrop(224),
+    transforms.RandomHorizontalFlip(p=0.3),
     transforms.ToTensor(),
-    transforms.RandomErasing(p=0.3, scale=(0.02, 0.15)),
     transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
 ])
 
 val_transform = transforms.Compose([
-    transforms.Resize(256),
     transforms.CenterCrop(224),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
 ])
-
 
 def create_dataloaders(batch_size=256, num_workers=4):
     train_dataset = WildDeepfakeDataset(
@@ -109,7 +100,6 @@ def create_dataloaders(batch_size=256, num_workers=4):
                              num_workers=num_workers, pin_memory=True, drop_last=False)
 
     return train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler
-
 
 def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epoch, rank=0, accum_steps=1, scheduler=None):
     model.train()
@@ -160,7 +150,6 @@ def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epo
 
     return avg_loss, avg_acc
 
-
 @torch.no_grad()
 def validate(model, loader, criterion, device, writer, epoch, rank=0):
     model.eval()
@@ -194,7 +183,6 @@ def validate(model, loader, criterion, device, writer, epoch, rank=0):
 
     return avg_loss, avg_acc
 
-
 class EarlyStopping:
     def __init__(self, patience=5, min_delta=0.001):
         self.patience = patience
@@ -215,14 +203,11 @@ class EarlyStopping:
             self.counter = 0
         return self.early_stop
 
-
 def setup_ddp(seed):
     os.environ['TORCH_NCCL_TIMEOUT_MS'] = '1800000'
-
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
     dist.init_process_group(backend='nccl')
-
     seed = seed + dist.get_rank()
     random.seed(seed)
     np.random.seed(seed)
@@ -235,12 +220,8 @@ def setup_ddp(seed):
 
     return local_rank
 
-
 def cleanup_ddp():
     dist.destroy_process_group()
-
-
-# ... (previous code remains unchanged until the scheduler part)
 
 def main(args):
     SEED = 42
@@ -286,15 +267,12 @@ def main(args):
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(DEVICE)
 
-    # 🔒 فریز کردن همه لایه‌ها
     for param in model.parameters():
         param.requires_grad = False
 
-    # ✅ آزاد کردن layer4 فقط
     for param in model.layer4.parameters():
         param.requires_grad = True
 
-    # ✅ کاهش Dropout از 0.4 به 0.3
     in_features = model.fc.in_features
     model.fc = nn.Sequential(
         nn.Dropout(0.3),
@@ -323,26 +301,14 @@ def main(args):
         num_workers=2
     )
 
-    # ✅ استفاده از BCE Loss
     criterion = nn.BCEWithLogitsLoss()
-    
-    # ✅ افزایش Learning Rate به 2x
-    optimizer = optim.AdamW([
+
+    optimizer = optim.Adam([
         {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY},
         {'params': model.module.fc.parameters(), 'lr': BASE_LR * 4, 'weight_decay': WEIGHT_DECAY * 2}
     ])
     
-    # ✅ ReduceLROnPlateau scheduler
-    from torch.optim.lr_scheduler import ReduceLROnPlateau
-    scheduler = ReduceLROnPlateau(
-        optimizer,
-        mode='max',  # Maximize validation accuracy
-        factor=0.5,  # Reduce learning rate by half
-        patience=3,  # Wait 3 epochs for improvement
-        min_lr=[BASE_LR * 1e-3, BASE_LR * 4e-3],  # Minimum learning rates for each param group
-        verbose=True  # Print when learning rate is reduced
-    )
-    
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
     scaler = GradScaler(enabled=True)
     early_stopping = EarlyStopping(patience=7, min_delta=0.001)
 
@@ -365,7 +331,7 @@ def main(args):
 
         train_loss, train_acc = train_epoch(
             model, train_loader, criterion, optimizer, DEVICE, scaler, writer, 
-            epoch, global_rank, ACCUM_STEPS, scheduler=None  # Pass None since ReduceLROnPlateau is stepped after validation
+            epoch, global_rank, ACCUM_STEPS, scheduler=scheduler
         )
         if global_rank == 0:
             print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
@@ -379,8 +345,8 @@ def main(args):
                 torch.save(model.module.state_dict(), '/kaggle/working/best_layer4_fc_bce.pt')
                 print(f"✅ بهترین مدل ذخیره شد با Val Acc: {val_acc:.2f}%")
 
-        # Step the scheduler based on validation accuracy
-        scheduler.step(val_acc)
+        # Step the scheduler at the end of each epoch
+        scheduler.step()
 
         if early_stopping(val_acc):
             if global_rank == 0:
