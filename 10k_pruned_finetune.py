@@ -310,13 +310,6 @@ def main(args):
     scaler = GradScaler(enabled=True)
     early_stopping = EarlyStopping(patience=7, min_delta=0.001)
 
-    if global_rank == 0:
-        print(f"\n📍 Epoch {epoch+1}/{NUM_EPOCHS}")
-        print(f"   LR (layer3): {optimizer.param_groups[0]['lr']:.7f}")
-        print(f"   LR (layer4): {optimizer.param_groups[1]['lr']:.7f}")
-        print(f"   LR (fc):    {optimizer.param_groups[2]['lr']:.7f}")
-        print("-" * 70)
-
     best_val_acc = 0.0
 
     for epoch in range(NUM_EPOCHS):
@@ -325,8 +318,9 @@ def main(args):
 
         if global_rank == 0:
             print(f"\n📍 Epoch {epoch+1}/{NUM_EPOCHS}")
-            print(f"   Learning Rate (layer4): {optimizer.param_groups[0]['lr']:.7f}")
-            print(f"   Learning Rate (fc): {optimizer.param_groups[1]['lr']:.7f}")
+            print(f"   LR (layer3): {optimizer.param_groups[0]['lr']:.7f}")
+            print(f"   LR (layer4): {optimizer.param_groups[1]['lr']:.7f}")
+            print(f"   LR (fc):    {optimizer.param_groups[2]['lr']:.7f}")
             print("-" * 70)
 
         train_loss, train_acc = train_epoch(
