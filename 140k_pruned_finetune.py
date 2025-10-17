@@ -17,12 +17,8 @@ from PIL import Image
 from tqdm import tqdm
 from torch.amp import autocast, GradScaler
 import argparse
-
 from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
 
-# ============================================================
-# 1. تعریف Dataset سفارشی
-# ============================================================
 class WildDeepfakeDataset(Dataset):
     def __init__(self, real_path, fake_path, transform=None):
         self.transform = transform
@@ -59,25 +55,20 @@ class WildDeepfakeDataset(Dataset):
             print(f"❌ Error loading {img_path}: {e}")
             return torch.zeros(3, 224, 224), torch.tensor(label, dtype=torch.float32)
 
-# ============================================================
-# 2. تعریف Transforms
-# ============================================================
+
 train_transform = transforms.Compose([
-    transforms.RandomCrop(224),
-    transforms.RandomHorizontalFlip(),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+    transforms.CenterCrop(224),
+    transforms.RandomHorizontalFlip(p=0.3),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
 ])
 
 val_transform = transforms.Compose([
+    transforms.CenterCrop(224),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
 ])
 
-# ============================================================
-# 3. آماده‌سازی DataLoaders (با drop_last=True)
-# ============================================================
 def create_dataloaders(batch_size=256, num_workers=4):
     train_dataset = WildDeepfakeDataset(
         real_path="/kaggle/input/wild-deepfake/train/real",
@@ -101,42 +92,40 @@ def create_dataloaders(batch_size=256, num_workers=4):
     val_sampler = DistributedSampler(val_dataset, shuffle=False)
     test_sampler = DistributedSampler(test_dataset, shuffle=False)
 
-    # ⚠️ drop_last=True برای جلوگیری از عدم تقارن در آخرین بچ
     train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler,
                               num_workers=num_workers, pin_memory=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler,
-                            num_workers=num_workers, pin_memory=True, drop_last=True)
+                            num_workers=num_workers, pin_memory=True, drop_last=False)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, sampler=test_sampler,
-                             num_workers=num_workers, pin_memory=True, drop_last=True)
+                             num_workers=num_workers, pin_memory=True, drop_last=False)
 
     return train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler
 
-# ============================================================
-# 4. تابع آموزش
-# ============================================================
-def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epoch, rank=0):
+def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epoch, rank=0, accum_steps=1, scheduler=None):
     model.train()
     running_loss = 0.0
     correct = 0
     total = 0
     pbar = tqdm(loader, desc="Training", disable=rank != 0)
 
-    for inputs, labels in pbar:
+    for batch_idx, (inputs, labels) in enumerate(pbar):
         inputs, labels = inputs.to(device), labels.to(device)
         labels = labels.unsqueeze(1)
 
         with autocast(device_type='cuda', dtype=torch.float16):
             outputs, _ = model(inputs)
-            loss = criterion(outputs, labels)
+            loss = criterion(outputs, labels) / accum_steps
 
         scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        scaler.step(optimizer)
-        scaler.update()
-        optimizer.zero_grad()
 
-        running_loss += loss.item()
+        if (batch_idx + 1) % accum_steps == 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+
+        running_loss += loss.item() * accum_steps
         with torch.no_grad():
             preds = (torch.sigmoid(outputs) > 0.5).float()
             correct += (preds == labels).sum().item()
@@ -144,7 +133,7 @@ def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epo
 
         if rank == 0:
             pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
+                'loss': f'{loss.item() * accum_steps:.4f}',
                 'acc': f'{100.*correct/total:.2f}%'
             })
 
@@ -194,17 +183,31 @@ def validate(model, loader, criterion, device, writer, epoch, rank=0):
 
     return avg_loss, avg_acc
 
-# ============================================================
-# 5. تابع setup DDP و seed
-# ============================================================
-def setup_ddp(seed):
-    # ⚠️ افزایش تایم‌اوت NCCL برای محیط‌های کند (مثل Kaggle)
-    os.environ['TORCH_NCCL_TIMEOUT_MS'] = '1800000'  # 30 دقیقه
+class EarlyStopping:
+    def __init__(self, patience=5, min_delta=0.001):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        
+    def __call__(self, val_acc):
+        if self.best_score is None:
+            self.best_score = val_acc
+        elif val_acc < self.best_score + self.min_delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = val_acc
+            self.counter = 0
+        return self.early_stop
 
+def setup_ddp(seed):
+    os.environ['TORCH_NCCL_TIMEOUT_MS'] = '1800000'
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
     dist.init_process_group(backend='nccl')
-
     seed = seed + dist.get_rank()
     random.seed(seed)
     np.random.seed(seed)
@@ -220,21 +223,19 @@ def setup_ddp(seed):
 def cleanup_ddp():
     dist.destroy_process_group()
 
-# ============================================================
-# 6. اصلی برنامه Fine-tuning
-# ============================================================
-def main():
+def main(args):
     SEED = 42
     local_rank = setup_ddp(SEED)
     world_size = dist.get_world_size()
     global_rank = dist.get_rank()
 
     DEVICE = torch.device(f"cuda:{local_rank}")
-    BATCH_SIZE_PER_GPU = 256
+    BATCH_SIZE_PER_GPU = args.batch_size
     BATCH_SIZE = BATCH_SIZE_PER_GPU * world_size
-    NUM_EPOCHS = 30
-    LEARNING_RATE = 0.0001
-    WEIGHT_DECAY = 1e-4
+    NUM_EPOCHS = args.num_epochs
+    BASE_LR = args.learning_rate
+    WEIGHT_DECAY = args.weight_decay
+    ACCUM_STEPS = args.accum_steps
 
     result_dir = f'/kaggle/working/runs_ddp_rank_{global_rank}'
     if global_rank == 0:
@@ -244,15 +245,20 @@ def main():
 
     if global_rank == 0:
         print("="*70)
-        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 با DDP و Mixed Precision")
+        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 — Layer4 + FC (BCE Loss)")
         print(f"   تعداد گرافیک: {world_size}")
         print(f"   Batch Size کل: {BATCH_SIZE}")
+        print(f"   Gradient Accumulation Steps: {ACCUM_STEPS}")
+        print(f"   Effective Batch Size: {BATCH_SIZE * ACCUM_STEPS}")
+        print(f"   تعداد Epochs: {NUM_EPOCHS}")
+        print(f"   Learning Rate: {BASE_LR}")
+        print(f"   Weight Decay: {WEIGHT_DECAY}")
         print("="*70)
 
     if global_rank == 0:
         print("\n📦 لود مدل Pruned...")
 
-    input_model_path = '/kaggle/input/140k_final/pytorch/default/1/140k_final.pt'
+    input_model_path = '/kaggle/input/140k_finetuned_wd/pytorch/default/1/140k_final_pruned_finetuned_inference_ready (1).pt'
     checkpoint = torch.load(input_model_path, map_location=DEVICE)
 
     masks_detached = [m.detach().clone() if m is not None else None for m in checkpoint['masks']]
@@ -261,26 +267,31 @@ def main():
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(DEVICE)
 
-    # فریز کردن تمام لایه‌ها
     for param in model.parameters():
         param.requires_grad = False
 
-    # باز کردن لایه آخر کانولوشنی (layer4) و لایه Fully Connected (fc)
-    for name, param in model.named_parameters():
-        if 'layer4' in name or 'fc' in name:
-            param.requires_grad = True
+    for param in model.layer4.parameters():
+        param.requires_grad = True
+
+    in_features = model.fc.in_features
+    model.fc = nn.Sequential(
+        nn.Dropout(0.3),
+        nn.Linear(in_features, 1)
+    ).to(DEVICE)
+
+    for param in model.fc.parameters():
+        param.requires_grad = True
 
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
-    # محاسبه تعداد پارامترها
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     if global_rank == 0:
-        print(f"✅ مدل لود شد")
+        print(f"✅ مدل لود و تنظیم شد")
         print(f"   - تعداد کل پارامترها: {total_params:,}")
         print(f"   - تعداد پارامترهای قابل آموزش: {trainable_params:,}")
-        print(f"   - لایه‌های قابل آموزش: layer4 و fc")
+        print(f"   - لایه‌های قابل آموزش: layer4 + fc")
 
     if global_rank == 0:
         print("\n📊 آماده‌سازی DataLoaders...")
@@ -291,15 +302,19 @@ def main():
     )
 
     criterion = nn.BCEWithLogitsLoss()
-    # فقط پارامترهای قابل آموزش به optimizer اضافه می‌شوند
-    optimizer = optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-    from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
-    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2, eta_min=1e-6)
+
+    optimizer = optim.Adam([
+        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY},
+        {'params': model.module.fc.parameters(), 'lr': BASE_LR * 4, 'weight_decay': WEIGHT_DECAY * 2}
+    ])
+    
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
     scaler = GradScaler(enabled=True)
+    early_stopping = EarlyStopping(patience=7, min_delta=0.001)
 
     if global_rank == 0:
         print("\n" + "="*70)
-        print("🎓 شروع آموزش")
+        print("🎓 شروع آموزش (Layer4 + FC - BCE Loss)")
         print("="*70)
 
     best_val_acc = 0.0
@@ -310,11 +325,13 @@ def main():
 
         if global_rank == 0:
             print(f"\n📍 Epoch {epoch+1}/{NUM_EPOCHS}")
-            print(f"   Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
+            print(f"   Learning Rate (layer4): {optimizer.param_groups[0]['lr']:.7f}")
+            print(f"   Learning Rate (fc): {optimizer.param_groups[1]['lr']:.7f}")
             print("-" * 70)
 
         train_loss, train_acc = train_epoch(
-            model, train_loader, criterion, optimizer, DEVICE, scaler, writer, epoch, global_rank
+            model, train_loader, criterion, optimizer, DEVICE, scaler, writer, 
+            epoch, global_rank, ACCUM_STEPS, scheduler=scheduler
         )
         if global_rank == 0:
             print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
@@ -323,9 +340,23 @@ def main():
         if global_rank == 0:
             print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
 
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                torch.save(model.module.state_dict(), '/kaggle/working/best_layer4_fc_bce.pt')
+                print(f"✅ بهترین مدل ذخیره شد با Val Acc: {val_acc:.2f}%")
+
+        # Step the scheduler at the end of each epoch
         scheduler.step()
 
-    # تست نهایی
+        if early_stopping(val_acc):
+            if global_rank == 0:
+                print(f"\n⚠️ Early stopping triggered at epoch {epoch+1}")
+                print(f"Best Val Acc: {best_val_acc:.2f}%")
+            break
+
+    if global_rank == 0:
+        model.module.load_state_dict(torch.load('/kaggle/working/best_layer4_fc_bce.pt'))
+    
     test_loss, test_acc = validate(model, test_loader, criterion, DEVICE, writer, NUM_EPOCHS, global_rank)
 
     if global_rank == 0:
@@ -334,56 +365,57 @@ def main():
         print("="*70)
         print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.2f}%")
 
-        # بازسازی مدل روی CPU برای inference
         model_inference = ResNet_50_pruned_hardfakevsreal(masks=checkpoint['masks'])
+        in_features = model_inference.fc.in_features
+        model_inference.fc = nn.Sequential(
+            nn.Dropout(0.3),
+            nn.Linear(in_features, 1)
+        )
         model_inference.load_state_dict(model.module.state_dict())
         model_inference = model_inference.to('cpu')
         model_inference.eval()
 
         total_params_inf = sum(p.numel() for p in model_inference.parameters())
 
-        # فقط 4 کلید مورد نظر
         checkpoint_inference = {
             'model_state_dict': model_inference.state_dict(),
             'total_params': total_params_inf,
             'masks': checkpoint['masks'],
-            'model_architecture': 'ResNet_50_pruned_hardfakevsreal'
+            'model_architecture': 'ResNet_50_pruned_hardfakevsreal (Layer4+FC BCE)',
+            'best_val_acc': best_val_acc,
+            'test_acc': test_acc,
+            'training_config': {
+                'lr': BASE_LR,
+                'weight_decay': WEIGHT_DECAY,
+                'batch_size': BATCH_SIZE,
+                'accum_steps': ACCUM_STEPS,
+                'epochs': NUM_EPOCHS,
+                'loss': 'BCEWithLogitsLoss',
+                'dropout': 0.3
+            }
         }
 
-        inference_save_path = '/kaggle/working/final_pruned_finetuned_inference_ready.pt'
+        inference_save_path = '/kaggle/working/final_pruned_layer4_fc_bce.pt'
         torch.save(checkpoint_inference, inference_save_path)
 
-        # چاپ اطلاعات
-        print("فایل شامل یک دیکشنری وزن‌ها است.")
-        print("کلیدهای موجود در دیکشنری:")
-        for key in checkpoint_inference.keys():
-            print(f"- {key}")
-
-        print("\nجزئیات وزن‌ها:")
-        for key, value in checkpoint_inference.items():
-            if key == 'masks':
-                print(f"{key}: نوع = {type(value)} (list of {len(value)} masks)")
-            else:
-                print(f"{key}: نوع = {type(value)}")
-
-        print("✅ مدل هرس‌شده با موفقیت بازسازی و لود شد!")
+        print("✅ مدل هرس‌شده (Layer4+FC BCE) با موفقیت ذخیره شد!")
         print(f"تعداد پارامترها: {total_params_inf:,}")
-
-        print("\n" + "="*70)
-        print("معماری نهایی مدل هرس‌شده (ResNet_50_pruned_hardfakevsreal)")
-        print("="*70)
-        print(model_inference)
-        print("\n" + "="*70)
-        print("توجه: ابعاد هر لایه، معماری فشرده‌شده (هرس‌شده) را نشان می‌دهد.")
-        print("="*70)
+        print(f"بهترین Val Acc: {best_val_acc:.2f}%")
+        print(f"Test Acc: {test_acc:.2f}%")
 
         file_size_mb = os.path.getsize(inference_save_path) / (1024 * 1024)
-        print(f"✅ مدل inference-ready با موفقیت در {inference_save_path} ذخیره شد.")
-        print(f"حجم فایل ذخیره شده: {file_size_mb:.2f} MB")
+        print(f"حجم فایل: {file_size_mb:.2f} MB")
 
         writer.close()
 
     cleanup_ddp()
-
+    
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Fine-tune Pruned ResNet50 for WildDeepfake Dataset (BCE Loss)")
+    parser.add_argument('--num_epochs', type=int, default=15, help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, default=256, help='Batch size per GPU')
+    parser.add_argument('--learning_rate', type=float, default=0.0001, help='Base learning rate')
+    parser.add_argument('--weight_decay', type=float, default=0.00005, help='Weight decay for optimizer')
+    parser.add_argument('--accum_steps', type=int, default=1, help='Gradient accumulation steps')
+    args = parser.parse_args()
+    main(args)
