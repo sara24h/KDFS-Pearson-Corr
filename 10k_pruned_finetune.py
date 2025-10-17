@@ -275,7 +275,7 @@ def main(args):
 
     in_features = model.fc.in_features
     model.fc = nn.Sequential(
-        nn.Dropout(0.5),
+        nn.Dropout(0.3),
         nn.Linear(in_features, 1)
     ).to(DEVICE)
 
