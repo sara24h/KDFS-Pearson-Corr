@@ -247,7 +247,7 @@ def main(args):
     if global_rank == 0:
         print("\n📦 لود مدل Pruned...")
 
-    input_model_path = '/kaggle/input/m/saraaskari/10k_final/pytorch/default/1/10k_final.pt'
+    input_model_path = '/kaggle/input/10k_finetune_wd/pytorch/default/1/10k_final_pruned_finetuned_inference_ready (1).pt'
     checkpoint = torch.load(input_model_path, map_location=DEVICE)
 
     masks_detached = [m.detach().clone() if m is not None else None for m in checkpoint['masks']]
