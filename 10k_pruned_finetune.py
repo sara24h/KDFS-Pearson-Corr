@@ -275,7 +275,7 @@ def main(args):
 
     in_features = model.fc.in_features
     model.fc = nn.Sequential(
-        nn.Dropout(0.3),
+        nn.Dropout(0.5),
         nn.Linear(in_features, 1)
     ).to(DEVICE)
 
@@ -303,9 +303,9 @@ def main(args):
 
     criterion = nn.BCEWithLogitsLoss()
 
-    optimizer = optim.Adam([
-        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY},
-        {'params': model.module.fc.parameters(), 'lr': BASE_LR * 4, 'weight_decay': WEIGHT_DECAY * 2}
+    optimizer = optim.AdamW([
+        {'params': model.layer4.parameters(), 'lr': 2e-5}, 
+        {'params': model.fc.parameters(), 'lr': 1e-4}     
     ])
     
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
