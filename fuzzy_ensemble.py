@@ -274,6 +274,7 @@ def main():
     
     test_loader = DataLoader(
         test_dataset,
+        drop_last=True
         batch_size=BATCH_SIZE,
         shuffle=False,
         num_workers=NUM_WORKERS,
