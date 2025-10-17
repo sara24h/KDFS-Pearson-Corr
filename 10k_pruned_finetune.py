@@ -270,14 +270,11 @@ def main(args):
     for param in model.parameters():
         param.requires_grad = False
 
-    for param in model.layer4.parameters():
+    for param in model.layer3.parameters():
         param.requires_grad = True
 
-    in_features = model.fc.in_features
-    model.fc = nn.Sequential(
-        nn.Dropout(0.3),
-        nn.Linear(in_features, 1)
-    ).to(DEVICE)
+    for param in model.layer4.parameters():
+        param.requires_grad = True
 
     for param in model.fc.parameters():
         param.requires_grad = True
@@ -304,8 +301,9 @@ def main(args):
     criterion = nn.BCEWithLogitsLoss()
 
     optimizer = optim.Adam([
+        {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.5, 'weight_decay': WEIGHT_DECAY},
         {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY},
-        {'params': model.module.fc.parameters(), 'lr': BASE_LR * 4, 'weight_decay': WEIGHT_DECAY * 2}
+        {'params': model.module.fc.parameters(),   'lr': BASE_LR * 5.0, 'weight_decay': WEIGHT_DECAY * 2}
     ])
     
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
@@ -313,9 +311,11 @@ def main(args):
     early_stopping = EarlyStopping(patience=7, min_delta=0.001)
 
     if global_rank == 0:
-        print("\n" + "="*70)
-        print("🎓 شروع آموزش (Layer4 + FC - BCE Loss)")
-        print("="*70)
+        print(f"\n📍 Epoch {epoch+1}/{NUM_EPOCHS}")
+        print(f"   LR (layer3): {optimizer.param_groups[0]['lr']:.7f}")
+        print(f"   LR (layer4): {optimizer.param_groups[1]['lr']:.7f}")
+        print(f"   LR (fc):    {optimizer.param_groups[2]['lr']:.7f}")
+        print("-" * 70)
 
     best_val_acc = 0.0
 
