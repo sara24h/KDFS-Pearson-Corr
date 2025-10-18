@@ -303,16 +303,19 @@ def main(args):
 
     model = model.to(DEVICE)
 
-    # 🔥 IMPROVED: Layer3 را هم باز کن
+    # 🔥 IMPROVED: Progressive unfreezing strategy
     for param in model.parameters():
         param.requires_grad = False
 
+    # Layer3: Fine-tune با LR خیلی کم (0.1x base)
     for param in model.layer3.parameters():
         param.requires_grad = True
 
+    # Layer4: Fine-tune با LR متوسط (0.5x base)
     for param in model.layer4.parameters():
         param.requires_grad = True
 
+    # FC: Train از صفر با LR بالا (1.0x base)
     for param in model.fc.parameters():
         param.requires_grad = True
 
@@ -338,7 +341,10 @@ def main(args):
     # 🔥 IMPROVED: Label Smoothing برای regularization
     criterion = LabelSmoothingBCELoss(smoothing=0.1)
 
-    # 🔥 IMPROVED: Learning rate کمتر و weight decay بیشتر
+    # 🔥 IMPROVED: Differential Learning Rates (خیلی مهم!)
+    # Layer3: 0.1x (تغییرات خیلی کم - حفظ pretrained features)
+    # Layer4: 0.5x (تغییرات متوسط)
+    # FC: 1.0x (یادگیری کامل از صفر)
     optimizer = optim.AdamW([
         {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.1, 'weight_decay': WEIGHT_DECAY * 3},
         {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 0.5, 'weight_decay': WEIGHT_DECAY * 2},
@@ -453,10 +459,10 @@ def main(args):
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Improved Fine-tune for WildDeepfake")
-    parser.add_argument('--num_epochs', type=int, default=25, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=128, help='Batch size per GPU')
-    parser.add_argument('--learning_rate', type=float, default=5e-5, help='Base learning rate')
-    parser.add_argument('--weight_decay', type=float, default=0.0002, help='Weight decay')
-    parser.add_argument('--accum_steps', type=int, default=2, help='Gradient accumulation steps')
+    parser.add_argument('--num_epochs', type=int, default=20, help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, default=256, help='Batch size per GPU (256 recommended)')
+    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Base learning rate (1e-4 recommended)')
+    parser.add_argument('--weight_decay', type=float, default=0.0001, help='Weight decay')
+    parser.add_argument('--accum_steps', type=int, default=1, help='Gradient accumulation steps (1 recommended)')
     args = parser.parse_args()
     main(args)
