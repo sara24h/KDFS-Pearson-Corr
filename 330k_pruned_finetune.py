@@ -229,7 +229,7 @@ def main(args):
 
     if global_rank == 0:
         print("=" * 70)
-        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 — Layer4 + FC (BCE Loss)")
+        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 — Layer3 + Layer4 + FC (BCE Loss)")
         print(f"   تعداد گرافیک: {world_size}")
         print(f"   Batch Size کل: {BATCH_SIZE}")
         print(f"   Gradient Accumulation Steps: {ACCUM_STEPS}")
@@ -239,23 +239,20 @@ def main(args):
         print(f"   Weight Decay: {WEIGHT_DECAY}")
         print("=" * 70)
 
+    # لود مدل اصلی بدون تغییر ساختار fc
     input_model_path = '/kaggle/input/330k-fuzzy-ranked-based-ensemble-5/330k_final.pt'
     checkpoint = torch.load(input_model_path, map_location=DEVICE)
     masks_detached = [m.detach().clone() if m is not None else None for m in checkpoint['masks']]
 
     model = ResNet_50_pruned_hardfakevsreal(masks=masks_detached)
     model.load_state_dict(checkpoint['model_state_dict'])
-
-    in_features = model.fc.in_features
-    model.fc = nn.Sequential(
-        nn.Dropout(0.5),
-        nn.Linear(in_features, 1)
-    )
-
     model = model.to(DEVICE)
 
+    # فریز کردن تمام لایه‌ها
     for param in model.parameters():
         param.requires_grad = False
+
+    # آزاد کردن لایه‌های مورد نظر
     for param in model.layer3.parameters():
         param.requires_grad = True
     for param in model.layer4.parameters():
@@ -286,13 +283,13 @@ def main(args):
     optimizer = optim.AdamW([
         {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.5, 'weight_decay': WEIGHT_DECAY},
         {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY},
-        {'params': model.module.fc.parameters(),    'lr': BASE_LR * 5.0, 'weight_decay': WEIGHT_DECAY * 2}
+        {'params': model.module.fc.parameters(),    'lr': BASE_LR * 2.0, 'weight_decay': WEIGHT_DECAY * 2}
     ])
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
     scaler = GradScaler(enabled=True)
 
     best_val_acc = 0.0
-    best_model_path = '/kaggle/working/best_layer4_fc_bce.pt'
+    best_model_path = '/kaggle/working/best_pruned_finetuned.pt'
 
     try:
         for epoch in range(NUM_EPOCHS):
@@ -338,13 +335,8 @@ def main(args):
             print("=" * 70)
             print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.2f}%")
 
-            # ساخت مدل استنتاج با ساختار یکسان
+            # ساخت مدل استنتاج با ساختار یکسان (بدون Dropout)
             model_inference = ResNet_50_pruned_hardfakevsreal(masks=checkpoint['masks'])
-            in_features = model_inference.fc.in_features
-            model_inference.fc = nn.Sequential(
-                nn.Dropout(0.5),
-                nn.Linear(in_features, 1)
-            )
             model_inference.load_state_dict(model.module.state_dict())
             model_inference = model_inference.cpu().eval()
 
@@ -354,7 +346,7 @@ def main(args):
                 'model_state_dict': model_inference.state_dict(),
                 'total_params': total_params_inf,
                 'masks': checkpoint['masks'],
-                'model_architecture': 'ResNet_50_pruned_hardfakevsreal (Layer4+FC BCE)',
+                'model_architecture': 'ResNet_50_pruned_hardfakevsreal (Layer3+4+FC BCE)',
                 'best_val_acc': best_val_acc,
                 'test_acc': test_acc,
                 'training_config': {
@@ -363,15 +355,14 @@ def main(args):
                     'batch_size': BATCH_SIZE,
                     'accum_steps': ACCUM_STEPS,
                     'epochs': NUM_EPOCHS,
-                    'loss': 'BCEWithLogitsLoss',
-                    'dropout': 0.5
+                    'loss': 'BCEWithLogitsLoss'
                 }
             }
 
-            inference_save_path = '/kaggle/working/final_pruned_layer4_fc_bce.pt'
+            inference_save_path = '/kaggle/working/final_pruned_finetuned_inference_ready.pt'
             torch.save(checkpoint_inference, inference_save_path)
 
-            print("✅ مدل هرس‌شده (Layer4+FC BCE) با موفقیت ذخیره شد!")
+            print("✅ مدل هرس‌شده با موفقیت ذخیره شد!")
             print(f"تعداد پارامترها: {total_params_inf:,}")
             print(f"بهترین Val Acc: {best_val_acc:.2f}%")
             print(f"Test Acc: {test_acc:.2f}%")
@@ -384,6 +375,7 @@ def main(args):
 
     finally:
         cleanup_ddp()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fine-tune Pruned ResNet50 for WildDeepfake Dataset (BCE Loss)")
