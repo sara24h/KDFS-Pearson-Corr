@@ -55,25 +55,19 @@ class WildDeepfakeDataset(Dataset):
             print(f"❌ Error loading {img_path}: {e}")
             return torch.zeros(3, 224, 224), torch.tensor(label, dtype=torch.float32)
 
-
-# 🔥 IMPROVED: Data Augmentation قوی‌تر برای کاهش Overfitting
-train_transform = transforms.Compose([
-    transforms.Resize(256),
-    transforms.RandomCrop(224),
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.RandomRotation(15),
-    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
-    transforms.RandomGrayscale(p=0.1),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562]),
-    transforms.RandomErasing(p=0.3, scale=(0.02, 0.15))
+transform_train_190k = transforms.Compose([
+            transforms.Resize(image_size),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomRotation(15),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562]),
 ])
 
-val_transform = transforms.Compose([
-    transforms.Resize(256),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
+transform_val_test_190k = transforms.Compose([
+            transforms.Resize(image_size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562]),
 ])
 
 def create_dataloaders(batch_size=256, num_workers=4):
@@ -108,16 +102,6 @@ def create_dataloaders(batch_size=256, num_workers=4):
 
     return train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler
 
-# 🔥 IMPROVED: Label Smoothing برای regularization بهتر
-class LabelSmoothingBCELoss(nn.Module):
-    def __init__(self, smoothing=0.1):
-        super().__init__()
-        self.smoothing = smoothing
-        self.bce = nn.BCEWithLogitsLoss()
-        
-    def forward(self, pred, target):
-        target = target * (1 - self.smoothing) + 0.5 * self.smoothing
-        return self.bce(pred, target)
 
 def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epoch, rank=0, accum_steps=1, scheduler=None):
     model.train()
@@ -263,7 +247,8 @@ def main(args):
 
     if global_rank == 0:
         print("="*70)
-        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 — Layer3 + Layer4 + FC")
+        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 — Feature Extractor Strategy")
+        print("   🔧 روش: Feature Extractor با Fine-tuning لایه‌های خاص")
         print(f"   تعداد گرافیک: {world_size}")
         print(f"   Batch Size کل: {BATCH_SIZE}")
         print(f"   Gradient Accumulation Steps: {ACCUM_STEPS}")
@@ -290,32 +275,23 @@ def main(args):
     model_dict.update(pretrained_dict)
     model.load_state_dict(model_dict)
 
-    # 🔥 IMPROVED: FC layer با Dropout بیشتر و Batch Normalization
+    # 🔧 Feature Extractor Strategy: Dropout(0.5) + FC Layer
     in_features = model.fc.in_features
     model.fc = nn.Sequential(
-        nn.Dropout(0.6),
-        nn.Linear(in_features, 256),
-        nn.BatchNorm1d(256),
-        nn.ReLU(),
-        nn.Dropout(0.5),
-        nn.Linear(256, 1)
+        nn.Dropout(p=0.5),
+        nn.Linear(in_features, 1)
     )
 
     model = model.to(DEVICE)
 
-    # 🔥 IMPROVED: Progressive unfreezing strategy
+    # 🔧 استراتژی Feature Extractor: فریز کردن تمام لایه‌ها به جز layer4 و fc
     for param in model.parameters():
         param.requires_grad = False
 
-    # Layer3: Fine-tune با LR خیلی کم (0.1x base)
-    #for param in model.layer3.parameters():
-        #param.requires_grad = True
-
-    # Layer4: Fine-tune با LR متوسط (0.5x base)
+    # ✅ فقط layer4 و fc آزاد می‌شوند
     for param in model.layer4.parameters():
         param.requires_grad = True
 
-    # FC: Train از صفر با LR بالا (1.0x base)
     for param in model.fc.parameters():
         param.requires_grad = True
 
@@ -328,7 +304,8 @@ def main(args):
         print(f"✅ مدل لود و تنظیم شد")
         print(f"   - تعداد کل پارامترها: {total_params:,}")
         print(f"   - تعداد پارامترهای قابل آموزش: {trainable_params:,}")
-        print(f"   - لایه‌های قابل آموزش: layer3 + layer4 + fc")
+        print(f"   - لایه‌های قابل آموزش: layer4 + fc")
+        print(f"   - Dropout: p=0.5 قبل از FC")
 
     if global_rank == 0:
         print("\n📊 آماده‌سازی DataLoaders...")
@@ -338,22 +315,21 @@ def main(args):
         num_workers=2
     )
 
-    # 🔥 IMPROVED: Label Smoothing برای regularization
-    criterion = LabelSmoothingBCELoss(smoothing=0.1)
+    # 🔧 Loss Function: BCEWithLogitsLoss (مناسب برای دسته‌بندی دودویی)
+    criterion = nn.BCEWithLogitsLoss()
 
-    # 🔥 IMPROVED: Differential Learning Rates (خیلی مهم!)
-    # Layer3: 0.1x (تغییرات خیلی کم - حفظ pretrained features)
-    # Layer4: 0.5x (تغییرات متوسط)
-    # FC: 1.0x (یادگیری کامل از صفر)
-    optimizer = optim.AdamW([
-        {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.1, 'weight_decay': WEIGHT_DECAY * 3},
-        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 0.5, 'weight_decay': WEIGHT_DECAY * 2},
-        {'params': model.module.fc.parameters(),     'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY * 3}
-    ])
+    # 🔧 بهینه‌ساز: AdamW با weight_decay=1e-3
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=BASE_LR,
+        weight_decay=1e-3
+    )
     
-    # 🔥 IMPROVED: CosineAnnealing scheduler به جای StepLR
-    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=5, T_mult=2, eta_min=1e-7
+    # 🔧 Learning Rate Scheduler: StepLR (هر 5 epoch، LR را 0.1x کاهش می‌دهد)
+    scheduler = optim.lr_scheduler.StepLR(
+        optimizer,
+        step_size=5,
+        gamma=0.1
     )
     
     scaler = GradScaler(enabled=True)
@@ -367,9 +343,7 @@ def main(args):
 
         if global_rank == 0:
             print(f"\n📍 Epoch {epoch+1}/{NUM_EPOCHS}")
-            print(f"   LR (layer3): {optimizer.param_groups[0]['lr']:.7f}")
-            print(f"   LR (layer4): {optimizer.param_groups[1]['lr']:.7f}")
-            print(f"   LR (fc):    {optimizer.param_groups[2]['lr']:.7f}")
+            print(f"   Learning Rate: {optimizer.param_groups[0]['lr']:.7f}")
             print("-" * 70)
 
         train_loss, train_acc = train_epoch(
@@ -385,9 +359,10 @@ def main(args):
 
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-                torch.save(model.module.state_dict(), '/kaggle/working/best_model_improved.pt')
+                torch.save(model.module.state_dict(), '/kaggle/working/best_model_feature_extractor.pt')
                 print(f"✅ بهترین مدل ذخیره شد با Val Acc: {val_acc:.2f}%")
 
+        # 🔧 Step scheduler پس از هر epoch
         scheduler.step()
 
         if early_stopping(val_acc):
@@ -397,7 +372,7 @@ def main(args):
             break
 
     if global_rank == 0:
-        model.module.load_state_dict(torch.load('/kaggle/working/best_model_improved.pt'))
+        model.module.load_state_dict(torch.load('/kaggle/working/best_model_feature_extractor.pt'))
     
     test_loss, test_acc = validate(model, test_loader, criterion, DEVICE, writer, NUM_EPOCHS, global_rank)
 
@@ -410,12 +385,8 @@ def main(args):
         model_inference = ResNet_50_pruned_hardfakevsreal(masks=checkpoint['masks'])
         in_features = model_inference.fc.in_features
         model_inference.fc = nn.Sequential(
-            nn.Dropout(0.6),
-            nn.Linear(in_features, 256),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(256, 1)
+            nn.Dropout(p=0.5),
+            nn.Linear(in_features, 1)
         )
         model_inference.load_state_dict(model.module.state_dict())
         model_inference = model_inference.to('cpu')
@@ -427,25 +398,28 @@ def main(args):
             'model_state_dict': model_inference.state_dict(),
             'total_params': total_params_inf,
             'masks': checkpoint['masks'],
-            'model_architecture': 'ResNet_50_pruned_hardfakevsreal (Improved)',
+            'model_architecture': 'ResNet_50_pruned_hardfakevsreal (Feature Extractor)',
             'best_val_acc': best_val_acc,
             'test_acc': test_acc,
             'training_config': {
+                'strategy': 'Feature Extractor',
+                'trainable_layers': 'layer4 + fc',
+                'dropout': 0.5,
                 'lr': BASE_LR,
-                'weight_decay': WEIGHT_DECAY,
+                'weight_decay': 1e-3,
                 'batch_size': BATCH_SIZE,
                 'accum_steps': ACCUM_STEPS,
                 'epochs': NUM_EPOCHS,
-                'loss': 'LabelSmoothingBCE',
-                'dropout': [0.6, 0.5],
-                'scheduler': 'CosineAnnealingWarmRestarts'
+                'loss': 'BCEWithLogitsLoss',
+                'optimizer': 'AdamW',
+                'scheduler': 'StepLR (step_size=5, gamma=0.1)'
             }
         }
 
-        inference_save_path = '/kaggle/working/final_improved_model.pt'
+        inference_save_path = '/kaggle/working/final_feature_extractor_model.pt'
         torch.save(checkpoint_inference, inference_save_path)
 
-        print("✅ مدل بهبودیافته با موفقیت ذخیره شد!")
+        print("✅ مدل با استراتژی Feature Extractor ذخیره شد!")
         print(f"تعداد پارامترها: {total_params_inf:,}")
         print(f"بهترین Val Acc: {best_val_acc:.2f}%")
         print(f"Test Acc: {test_acc:.2f}%")
@@ -458,11 +432,11 @@ def main(args):
     cleanup_ddp()
     
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Improved Fine-tune for WildDeepfake")
+    parser = argparse.ArgumentParser(description="Feature Extractor Fine-tune for WildDeepfake")
     parser.add_argument('--num_epochs', type=int, default=20, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=256, help='Batch size per GPU (256 recommended)')
-    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Base learning rate (1e-4 recommended)')
-    parser.add_argument('--weight_decay', type=float, default=0.0001, help='Weight decay')
-    parser.add_argument('--accum_steps', type=int, default=1, help='Gradient accumulation steps (1 recommended)')
+    parser.add_argument('--batch_size', type=int, default=256, help='Batch size per GPU')
+    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=1e-3, help='Weight decay (default: 1e-3)')
+    parser.add_argument('--accum_steps', type=int, default=1, help='Gradient accumulation steps')
     args = parser.parse_args()
     main(args)
