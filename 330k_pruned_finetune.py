@@ -308,8 +308,8 @@ def main(args):
         param.requires_grad = False
 
     # Layer3: Fine-tune با LR خیلی کم (0.1x base)
-    for param in model.layer3.parameters():
-        param.requires_grad = True
+    #for param in model.layer3.parameters():
+        #param.requires_grad = True
 
     # Layer4: Fine-tune با LR متوسط (0.5x base)
     for param in model.layer4.parameters():
