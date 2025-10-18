@@ -224,7 +224,7 @@ def main():
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=torch.cuda.is_available(),
-        drop_last=True
+        drop_last=False
     )
 
     print("\n🔄 در حال بارگذاری مدل‌ها...")
