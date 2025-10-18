@@ -18,34 +18,20 @@ from tqdm import tqdm
 from torch.amp import autocast, GradScaler
 import argparse
 from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
+from sklearn.model_selection import train_test_split
 
-class WildDeepfakeDataset(Dataset):
-    def __init__(self, real_path, fake_path, transform=None):
+class DeepfakeDataset(Dataset):
+    def __init__(self, image_paths, labels, transform=None):
+        self.image_paths = image_paths
+        self.labels = labels
         self.transform = transform
-        self.images = []
-        self.labels = []
-
-        if os.path.exists(real_path):
-            real_files = [f for f in os.listdir(real_path) if f.endswith(('.jpg', '.jpeg', '.png'))]
-            for fname in real_files:
-                self.images.append(os.path.join(real_path, fname))
-                self.labels.append(0)
-
-        if os.path.exists(fake_path):
-            fake_files = [f for f in os.listdir(fake_path) if f.endswith(('.jpg', '.jpeg', '.png'))]
-            for fname in fake_files:
-                self.images.append(os.path.join(fake_path, fname))
-                self.labels.append(1)
-
-        print(f"Dataset loaded: {len(self.images)} images ({sum(1 for l in self.labels if l==0)} real, {sum(1 for l in self.labels if l==1)} fake)")
 
     def __len__(self):
-        return len(self.images)
+        return len(self.image_paths)
 
     def __getitem__(self, idx):
-        img_path = self.images[idx]
+        img_path = self.image_paths[idx]
         label = self.labels[idx]
-
         try:
             img = Image.open(img_path).convert('RGB')
             if self.transform:
@@ -56,39 +42,59 @@ class WildDeepfakeDataset(Dataset):
             return torch.zeros(3, 224, 224), torch.tensor(label, dtype=torch.float32)
 
 train_transform = transforms.Compose([
-            transforms.Resize(224),
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomRotation(15),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562]),
+    transforms.Resize(224),
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomRotation(15),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562]),
 ])
 
-val_transform= transforms.Compose([
-            transforms.Resize(224),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562]),
+val_transform = transforms.Compose([
+    transforms.Resize(224),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562]),
 ])
 
-def create_dataloaders(batch_size=256, num_workers=4):
-    train_dataset = WildDeepfakeDataset(
-        real_path="/kaggle/input/wild-deepfake/train/real",
-        fake_path="/kaggle/input/wild-deepfake/train/fake",
-        transform=train_transform
+def create_dataloaders(batch_size=256, num_workers=4, seed=42):
+    real_dir = "/kaggle/input/deepfake-detection-dataset/dataset/real"
+    fake_dir = "/kaggle/input/deepfake-detection-dataset/dataset/fake"
+
+    assert os.path.exists(real_dir), f"Real directory not found: {real_dir}"
+    assert os.path.exists(fake_dir), f"Fake directory not found: {fake_dir}"
+
+    # جمع‌آوری فایل‌ها
+    real_files = [os.path.join(real_dir, f) for f in os.listdir(real_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+    fake_files = [os.path.join(fake_dir, f) for f in os.listdir(fake_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+
+    print(f"📊 Real images: {len(real_files)} | Fake images: {len(fake_files)}")
+
+    # ایجاد لیبل‌ها
+    real_labels = [0] * len(real_files)
+    fake_labels = [1] * len(fake_files)
+
+    # ترکیب
+    all_files = real_files + fake_files
+    all_labels = real_labels + fake_labels
+
+    # تقسیم 70/15/15 با stratify
+    train_files, temp_files, train_labels, temp_labels = train_test_split(
+        all_files, all_labels, test_size=0.3, random_state=seed, stratify=all_labels
+    )
+    val_files, test_files, val_labels, test_labels = train_test_split(
+        temp_files, temp_labels, test_size=0.5, random_state=seed, stratify=temp_labels
     )
 
-    val_dataset = WildDeepfakeDataset(
-        real_path="/kaggle/input/wild-deepfake/valid/real",
-        fake_path="/kaggle/input/wild-deepfake/valid/fake",
-        transform=val_transform
-    )
+    print(f"📊 Train: {len(train_files)} ({sum(train_labels)} fake, {len(train_labels)-sum(train_labels)} real)")
+    print(f"📊 Val:   {len(val_files)} ({sum(val_labels)} fake, {len(val_labels)-sum(val_labels)} real)")
+    print(f"📊 Test:  {len(test_files)} ({sum(test_labels)} fake, {len(test_labels)-sum(test_labels)} real)")
 
-    test_dataset = WildDeepfakeDataset(
-        real_path="/kaggle/input/wild-deepfake/test/real",
-        fake_path="/kaggle/input/wild-deepfake/test/fake",
-        transform=val_transform
-    )
+    # ساخت دیتاست‌ها
+    train_dataset = DeepfakeDataset(train_files, train_labels, transform=train_transform)
+    val_dataset = DeepfakeDataset(val_files, val_labels, transform=val_transform)
+    test_dataset = DeepfakeDataset(test_files, test_labels, transform=val_transform)
 
+    # Samplerها برای DDP
     train_sampler = DistributedSampler(train_dataset)
     val_sampler = DistributedSampler(val_dataset, shuffle=False)
     test_sampler = DistributedSampler(test_dataset, shuffle=False)
@@ -102,8 +108,7 @@ def create_dataloaders(batch_size=256, num_workers=4):
 
     return train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler
 
-
-def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epoch, rank=0, accum_steps=1, scheduler=None):
+def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epoch, rank=0, accum_steps=1):
     model.train()
     running_loss = 0.0
     correct = 0
@@ -199,14 +204,13 @@ def setup_ddp(seed):
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.enabled = True
-
     return local_rank
 
 def cleanup_ddp():
     dist.destroy_process_group()
 
 def main(args):
-    SEED = 42
+    SEED = args.seed
     local_rank = setup_ddp(SEED)
     world_size = dist.get_world_size()
     global_rank = dist.get_rank()
@@ -287,7 +291,8 @@ def main(args):
 
     train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler = create_dataloaders(
         batch_size=BATCH_SIZE_PER_GPU,
-        num_workers=2
+        num_workers=2,
+        seed=SEED
     )
 
     criterion = nn.BCEWithLogitsLoss()
@@ -307,12 +312,7 @@ def main(args):
         {'params': fc_params, 'lr': args.lr_fc, 'weight_decay': args.weight_decay}
     ])
 
-    scheduler = optim.lr_scheduler.StepLR(
-        optimizer,
-        step_size=5,
-        gamma=0.1
-    )
-    
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
     scaler = GradScaler(enabled=True)
     best_val_acc = 0.0
 
@@ -322,12 +322,13 @@ def main(args):
 
         if global_rank == 0:
             print(f"\n📍 Epoch {epoch+1}/{NUM_EPOCHS}")
-            print(f"   Learning Rate: {optimizer.param_groups[0]['lr']:.7f}")
+            print(f"   LR (layer4): {optimizer.param_groups[0]['lr']:.7f}")
+            print(f"   LR (fc):     {optimizer.param_groups[1]['lr']:.7f}")
             print("-" * 70)
 
         train_loss, train_acc = train_epoch(
             model, train_loader, criterion, optimizer, DEVICE, scaler, writer, 
-            epoch, global_rank, ACCUM_STEPS, scheduler=scheduler
+            epoch, global_rank, ACCUM_STEPS
         )
         if global_rank == 0:
             print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
@@ -343,6 +344,7 @@ def main(args):
 
         scheduler.step()
 
+    # تست نهایی
     if global_rank == 0:
         model.module.load_state_dict(torch.load('/kaggle/working/best_model_feature_extractor.pt'))
     
@@ -377,8 +379,9 @@ def main(args):
                 'strategy': 'Feature Extractor',
                 'trainable_layers': 'layer4 + fc',
                 'dropout': 0.5,
-                'lr': BASE_LR,
-                'weight_decay': 1e-3,
+                'lr_layer4': args.lr_layer4,
+                'lr_fc': args.lr_fc,
+                'weight_decay': args.weight_decay,
                 'batch_size': BATCH_SIZE,
                 'accum_steps': ACCUM_STEPS,
                 'epochs': NUM_EPOCHS,
@@ -402,14 +405,15 @@ def main(args):
         writer.close()
 
     cleanup_ddp()
-    
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Feature Extractor Fine-tune for WildDeepfake")
+    parser = argparse.ArgumentParser(description="Feature Extractor Fine-tune for Deepfake Detection")
     parser.add_argument('--num_epochs', type=int, default=20, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size per GPU')
     parser.add_argument('--lr_layer4', type=float, default=5e-5, help='Learning rate for layer4')
     parser.add_argument('--lr_fc', type=float, default=1e-4, help='Learning rate for fully connected layer')
     parser.add_argument('--weight_decay', type=float, default=1e-3, help='Weight decay')
     parser.add_argument('--accum_steps', type=int, default=1, help='Gradient accumulation steps')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     args = parser.parse_args()
     main(args)
