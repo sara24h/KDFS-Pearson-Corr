@@ -263,15 +263,35 @@ def main(args):
 
     masks_detached = [m.detach().clone() if m is not None else None for m in checkpoint['masks']]
 
+    # ❌ بخش اشتباه فعلی را کاملاً پاک کنید
+
+# ✅ جایگزین با این کد صحیح:
     model = ResNet_50_pruned_hardfakevsreal(masks=masks_detached)
-    model.load_state_dict(checkpoint['model_state_dict'])
+
+# ابتدا state_dict را بارگذاری کنید (فقط بخش‌های مشترک)
+# اما چون fc تغییر می‌کند، آن را جداگانه مدیریت کنید
+    pretrained_dict = checkpoint['model_state_dict']
+    model_dict = model.state_dict()
+
+# فیلتر کردن وزن‌های fc قدیمی (چون ساختارش عوض می‌شود)
+    pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and 'fc' not in k}
+    model_dict.update(pretrained_dict)
+    model.load_state_dict(model_dict)
+
+# حالا لایه fc را با Dropout جایگزین کنید
+    in_features = model.fc.in_features
+    model.fc = nn.Sequential(
+        nn.Dropout(0.5),
+        nn.Linear(in_features, 1)
+    )
+
     model = model.to(DEVICE)
 
     for param in model.parameters():
         param.requires_grad = False
 
-    for param in model.layer3.parameters():
-        param.requires_grad = True
+    #for param in model.layer3.parameters():
+        #param.requires_grad = True
 
     for param in model.layer4.parameters():
         param.requires_grad = True
@@ -303,7 +323,7 @@ def main(args):
     optimizer = optim.Adam([
         {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.5, 'weight_decay': WEIGHT_DECAY},
         {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY},
-        {'params': model.module.fc.parameters(),   'lr': BASE_LR * 5.0, 'weight_decay': WEIGHT_DECAY * 2}
+        {'params': model.module.fc.parameters(),   'lr': BASE_LR * 2.0, 'weight_decay': WEIGHT_DECAY * 5}
     ])
     
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
@@ -362,7 +382,7 @@ def main(args):
         model_inference = ResNet_50_pruned_hardfakevsreal(masks=checkpoint['masks'])
         in_features = model_inference.fc.in_features
         model_inference.fc = nn.Sequential(
-            nn.Dropout(0.3),
+            nn.Dropout(0.5),
             nn.Linear(in_features, 1)
         )
         model_inference.load_state_dict(model.module.state_dict())
@@ -385,7 +405,7 @@ def main(args):
                 'accum_steps': ACCUM_STEPS,
                 'epochs': NUM_EPOCHS,
                 'loss': 'BCEWithLogitsLoss',
-                'dropout': 0.3
+                'dropout': 0.5
             }
         }
 
