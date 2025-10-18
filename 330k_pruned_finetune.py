@@ -18,20 +18,34 @@ from tqdm import tqdm
 from torch.amp import autocast, GradScaler
 import argparse
 from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
-from sklearn.model_selection import train_test_split
 
-class DeepfakeDataset(Dataset):
-    def __init__(self, image_paths, labels, transform=None):
-        self.image_paths = image_paths
-        self.labels = labels
+class WildDeepfakeDataset(Dataset):
+    def __init__(self, real_path, fake_path, transform=None):
         self.transform = transform
+        self.images = []
+        self.labels = []
+
+        if os.path.exists(real_path):
+            real_files = [f for f in os.listdir(real_path) if f.endswith(('.jpg', '.jpeg', '.png'))]
+            for fname in real_files:
+                self.images.append(os.path.join(real_path, fname))
+                self.labels.append(0)
+
+        if os.path.exists(fake_path):
+            fake_files = [f for f in os.listdir(fake_path) if f.endswith(('.jpg', '.jpeg', '.png'))]
+            for fname in fake_files:
+                self.images.append(os.path.join(fake_path, fname))
+                self.labels.append(1)
+
+        print(f"📊 Dataset loaded: {len(self.images)} images ({sum(1 for l in self.labels if l==0)} real, {sum(1 for l in self.labels if l==1)} fake)")
 
     def __len__(self):
-        return len(self.image_paths)
+        return len(self.images)
 
     def __getitem__(self, idx):
-        img_path = self.image_paths[idx]
+        img_path = self.images[idx]
         label = self.labels[idx]
+
         try:
             img = Image.open(img_path).convert('RGB')
             if self.transform:
@@ -41,60 +55,39 @@ class DeepfakeDataset(Dataset):
             print(f"❌ Error loading {img_path}: {e}")
             return torch.zeros(3, 224, 224), torch.tensor(label, dtype=torch.float32)
 
+
 train_transform = transforms.Compose([
-    transforms.Resize(224),
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.RandomRotation(15),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+    transforms.CenterCrop(224),
+    transforms.RandomHorizontalFlip(p=0.3),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562]),
+    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
 ])
 
 val_transform = transforms.Compose([
-    transforms.Resize(224),
+    transforms.CenterCrop(224),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562]),
+    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
 ])
 
-def create_dataloaders(batch_size=256, num_workers=4, seed=42):
-    real_dir = "/kaggle/input/deepfake-detection-dataset/dataset/real"
-    fake_dir = "/kaggle/input/deepfake-detection-dataset/dataset/fake"
-
-    assert os.path.exists(real_dir), f"Real directory not found: {real_dir}"
-    assert os.path.exists(fake_dir), f"Fake directory not found: {fake_dir}"
-
-    # جمع‌آوری فایل‌ها
-    real_files = [os.path.join(real_dir, f) for f in os.listdir(real_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-    fake_files = [os.path.join(fake_dir, f) for f in os.listdir(fake_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-
-    print(f"📊 Real images: {len(real_files)} | Fake images: {len(fake_files)}")
-
-    # ایجاد لیبل‌ها
-    real_labels = [0] * len(real_files)
-    fake_labels = [1] * len(fake_files)
-
-    # ترکیب
-    all_files = real_files + fake_files
-    all_labels = real_labels + fake_labels
-
-    # تقسیم 70/15/15 با stratify
-    train_files, temp_files, train_labels, temp_labels = train_test_split(
-        all_files, all_labels, test_size=0.3, random_state=seed, stratify=all_labels
-    )
-    val_files, test_files, val_labels, test_labels = train_test_split(
-        temp_files, temp_labels, test_size=0.5, random_state=seed, stratify=temp_labels
+def create_dataloaders(batch_size=256, num_workers=4):
+    train_dataset = WildDeepfakeDataset(
+        real_path="/kaggle/input/wild-deepfake/train/real",
+        fake_path="/kaggle/input/wild-deepfake/train/fake",
+        transform=train_transform
     )
 
-    print(f"📊 Train: {len(train_files)} ({sum(train_labels)} fake, {len(train_labels)-sum(train_labels)} real)")
-    print(f"📊 Val:   {len(val_files)} ({sum(val_labels)} fake, {len(val_labels)-sum(val_labels)} real)")
-    print(f"📊 Test:  {len(test_files)} ({sum(test_labels)} fake, {len(test_labels)-sum(test_labels)} real)")
+    val_dataset = WildDeepfakeDataset(
+        real_path="/kaggle/input/wild-deepfake/valid/real",
+        fake_path="/kaggle/input/wild-deepfake/valid/fake",
+        transform=val_transform
+    )
 
-    # ساخت دیتاست‌ها
-    train_dataset = DeepfakeDataset(train_files, train_labels, transform=train_transform)
-    val_dataset = DeepfakeDataset(val_files, val_labels, transform=val_transform)
-    test_dataset = DeepfakeDataset(test_files, test_labels, transform=val_transform)
+    test_dataset = WildDeepfakeDataset(
+        real_path="/kaggle/input/wild-deepfake/test/real",
+        fake_path="/kaggle/input/wild-deepfake/test/fake",
+        transform=val_transform
+    )
 
-    # Samplerها برای DDP
     train_sampler = DistributedSampler(train_dataset)
     val_sampler = DistributedSampler(val_dataset, shuffle=False)
     test_sampler = DistributedSampler(test_dataset, shuffle=False)
@@ -108,7 +101,7 @@ def create_dataloaders(batch_size=256, num_workers=4, seed=42):
 
     return train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler
 
-def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epoch, rank=0, accum_steps=1):
+def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epoch, rank=0, accum_steps=1, scheduler=None):
     model.train()
     running_loss = 0.0
     correct = 0
@@ -190,6 +183,26 @@ def validate(model, loader, criterion, device, writer, epoch, rank=0):
 
     return avg_loss, avg_acc
 
+class EarlyStopping:
+    def __init__(self, patience=5, min_delta=0.001):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        
+    def __call__(self, val_acc):
+        if self.best_score is None:
+            self.best_score = val_acc
+        elif val_acc < self.best_score + self.min_delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = val_acc
+            self.counter = 0
+        return self.early_stop
+
 def setup_ddp(seed):
     os.environ['TORCH_NCCL_TIMEOUT_MS'] = '1800000'
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -204,13 +217,14 @@ def setup_ddp(seed):
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.enabled = True
+
     return local_rank
 
 def cleanup_ddp():
     dist.destroy_process_group()
 
 def main(args):
-    SEED = args.seed
+    SEED = 42
     local_rank = setup_ddp(SEED)
     world_size = dist.get_world_size()
     global_rank = dist.get_rank()
@@ -219,6 +233,7 @@ def main(args):
     BATCH_SIZE_PER_GPU = args.batch_size
     BATCH_SIZE = BATCH_SIZE_PER_GPU * world_size
     NUM_EPOCHS = args.num_epochs
+    BASE_LR = args.learning_rate
     WEIGHT_DECAY = args.weight_decay
     ACCUM_STEPS = args.accum_steps
 
@@ -230,13 +245,13 @@ def main(args):
 
     if global_rank == 0:
         print("="*70)
-        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 — Feature Extractor Strategy")
-        print("   🔧 روش: Feature Extractor با Fine-tuning لایه‌های خاص")
+        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 — Layer4 + FC (BCE Loss)")
         print(f"   تعداد گرافیک: {world_size}")
         print(f"   Batch Size کل: {BATCH_SIZE}")
         print(f"   Gradient Accumulation Steps: {ACCUM_STEPS}")
         print(f"   Effective Batch Size: {BATCH_SIZE * ACCUM_STEPS}")
         print(f"   تعداد Epochs: {NUM_EPOCHS}")
+        print(f"   Learning Rate: {BASE_LR}")
         print(f"   Weight Decay: {WEIGHT_DECAY}")
         print("="*70)
 
@@ -249,24 +264,14 @@ def main(args):
     masks_detached = [m.detach().clone() if m is not None else None for m in checkpoint['masks']]
 
     model = ResNet_50_pruned_hardfakevsreal(masks=masks_detached)
-
-    pretrained_dict = checkpoint['model_state_dict']
-    model_dict = model.state_dict()
-
-    pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and 'fc' not in k}
-    model_dict.update(pretrained_dict)
-    model.load_state_dict(model_dict)
-
-    in_features = model.fc.in_features
-    model.fc = nn.Sequential(
-        nn.Dropout(p=0.5),
-        nn.Linear(in_features, 1)
-    )
-
+    model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(DEVICE)
 
     for param in model.parameters():
         param.requires_grad = False
+
+    for param in model.layer3.parameters():
+        param.requires_grad = True
 
     for param in model.layer4.parameters():
         param.requires_grad = True
@@ -284,36 +289,27 @@ def main(args):
         print(f"   - تعداد کل پارامترها: {total_params:,}")
         print(f"   - تعداد پارامترهای قابل آموزش: {trainable_params:,}")
         print(f"   - لایه‌های قابل آموزش: layer4 + fc")
-        print(f"   - Dropout: p=0.5 قبل از FC")
 
     if global_rank == 0:
         print("\n📊 آماده‌سازی DataLoaders...")
 
     train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler = create_dataloaders(
         batch_size=BATCH_SIZE_PER_GPU,
-        num_workers=2,
-        seed=SEED
+        num_workers=2
     )
 
     criterion = nn.BCEWithLogitsLoss()
 
-    layer4_params = []
-    fc_params = []
-
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            if 'layer4' in name:
-                layer4_params.append(param)
-            elif 'fc' in name:
-                fc_params.append(param)
-
-    optimizer = optim.AdamW([
-        {'params': layer4_params, 'lr': args.lr_layer4, 'weight_decay': args.weight_decay},
-        {'params': fc_params, 'lr': args.lr_fc, 'weight_decay': args.weight_decay}
+    optimizer = optim.Adam([
+        {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.5, 'weight_decay': WEIGHT_DECAY},
+        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY},
+        {'params': model.module.fc.parameters(),   'lr': BASE_LR * 5.0, 'weight_decay': WEIGHT_DECAY * 2}
     ])
-
+    
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
     scaler = GradScaler(enabled=True)
+    early_stopping = EarlyStopping(patience=7, min_delta=0.001)
+
     best_val_acc = 0.0
 
     for epoch in range(NUM_EPOCHS):
@@ -322,13 +318,14 @@ def main(args):
 
         if global_rank == 0:
             print(f"\n📍 Epoch {epoch+1}/{NUM_EPOCHS}")
-            print(f"   LR (layer4): {optimizer.param_groups[0]['lr']:.7f}")
-            print(f"   LR (fc):     {optimizer.param_groups[1]['lr']:.7f}")
+            print(f"   LR (layer3): {optimizer.param_groups[0]['lr']:.7f}")
+            print(f"   LR (layer4): {optimizer.param_groups[1]['lr']:.7f}")
+            print(f"   LR (fc):    {optimizer.param_groups[2]['lr']:.7f}")
             print("-" * 70)
 
         train_loss, train_acc = train_epoch(
             model, train_loader, criterion, optimizer, DEVICE, scaler, writer, 
-            epoch, global_rank, ACCUM_STEPS
+            epoch, global_rank, ACCUM_STEPS, scheduler=scheduler
         )
         if global_rank == 0:
             print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
@@ -339,27 +336,33 @@ def main(args):
 
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-                torch.save(model.module.state_dict(), '/kaggle/working/best_model_feature_extractor.pt')
+                torch.save(model.module.state_dict(), '/kaggle/working/best_layer4_fc_bce.pt')
                 print(f"✅ بهترین مدل ذخیره شد با Val Acc: {val_acc:.2f}%")
 
+        # Step the scheduler at the end of each epoch
         scheduler.step()
 
-    # تست نهایی
+        if early_stopping(val_acc):
+            if global_rank == 0:
+                print(f"\n⚠️ Early stopping triggered at epoch {epoch+1}")
+                print(f"Best Val Acc: {best_val_acc:.2f}%")
+            break
+
     if global_rank == 0:
-        model.module.load_state_dict(torch.load('/kaggle/working/best_model_feature_extractor.pt'))
+        model.module.load_state_dict(torch.load('/kaggle/working/best_layer4_fc_bce.pt'))
     
     test_loss, test_acc = validate(model, test_loader, criterion, DEVICE, writer, NUM_EPOCHS, global_rank)
 
     if global_rank == 0:
         print("\n" + "="*70)
-        print("🧪 تست نهایی و ذخیره مدل")
+        print("🧪 تست نهایی و ذخیره مدل inference-ready")
         print("="*70)
         print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.2f}%")
 
         model_inference = ResNet_50_pruned_hardfakevsreal(masks=checkpoint['masks'])
         in_features = model_inference.fc.in_features
         model_inference.fc = nn.Sequential(
-            nn.Dropout(p=0.5),
+            nn.Dropout(0.3),
             nn.Linear(in_features, 1)
         )
         model_inference.load_state_dict(model.module.state_dict())
@@ -372,29 +375,24 @@ def main(args):
             'model_state_dict': model_inference.state_dict(),
             'total_params': total_params_inf,
             'masks': checkpoint['masks'],
-            'model_architecture': 'ResNet_50_pruned_hardfakevsreal (Feature Extractor)',
+            'model_architecture': 'ResNet_50_pruned_hardfakevsreal (Layer4+FC BCE)',
             'best_val_acc': best_val_acc,
             'test_acc': test_acc,
             'training_config': {
-                'strategy': 'Feature Extractor',
-                'trainable_layers': 'layer4 + fc',
-                'dropout': 0.5,
-                'lr_layer4': args.lr_layer4,
-                'lr_fc': args.lr_fc,
-                'weight_decay': args.weight_decay,
+                'lr': BASE_LR,
+                'weight_decay': WEIGHT_DECAY,
                 'batch_size': BATCH_SIZE,
                 'accum_steps': ACCUM_STEPS,
                 'epochs': NUM_EPOCHS,
                 'loss': 'BCEWithLogitsLoss',
-                'optimizer': 'AdamW',
-                'scheduler': 'StepLR (step_size=5, gamma=0.1)'
+                'dropout': 0.3
             }
         }
 
-        inference_save_path = '/kaggle/working/final_feature_extractor_model.pt'
+        inference_save_path = '/kaggle/working/final_pruned_layer4_fc_bce.pt'
         torch.save(checkpoint_inference, inference_save_path)
 
-        print("✅ مدل با استراتژی Feature Extractor ذخیره شد!")
+        print("✅ مدل هرس‌شده (Layer4+FC BCE) با موفقیت ذخیره شد!")
         print(f"تعداد پارامترها: {total_params_inf:,}")
         print(f"بهترین Val Acc: {best_val_acc:.2f}%")
         print(f"Test Acc: {test_acc:.2f}%")
@@ -405,15 +403,13 @@ def main(args):
         writer.close()
 
     cleanup_ddp()
-
+    
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Feature Extractor Fine-tune for Deepfake Detection")
-    parser.add_argument('--num_epochs', type=int, default=20, help='Number of training epochs')
+    parser = argparse.ArgumentParser(description="Fine-tune Pruned ResNet50 for WildDeepfake Dataset (BCE Loss)")
+    parser.add_argument('--num_epochs', type=int, default=15, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size per GPU')
-    parser.add_argument('--lr_layer4', type=float, default=5e-5, help='Learning rate for layer4')
-    parser.add_argument('--lr_fc', type=float, default=1e-4, help='Learning rate for fully connected layer')
-    parser.add_argument('--weight_decay', type=float, default=1e-3, help='Weight decay')
+    parser.add_argument('--learning_rate', type=float, default=0.0001, help='Base learning rate')
+    parser.add_argument('--weight_decay', type=float, default=0.00005, help='Weight decay for optimizer')
     parser.add_argument('--accum_steps', type=int, default=1, help='Gradient accumulation steps')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     args = parser.parse_args()
     main(args)
