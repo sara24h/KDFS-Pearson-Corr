@@ -245,6 +245,7 @@ def main(args):
 
     model = ResNet_50_pruned_hardfakevsreal(masks=masks_detached)
     model.load_state_dict(checkpoint['model_state_dict'])
+    in_features = model.fc.in_features
     
     model.fc = nn.Sequential(
         nn.Dropout(0.5), 
@@ -338,7 +339,7 @@ def main(args):
         model_inference = ResNet_50_pruned_hardfakevsreal(masks=checkpoint['masks'])
         in_features = model_inference.fc.in_features
         model_inference.fc = nn.Sequential(
-            nn.Dropout(0.3),
+            nn.Dropout(0.5),
             nn.Linear(in_features, 1)
         )
         model_inference.load_state_dict(model.module.state_dict())
