@@ -5,7 +5,7 @@ from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
 input_save_path = '/kaggle/input/330k-fuzzy-ranked-based-ensemble-5/resnet50_pruned_model_learnable_masks.pt'
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-output_save_path = '/kaggle/working/10k_final.pt'
+output_save_path = '/kaggle/working/330k_final.pt'
 
 try:
     # الف) لود چک‌پوینت کامل ورودی
