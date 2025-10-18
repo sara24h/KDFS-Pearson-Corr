@@ -215,7 +215,6 @@ def main(args):
     BATCH_SIZE_PER_GPU = args.batch_size
     BATCH_SIZE = BATCH_SIZE_PER_GPU * world_size
     NUM_EPOCHS = args.num_epochs
-    BASE_LR = args.learning_rate
     WEIGHT_DECAY = args.weight_decay
     ACCUM_STEPS = args.accum_steps
 
@@ -234,7 +233,6 @@ def main(args):
         print(f"   Gradient Accumulation Steps: {ACCUM_STEPS}")
         print(f"   Effective Batch Size: {BATCH_SIZE * ACCUM_STEPS}")
         print(f"   تعداد Epochs: {NUM_EPOCHS}")
-        print(f"   Learning Rate: {BASE_LR}")
         print(f"   Weight Decay: {WEIGHT_DECAY}")
         print("="*70)
 
