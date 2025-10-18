@@ -55,6 +55,7 @@ class WildDeepfakeDataset(Dataset):
             print(f"❌ Error loading {img_path}: {e}")
             return torch.zeros(3, 224, 224), torch.tensor(label, dtype=torch.float32)
 
+
 train_transform = transforms.Compose([
     transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
     transforms.RandomHorizontalFlip(p=0.5),
@@ -209,6 +210,7 @@ def main(args):
     local_rank = setup_ddp(SEED)
     world_size = dist.get_world_size()
     global_rank = dist.get_rank()
+
     DEVICE = torch.device(f"cuda:{local_rank}")
     BATCH_SIZE_PER_GPU = args.batch_size
     BATCH_SIZE = BATCH_SIZE_PER_GPU * world_size
@@ -245,10 +247,11 @@ def main(args):
 
     model = ResNet_50_pruned_hardfakevsreal(masks=masks_detached)
     model.load_state_dict(checkpoint['model_state_dict'])
+
+       
     in_features = model.fc.in_features
-    
     model.fc = nn.Sequential(
-        nn.Dropout(0.5), 
+        nn.Dropout(0.5),
         nn.Linear(in_features, 1)
     )
     model = model.to(DEVICE)
@@ -289,11 +292,12 @@ def main(args):
     optimizer = optim.Adam([
         {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.5, 'weight_decay': WEIGHT_DECAY},
         {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY},
-        {'params': model.module.fc.parameters(),   'lr': BASE_LR * 5.0, 'weight_decay': 1e-3}
+        {'params': model.module.fc.parameters(),   'lr': BASE_LR * 5.0, 'weight_decay': 0.001}
     ])
     
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2, verbose=True)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
     scaler = GradScaler(enabled=True)
+
     best_val_acc = 0.0
 
     for epoch in range(NUM_EPOCHS):
@@ -322,8 +326,6 @@ def main(args):
                 best_val_acc = val_acc
                 torch.save(model.module.state_dict(), '/kaggle/working/best_layer4_fc_bce.pt')
                 print(f"✅ بهترین مدل ذخیره شد با Val Acc: {val_acc:.2f}%")
-
-        scheduler.step()
 
     if global_rank == 0:
         model.module.load_state_dict(torch.load('/kaggle/working/best_layer4_fc_bce.pt'))
