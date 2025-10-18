@@ -57,10 +57,8 @@ class WildDeepfakeDataset(Dataset):
 
 
 train_transform = transforms.Compose([
-    transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-    transforms.RandomGrayscale(p=0.1),
+    transforms.CenterCrop(224),
+    transforms.RandomHorizontalFlip(p=0.3),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
 ])
@@ -185,6 +183,26 @@ def validate(model, loader, criterion, device, writer, epoch, rank=0):
 
     return avg_loss, avg_acc
 
+class EarlyStopping:
+    def __init__(self, patience=5, min_delta=0.001):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        
+    def __call__(self, val_acc):
+        if self.best_score is None:
+            self.best_score = val_acc
+        elif val_acc < self.best_score + self.min_delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = val_acc
+            self.counter = 0
+        return self.early_stop
+
 def setup_ddp(seed):
     os.environ['TORCH_NCCL_TIMEOUT_MS'] = '1800000'
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -247,13 +265,6 @@ def main(args):
 
     model = ResNet_50_pruned_hardfakevsreal(masks=masks_detached)
     model.load_state_dict(checkpoint['model_state_dict'])
-
-       
-    in_features = model.fc.in_features
-    model.fc = nn.Sequential(
-        nn.Dropout(0.5),
-        nn.Linear(in_features, 1)
-    )
     model = model.to(DEVICE)
 
     for param in model.parameters():
@@ -292,11 +303,12 @@ def main(args):
     optimizer = optim.Adam([
         {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.5, 'weight_decay': WEIGHT_DECAY},
         {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY},
-        {'params': model.module.fc.parameters(),   'lr': BASE_LR * 5.0, 'weight_decay': 0.001}
+        {'params': model.module.fc.parameters(),   'lr': BASE_LR * 5.0, 'weight_decay': WEIGHT_DECAY * 2}
     ])
     
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
     scaler = GradScaler(enabled=True)
+    early_stopping = EarlyStopping(patience=7, min_delta=0.001)
 
     best_val_acc = 0.0
 
@@ -327,6 +339,15 @@ def main(args):
                 torch.save(model.module.state_dict(), '/kaggle/working/best_layer4_fc_bce.pt')
                 print(f"✅ بهترین مدل ذخیره شد با Val Acc: {val_acc:.2f}%")
 
+        # Step the scheduler at the end of each epoch
+        scheduler.step()
+
+        if early_stopping(val_acc):
+            if global_rank == 0:
+                print(f"\n⚠️ Early stopping triggered at epoch {epoch+1}")
+                print(f"Best Val Acc: {best_val_acc:.2f}%")
+            break
+
     if global_rank == 0:
         model.module.load_state_dict(torch.load('/kaggle/working/best_layer4_fc_bce.pt'))
     
@@ -341,7 +362,7 @@ def main(args):
         model_inference = ResNet_50_pruned_hardfakevsreal(masks=checkpoint['masks'])
         in_features = model_inference.fc.in_features
         model_inference.fc = nn.Sequential(
-            nn.Dropout(0.5),
+            nn.Dropout(0.3),
             nn.Linear(in_features, 1)
         )
         model_inference.load_state_dict(model.module.state_dict())
