@@ -37,7 +37,7 @@ class WildDeepfakeDataset(Dataset):
                 self.images.append(os.path.join(fake_path, fname))
                 self.labels.append(1)
 
-        print(f"📊 Dataset loaded: {len(self.images)} images ({sum(1 for l in self.labels if l==0)} real, {sum(1 for l in self.labels if l==1)} fake)")
+        print(f"Dataset loaded: {len(self.images)} images ({sum(1 for l in self.labels if l==0)} real, {sum(1 for l in self.labels if l==1)} fake)")
 
     def __len__(self):
         return len(self.images)
@@ -185,26 +185,6 @@ def validate(model, loader, criterion, device, writer, epoch, rank=0):
 
     return avg_loss, avg_acc
 
-class EarlyStopping:
-    def __init__(self, patience=7, min_delta=0.001):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.counter = 0
-        self.best_score = None
-        self.early_stop = False
-        
-    def __call__(self, val_acc):
-        if self.best_score is None:
-            self.best_score = val_acc
-        elif val_acc < self.best_score + self.min_delta:
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            self.best_score = val_acc
-            self.counter = 0
-        return self.early_stop
-
 def setup_ddp(seed):
     os.environ['TORCH_NCCL_TIMEOUT_MS'] = '1800000'
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -275,7 +255,6 @@ def main(args):
     model_dict.update(pretrained_dict)
     model.load_state_dict(model_dict)
 
-    # 🔧 Feature Extractor Strategy: Dropout(0.5) + FC Layer
     in_features = model.fc.in_features
     model.fc = nn.Sequential(
         nn.Dropout(p=0.5),
@@ -284,11 +263,9 @@ def main(args):
 
     model = model.to(DEVICE)
 
-    # 🔧 استراتژی Feature Extractor: فریز کردن تمام لایه‌ها به جز layer4 و fc
     for param in model.parameters():
         param.requires_grad = False
 
-    # ✅ فقط layer4 و fc آزاد می‌شوند
     for param in model.layer4.parameters():
         param.requires_grad = True
 
@@ -315,17 +292,23 @@ def main(args):
         num_workers=2
     )
 
-    # 🔧 Loss Function: BCEWithLogitsLoss (مناسب برای دسته‌بندی دودویی)
     criterion = nn.BCEWithLogitsLoss()
 
-    # 🔧 بهینه‌ساز: AdamW با weight_decay=1e-3
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=BASE_LR,
-        weight_decay=1e-3
-    )
-    
-    # 🔧 Learning Rate Scheduler: StepLR (هر 5 epoch، LR را 0.1x کاهش می‌دهد)
+    layer4_params = []
+    fc_params = []
+
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            if 'layer4' in name:
+                layer4_params.append(param)
+            elif 'fc' in name:
+                fc_params.append(param)
+
+    optimizer = optim.AdamW([
+        {'params': layer4_params, 'lr': args.lr_layer4, 'weight_decay': args.weight_decay},
+        {'params': fc_params, 'lr': args.lr_fc, 'weight_decay': args.weight_decay}
+    ])
+
     scheduler = optim.lr_scheduler.StepLR(
         optimizer,
         step_size=5,
@@ -333,8 +316,6 @@ def main(args):
     )
     
     scaler = GradScaler(enabled=True)
-    early_stopping = EarlyStopping(patience=10, min_delta=0.001)
-
     best_val_acc = 0.0
 
     for epoch in range(NUM_EPOCHS):
@@ -362,14 +343,7 @@ def main(args):
                 torch.save(model.module.state_dict(), '/kaggle/working/best_model_feature_extractor.pt')
                 print(f"✅ بهترین مدل ذخیره شد با Val Acc: {val_acc:.2f}%")
 
-        # 🔧 Step scheduler پس از هر epoch
         scheduler.step()
-
-        if early_stopping(val_acc):
-            if global_rank == 0:
-                print(f"\n⚠️ Early stopping triggered at epoch {epoch+1}")
-                print(f"Best Val Acc: {best_val_acc:.2f}%")
-            break
 
     if global_rank == 0:
         model.module.load_state_dict(torch.load('/kaggle/working/best_model_feature_extractor.pt'))
@@ -435,8 +409,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Feature Extractor Fine-tune for WildDeepfake")
     parser.add_argument('--num_epochs', type=int, default=20, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size per GPU')
-    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=1e-3, help='Weight decay (default: 1e-3)')
+    parser.add_argument('--lr_layer4', type=float, default=5e-5, help='Learning rate for layer4')
+    parser.add_argument('--lr_fc', type=float, default=1e-4, help='Learning rate for fully connected layer')
+    parser.add_argument('--weight_decay', type=float, default=1e-3, help='Weight decay')
     parser.add_argument('--accum_steps', type=int, default=1, help='Gradient accumulation steps')
     args = parser.parse_args()
     main(args)
