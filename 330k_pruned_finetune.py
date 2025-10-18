@@ -340,7 +340,7 @@ def main(args):
 
     # 🔥 IMPROVED: Learning rate کمتر و weight decay بیشتر
     optimizer = optim.AdamW([
-        {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.3, 'weight_decay': WEIGHT_DECAY * 2},
+        {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.1, 'weight_decay': WEIGHT_DECAY * 3},
         {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 0.5, 'weight_decay': WEIGHT_DECAY * 2},
         {'params': model.module.fc.parameters(),     'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY * 3}
     ])
