@@ -300,10 +300,10 @@ def main(args):
 
     criterion = nn.BCEWithLogitsLoss()
 
-    optimizer = optim.Adam([
-        {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.5, 'weight_decay': WEIGHT_DECAY},
-        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY},
-        {'params': model.module.fc.parameters(),   'lr': BASE_LR * 5.0, 'weight_decay': WEIGHT_DECAY * 2}
+    optimizer = optim.AdamW([  # ترجیحاً AdamW به جای Adam
+        {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.5,  'weight_decay': WEIGHT_DECAY},
+        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 1.0,  'weight_decay': WEIGHT_DECAY},
+        {'params': model.module.fc.parameters(),    'lr': BASE_LR * 5.0,  'weight_decay': WEIGHT_DECAY * 2} 
     ])
     
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
@@ -385,7 +385,7 @@ def main(args):
                 'accum_steps': ACCUM_STEPS,
                 'epochs': NUM_EPOCHS,
                 'loss': 'BCEWithLogitsLoss',
-                'dropout': 0.3
+                'dropout': 0.5
             }
         }
 
