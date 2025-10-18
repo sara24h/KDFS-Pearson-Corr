@@ -56,7 +56,7 @@ class WildDeepfakeDataset(Dataset):
             return torch.zeros(3, 224, 224), torch.tensor(label, dtype=torch.float32)
 
 transform_train_190k = transforms.Compose([
-            transforms.Resize(image_size),
+            transforms.Resize(224),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomRotation(15),
             transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
@@ -65,7 +65,7 @@ transform_train_190k = transforms.Compose([
 ])
 
 transform_val_test_190k = transforms.Compose([
-            transforms.Resize(image_size),
+            transforms.Resize(224),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562]),
 ])
