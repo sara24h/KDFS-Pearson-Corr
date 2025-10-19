@@ -19,6 +19,7 @@ from torch.amp import autocast, GradScaler
 import argparse
 from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
 
+
 class WildDeepfakeDataset(Dataset):
     def __init__(self, real_path, fake_path, transform=None):
         self.transform = transform
@@ -37,7 +38,7 @@ class WildDeepfakeDataset(Dataset):
                 self.images.append(os.path.join(fake_path, fname))
                 self.labels.append(1)
 
-        print(f"📊 Dataset loaded: {len(self.images)} images ({sum(1 for l in self.labels if l==0)} real, {sum(1 for l in self.labels if l==1)} fake)")
+        print(f"📊 Dataset loaded: {len(self.images)} images ({sum(1 for l in self.labels if l == 0)} real, {sum(1 for l in self.labels if l == 1)} fake)")
 
     def __len__(self):
         return len(self.images)
@@ -69,6 +70,7 @@ val_transform = transforms.Compose([
     transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
 ])
 
+
 def create_dataloaders(batch_size=256, num_workers=4):
     train_dataset = WildDeepfakeDataset(
         real_path="/kaggle/input/wild-deepfake/train/real",
@@ -93,7 +95,7 @@ def create_dataloaders(batch_size=256, num_workers=4):
     test_sampler = DistributedSampler(test_dataset, shuffle=False)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler,
-                              num_workers=num_workers, pin_memory=True, drop_last=True)
+                              num_workers=num_workers, pin_memory=True, drop_last=False)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler,
                             num_workers=num_workers, pin_memory=True, drop_last=False)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, sampler=test_sampler,
@@ -101,7 +103,8 @@ def create_dataloaders(batch_size=256, num_workers=4):
 
     return train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler
 
-def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epoch, rank=0, accum_steps=1, scheduler=None):
+
+def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epoch, rank=0, accum_steps=1):
     model.train()
     running_loss = 0.0
     correct = 0
@@ -134,7 +137,7 @@ def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epo
         if rank == 0:
             pbar.set_postfix({
                 'loss': f'{loss.item() * accum_steps:.4f}',
-                'acc': f'{100.*correct/total:.2f}%'
+                'acc': f'{100. * correct / total:.2f}%'
             })
 
     avg_loss = torch.tensor(running_loss / len(loader)).to(device)
@@ -149,6 +152,7 @@ def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epo
         writer.add_scalar("train/acc", avg_acc, epoch)
 
     return avg_loss, avg_acc
+
 
 @torch.no_grad()
 def validate(model, loader, criterion, device, writer, epoch, rank=0):
@@ -183,25 +187,6 @@ def validate(model, loader, criterion, device, writer, epoch, rank=0):
 
     return avg_loss, avg_acc
 
-class EarlyStopping:
-    def __init__(self, patience=5, min_delta=0.001):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.counter = 0
-        self.best_score = None
-        self.early_stop = False
-        
-    def __call__(self, val_acc):
-        if self.best_score is None:
-            self.best_score = val_acc
-        elif val_acc < self.best_score + self.min_delta:
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            self.best_score = val_acc
-            self.counter = 0
-        return self.early_stop
 
 def setup_ddp(seed):
     os.environ['TORCH_NCCL_TIMEOUT_MS'] = '1800000'
@@ -217,11 +202,13 @@ def setup_ddp(seed):
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.enabled = True
-
     return local_rank
 
+
 def cleanup_ddp():
-    dist.destroy_process_group()
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
 
 def main(args):
     SEED = 42
@@ -238,14 +225,11 @@ def main(args):
     ACCUM_STEPS = args.accum_steps
 
     result_dir = f'/kaggle/working/runs_ddp_rank_{global_rank}'
-    if global_rank == 0:
-        writer = SummaryWriter(result_dir)
-    else:
-        writer = None
+    writer = SummaryWriter(result_dir) if global_rank == 0 else None
 
     if global_rank == 0:
-        print("="*70)
-        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 — Layer4 + FC (BCE Loss)")
+        print("=" * 70)
+        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 — Layer3 + Layer4 + FC (BCE Loss)")
         print(f"   تعداد گرافیک: {world_size}")
         print(f"   Batch Size کل: {BATCH_SIZE}")
         print(f"   Gradient Accumulation Steps: {ACCUM_STEPS}")
@@ -253,49 +237,26 @@ def main(args):
         print(f"   تعداد Epochs: {NUM_EPOCHS}")
         print(f"   Learning Rate: {BASE_LR}")
         print(f"   Weight Decay: {WEIGHT_DECAY}")
-        print("="*70)
+        print("=" * 70)
 
-    if global_rank == 0:
-        print("\n📦 لود مدل Pruned...")
-
-    input_model_path = '/kaggle/input/10k_finetune_wd/pytorch/default/1/10k_final_pruned_finetuned_inference_ready (1).pt'
+    # لود مدل اصلی بدون تغییر ساختار fc
+    input_model_path = '/kaggle/working/10k_final.pt'
     checkpoint = torch.load(input_model_path, map_location=DEVICE)
-
     masks_detached = [m.detach().clone() if m is not None else None for m in checkpoint['masks']]
 
-    # ❌ بخش اشتباه فعلی را کاملاً پاک کنید
-
-# ✅ جایگزین با این کد صحیح:
     model = ResNet_50_pruned_hardfakevsreal(masks=masks_detached)
-
-# ابتدا state_dict را بارگذاری کنید (فقط بخش‌های مشترک)
-# اما چون fc تغییر می‌کند، آن را جداگانه مدیریت کنید
-    pretrained_dict = checkpoint['model_state_dict']
-    model_dict = model.state_dict()
-
-# فیلتر کردن وزن‌های fc قدیمی (چون ساختارش عوض می‌شود)
-    pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and 'fc' not in k}
-    model_dict.update(pretrained_dict)
-    model.load_state_dict(model_dict)
-
-# حالا لایه fc را با Dropout جایگزین کنید
-    in_features = model.fc.in_features
-    model.fc = nn.Sequential(
-        nn.Dropout(0.5),
-        nn.Linear(in_features, 1)
-    )
-
+    model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(DEVICE)
 
+    # فریز کردن تمام لایه‌ها
     for param in model.parameters():
         param.requires_grad = False
 
+    # آزاد کردن لایه‌های مورد نظر
     for param in model.layer3.parameters():
         param.requires_grad = True
-
     for param in model.layer4.parameters():
         param.requires_grad = True
-
     for param in model.fc.parameters():
         param.requires_grad = True
 
@@ -308,7 +269,7 @@ def main(args):
         print(f"✅ مدل لود و تنظیم شد")
         print(f"   - تعداد کل پارامترها: {total_params:,}")
         print(f"   - تعداد پارامترهای قابل آموزش: {trainable_params:,}")
-        print(f"   - لایه‌های قابل آموزش: layer4 + fc")
+        print(f"   - لایه‌های قابل آموزش: layer3, layer4, fc")
 
     if global_rank == 0:
         print("\n📊 آماده‌سازی DataLoaders...")
@@ -319,111 +280,103 @@ def main(args):
     )
 
     criterion = nn.BCEWithLogitsLoss()
-
-    optimizer = optim.Adam([
+    optimizer = optim.AdamW([
         {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.5, 'weight_decay': WEIGHT_DECAY},
         {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY},
-        {'params': model.module.fc.parameters(),   'lr': BASE_LR * 2.0, 'weight_decay': WEIGHT_DECAY * 5}
+        {'params': model.module.fc.parameters(),    'lr': BASE_LR * 2.0, 'weight_decay': WEIGHT_DECAY * 2}
     ])
-    
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
     scaler = GradScaler(enabled=True)
-    early_stopping = EarlyStopping(patience=7, min_delta=0.001)
 
     best_val_acc = 0.0
+    best_model_path = '/kaggle/working/best_pruned_finetuned.pt'
 
-    for epoch in range(NUM_EPOCHS):
-        train_sampler.set_epoch(epoch)
-        val_sampler.set_epoch(epoch)
+    try:
+        for epoch in range(NUM_EPOCHS):
+            train_sampler.set_epoch(epoch)
+            val_sampler.set_epoch(epoch)
 
-        if global_rank == 0:
-            print(f"\n📍 Epoch {epoch+1}/{NUM_EPOCHS}")
-            print(f"   LR (layer3): {optimizer.param_groups[0]['lr']:.7f}")
-            print(f"   LR (layer4): {optimizer.param_groups[1]['lr']:.7f}")
-            print(f"   LR (fc):    {optimizer.param_groups[2]['lr']:.7f}")
-            print("-" * 70)
-
-        train_loss, train_acc = train_epoch(
-            model, train_loader, criterion, optimizer, DEVICE, scaler, writer, 
-            epoch, global_rank, ACCUM_STEPS, scheduler=scheduler
-        )
-        if global_rank == 0:
-            print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
-
-        val_loss, val_acc = validate(model, val_loader, criterion, DEVICE, writer, epoch, global_rank)
-        if global_rank == 0:
-            print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
-
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                torch.save(model.module.state_dict(), '/kaggle/working/best_layer4_fc_bce.pt')
-                print(f"✅ بهترین مدل ذخیره شد با Val Acc: {val_acc:.2f}%")
-
-        # Step the scheduler at the end of each epoch
-        scheduler.step()
-
-        if early_stopping(val_acc):
             if global_rank == 0:
-                print(f"\n⚠️ Early stopping triggered at epoch {epoch+1}")
-                print(f"Best Val Acc: {best_val_acc:.2f}%")
-            break
+                print(f"\n📍 Epoch {epoch+1}/{NUM_EPOCHS}")
+                print(f"   LR (layer3): {optimizer.param_groups[0]['lr']:.7f}")
+                print(f"   LR (layer4): {optimizer.param_groups[1]['lr']:.7f}")
+                print(f"   LR (fc):    {optimizer.param_groups[2]['lr']:.7f}")
+                print("-" * 70)
 
-    if global_rank == 0:
-        model.module.load_state_dict(torch.load('/kaggle/working/best_layer4_fc_bce.pt'))
-    
-    test_loss, test_acc = validate(model, test_loader, criterion, DEVICE, writer, NUM_EPOCHS, global_rank)
+            train_loss, train_acc = train_epoch(
+                model, train_loader, criterion, optimizer, DEVICE, scaler, writer,
+                epoch, global_rank, ACCUM_STEPS
+            )
+            if global_rank == 0:
+                print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
 
-    if global_rank == 0:
-        print("\n" + "="*70)
-        print("🧪 تست نهایی و ذخیره مدل inference-ready")
-        print("="*70)
-        print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.2f}%")
+            val_loss, val_acc = validate(model, val_loader, criterion, DEVICE, writer, epoch, global_rank)
+            if global_rank == 0:
+                print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
+                if val_acc > best_val_acc:
+                    best_val_acc = val_acc
+                    torch.save(model.module.state_dict(), best_model_path)
+                    print(f"✅ بهترین مدل ذخیره شد با Val Acc: {val_acc:.2f}%")
 
-        model_inference = ResNet_50_pruned_hardfakevsreal(masks=checkpoint['masks'])
-        in_features = model_inference.fc.in_features
-        model_inference.fc = nn.Sequential(
-            nn.Dropout(0.5),
-            nn.Linear(in_features, 1)
-        )
-        model_inference.load_state_dict(model.module.state_dict())
-        model_inference = model_inference.to('cpu')
-        model_inference.eval()
+            scheduler.step()
 
-        total_params_inf = sum(p.numel() for p in model_inference.parameters())
+        # تست نهایی
+        if global_rank == 0:
+            if os.path.exists(best_model_path):
+                model.module.load_state_dict(torch.load(best_model_path))
+            else:
+                print("⚠️ No best model found. Using last epoch weights.")
 
-        checkpoint_inference = {
-            'model_state_dict': model_inference.state_dict(),
-            'total_params': total_params_inf,
-            'masks': checkpoint['masks'],
-            'model_architecture': 'ResNet_50_pruned_hardfakevsreal (Layer4+FC BCE)',
-            'best_val_acc': best_val_acc,
-            'test_acc': test_acc,
-            'training_config': {
-                'lr': BASE_LR,
-                'weight_decay': WEIGHT_DECAY,
-                'batch_size': BATCH_SIZE,
-                'accum_steps': ACCUM_STEPS,
-                'epochs': NUM_EPOCHS,
-                'loss': 'BCEWithLogitsLoss',
-                'dropout': 0.5
+        test_loss, test_acc = validate(model, test_loader, criterion, DEVICE, writer, NUM_EPOCHS, global_rank)
+
+        if global_rank == 0:
+            print("\n" + "=" * 70)
+            print("🧪 تست نهایی و ذخیره مدل inference-ready")
+            print("=" * 70)
+            print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.2f}%")
+
+            # ساخت مدل استنتاج با ساختار یکسان (بدون Dropout)
+            model_inference = ResNet_50_pruned_hardfakevsreal(masks=checkpoint['masks'])
+            model_inference.load_state_dict(model.module.state_dict())
+            model_inference = model_inference.cpu().eval()
+
+            total_params_inf = sum(p.numel() for p in model_inference.parameters())
+
+            checkpoint_inference = {
+                'model_state_dict': model_inference.state_dict(),
+                'total_params': total_params_inf,
+                'masks': checkpoint['masks'],
+                'model_architecture': 'ResNet_50_pruned_hardfakevsreal (Layer3+4+FC BCE)',
+                'best_val_acc': best_val_acc,
+                'test_acc': test_acc,
+                'training_config': {
+                    'lr': BASE_LR,
+                    'weight_decay': WEIGHT_DECAY,
+                    'batch_size': BATCH_SIZE,
+                    'accum_steps': ACCUM_STEPS,
+                    'epochs': NUM_EPOCHS,
+                    'loss': 'BCEWithLogitsLoss'
+                }
             }
-        }
 
-        inference_save_path = '/kaggle/working/final_pruned_layer4_fc_bce.pt'
-        torch.save(checkpoint_inference, inference_save_path)
+            inference_save_path = '/kaggle/working/final_pruned_finetuned_inference_ready.pt'
+            torch.save(checkpoint_inference, inference_save_path)
 
-        print("✅ مدل هرس‌شده (Layer4+FC BCE) با موفقیت ذخیره شد!")
-        print(f"تعداد پارامترها: {total_params_inf:,}")
-        print(f"بهترین Val Acc: {best_val_acc:.2f}%")
-        print(f"Test Acc: {test_acc:.2f}%")
+            print("✅ مدل هرس‌شده با موفقیت ذخیره شد!")
+            print(f"تعداد پارامترها: {total_params_inf:,}")
+            print(f"بهترین Val Acc: {best_val_acc:.2f}%")
+            print(f"Test Acc: {test_acc:.2f}%")
 
-        file_size_mb = os.path.getsize(inference_save_path) / (1024 * 1024)
-        print(f"حجم فایل: {file_size_mb:.2f} MB")
+            file_size_mb = os.path.getsize(inference_save_path) / (1024 * 1024)
+            print(f"حجم فایل: {file_size_mb:.2f} MB")
 
-        writer.close()
+            if writer:
+                writer.close()
 
-    cleanup_ddp()
-    
+    finally:
+        cleanup_ddp()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fine-tune Pruned ResNet50 for WildDeepfake Dataset (BCE Loss)")
     parser.add_argument('--num_epochs', type=int, default=15, help='Number of training epochs')
