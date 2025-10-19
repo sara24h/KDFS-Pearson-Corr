@@ -58,10 +58,15 @@ class WildDeepfakeDataset(Dataset):
 
 
 train_transform = transforms.Compose([
-    transforms.CenterCrop(224),
-    transforms.RandomHorizontalFlip(p=0.3),
+    transforms.RandomCrop(224),
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomRotation(degrees=15),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+    transforms.RandomGrayscale(p=0.1),
+    transforms.RandomApply([transforms.GaussianBlur(kernel_size=3)], p=0.3),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
+    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562]),
+    transforms.RandomErasing(p=0.2, scale=(0.02, 0.15))
 ])
 
 val_transform = transforms.Compose([
@@ -280,12 +285,16 @@ def main(args):
     )
 
     criterion = nn.BCEWithLogitsLoss()
+
     optimizer = optim.AdamW([
-        {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.5, 'weight_decay': WEIGHT_DECAY},
-        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY},
-        {'params': model.module.fc.parameters(),    'lr': BASE_LR * 2.0, 'weight_decay': WEIGHT_DECAY * 2}
+        {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.3, 'weight_decay': WEIGHT_DECAY * 1.5},
+        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 0.6, 'weight_decay': WEIGHT_DECAY * 1.5},
+        {'params': model.module.fc.parameters(),     'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY * 2.5}
     ])
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
+
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=10, T_mult=2, eta_min=1e-6
+    ) 
     scaler = GradScaler(enabled=True)
 
     best_val_acc = 0.0
