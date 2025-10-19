@@ -24,7 +24,7 @@ class WildDeepfakeDataset(Dataset):
                 self.images.append(os.path.join(real_path, fname))
                 self.labels.append(0)
         else:
-            raise FileNotFoundError(f"پوشه real یافت نشد: {real_path}")
+            raise FileNotFoundError(f"real folder not found: {real_path}")
         
         if os.path.exists(fake_path):
             fake_files = [f for f in os.listdir(fake_path) if f.endswith(('.jpg', '.jpeg', '.png'))]
@@ -32,11 +32,11 @@ class WildDeepfakeDataset(Dataset):
                 self.images.append(os.path.join(fake_path, fname))
                 self.labels.append(1)
         else:
-            raise FileNotFoundError(f"پوشه fake یافت نشد: {fake_path}")
+            raise FileNotFoundError(f"fake folder not found: {fake_path}")
         
-        print(f"تعداد تصاویر Real: {len([l for l in self.labels if l==0])}")
-        print(f"تعداد تصاویر Fake: {len([l for l in self.labels if l==1])}")
-        print(f"مجموع تصاویر: {len(self.images)}")
+        print(f"number of Real images: {len([l for l in self.labels if l==0])}")
+        print(f"number of Fake images: {len([l for l in self.labels if l==1])}")
+        print(f"sum of images: {len(self.images)}")
     
     def __len__(self):
         return len(self.images)
@@ -50,12 +50,12 @@ class WildDeepfakeDataset(Dataset):
                 image = self.transform(image)
             return image, label, img_path
         except Exception as e:
-            print(f"❌ خطا در لود {img_path}: {e}")
+            print(f"❌ error in loadig {img_path}: {e}")
             return torch.zeros(3, 224, 224), label, img_path
 
 
 def load_pruned_model(checkpoint_path, device):
-    print(f"🔄 در حال لود مدل از: {checkpoint_path}")
+    print(f"loading model from: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
     if isinstance(checkpoint, dict):
@@ -64,24 +64,24 @@ def load_pruned_model(checkpoint_path, device):
             masks_detached = [m.detach().clone() if m is not None else None for m in masks]
         else:
             masks_detached = None
-            print("⚠️ هیچ mask در checkpoint یافت نشد")
+            print("masks not found")
         
         model = ResNet_50_pruned_hardfakevsreal(masks=masks_detached)
         
         if 'model_state_dict' in checkpoint:
             model.load_state_dict(checkpoint['model_state_dict'])
-            print("✅ وزن‌ها از 'model_state_dict' لود شدند")
+            print("weights loaded from 'model_state_dict'")
         elif 'state_dict' in checkpoint:
             model.load_state_dict(checkpoint['state_dict'])
-            print("✅ وزن‌ها از 'state_dict' لود شدند")
+            print(" weights loaded from 'state_dict'")
         else:
             model.load_state_dict(checkpoint)
-            print("✅ وزن‌ها مستقیماً از checkpoint لود شدند")
+            print("weights directly loaded from checkpoint")
         
         total_params = sum(p.numel() for p in model.parameters())
-        print(f"📊 تعداد کل پارامترها: {total_params:,}")
+        print(f"number of all parameters: {total_params:,}")
     else:
-        raise ValueError("❌ فرمت checkpoint نامعتبر است!")
+        raise ValueError("checkpoint's format is not valid")
     
     model = model.to(device)
     model.eval()
@@ -154,12 +154,10 @@ def fuzzy_ensemble_binary(res1, res2, labels, class_no=2):
 def print_detailed_results(labels, predictions, model1_probs, model2_probs):
     from sklearn.metrics import classification_report, confusion_matrix
     print("\n" + "="*70)
-    print("📊 گزارش دسته‌بندی:")
-    print("="*70)
     print(classification_report(labels, predictions, target_names=['Real', 'Fake'], digits=4))
     
     print("\n" + "="*70)
-    print("📈 ماتریس درهم‌ریختگی:")
+    print("confusion matrix:")
     print("="*70)
     cm = confusion_matrix(labels, predictions)
     print(f"\n{'':15} {'Predicted Real':>15} {'Predicted Fake':>15}")
@@ -167,8 +165,6 @@ def print_detailed_results(labels, predictions, model1_probs, model2_probs):
     print(f"{'Actual Fake':15} {cm[1,0]:>15} {cm[1,1]:>15}")
     
     print("\n" + "="*70)
-    print("📊 آمار تفصیلی:")
-    print("="*70)
     print(f"✅ Real correctly classified: {cm[0,0]} / {cm[0,0] + cm[0,1]}")
     print(f"❌ Real misclassified as Fake: {cm[0,1]} / {cm[0,0] + cm[0,1]}")
     print(f"✅ Fake correctly classified: {cm[1,1]} / {cm[1,0] + cm[1,1]}")
@@ -181,27 +177,26 @@ def print_detailed_results(labels, predictions, model1_probs, model2_probs):
     ensemble_acc = (predictions == labels).sum() / len(labels)
     
     print("\n" + "="*70)
-    print("🔬 مقایسه عملکرد مدل‌ها:")
     print("="*70)
     print(f"Model 1 Accuracy: {model1_acc*100:.2f}%")
     print(f"Model 2 Accuracy: {model2_acc*100:.2f}%")
     print(f"Fuzzy Ensemble Accuracy: {ensemble_acc*100:.2f}%")
     improvement = (ensemble_acc - max(model1_acc, model2_acc))*100
-    print(f"بهبود نسبت به بهترین مدل: {improvement:+.2f}%")
+    print(f"improvement : {improvement:+.2f}%")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Fuzzy Ensemble برای دو مدل هرس‌شده Deepfake")
-    parser.add_argument('--model1_path', type=str, required=True, help='مسیر فایل مدل اول (.pt)')
-    parser.add_argument('--model2_path', type=str, required=True, help='مسیر فایل مدل دوم (.pt)')
-    parser.add_argument('--test_real_dir', type=str, required=True, help='مسیر پوشه تصاویر real تست')
-    parser.add_argument('--test_fake_dir', type=str, required=True, help='مسیر پوشه تصاویر fake تست')
-    parser.add_argument('--batch_size', type=int, default=256, help='Batch size برای تست')
-    parser.add_argument('--num_workers', type=int, default=4, help='تعداد worker برای DataLoader')
+    parser = argparse.ArgumentParser(description="Fuzzy Ensemble for models")
+    parser.add_argument('--model1_path', type=str, required=True, help='path of first model (.pt)')
+    parser.add_argument('--model2_path', type=str, required=True, help='path of second model (.pt)')
+    parser.add_argument('--test_real_dir', type=str, required=True, help='real path')
+    parser.add_argument('--test_fake_dir', type=str, required=True, help='fake path')
+    parser.add_argument('--batch_size', type=int, default=256, help='Batch size for test')
+    parser.add_argument('--num_workers', type=int, default=4, help='workers')
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"📱 دستگاه: {device}")
+    print(f"device: {device}")
     if torch.cuda.is_available():
         print(f"🚀 GPU: {torch.cuda.get_device_name(0)}")
 
@@ -211,7 +206,7 @@ def main():
         transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
     ])
 
-    print("\n📂 در حال بارگذاری دیتاست...")
+    print("\nloading the dataset...")
     test_dataset = WildDeepfakeDataset(
         real_path=args.test_real_dir,
         fake_path=args.test_fake_dir,
@@ -227,24 +222,23 @@ def main():
         drop_last=False
     )
 
-    print("\n🔄 در حال بارگذاری مدل‌ها...")
+    print("\nloading models...")
     model1 = load_pruned_model(args.model1_path, device)
     model2 = load_pruned_model(args.model2_path, device)
 
-    print("🔮 Model 1: در حال پیش‌بینی...")
+    print("predicting model1...")
     predictions1, labels = get_predictions(model1, test_loader, device)
-    print("🔮 Model 2: در حال پیش‌بینی...")
+    print("predicting model2...")
     predictions2, _ = get_predictions(model2, test_loader, device)
 
     print("\n" + "="*70)
-    print("🎯 در حال ترکیب فازی مدل‌ها...")
+    print("ensembeling models...")
     print("="*70)
     final_predictions, accuracy, fusion_details = fuzzy_ensemble_binary(predictions1, predictions2, labels)
 
-    print(f"\n✅ دقت ترکیب فازی: {accuracy * 100:.2f}%")
+    print(f"\naccuracy of fuzzy ensemble: {accuracy * 100:.2f}%")
     print_detailed_results(labels, final_predictions, predictions1, predictions2)
 
-    # ذخیره نتایج
     results = {
         'final_predictions': final_predictions,
         'true_labels': labels,
@@ -269,9 +263,7 @@ def main():
         'is_correct': (final_predictions == labels).astype(int)
     })
     df_results.to_csv('fuzzy_ensemble_results.csv', index=False)
-    print("\n✅ نتایج ذخیره شدند: fuzzy_ensemble_results.pt و fuzzy_ensemble_results.csv")
-    print("\n🎉 پردازش با موفقیت انجام شد!")
-
+    print("\nresualts saved: fuzzy_ensemble_results.pt و fuzzy_ensemble_results.csv")
 
 if __name__ == "__main__":
     main()
