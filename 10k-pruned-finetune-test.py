@@ -10,21 +10,21 @@ from PIL import Image
 import glob
 from tqdm import tqdm
 import argparse
+import socket  # ← برای پیدا کردن پورت آزاد
 from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
+
 
 class DeepfakeDataset(Dataset):
     def __init__(self, real_dirs, fake_dirs, transform=None):
         self.image_paths = []
         self.labels = []
         
-        # Load real images
         for dir_path in real_dirs:
             paths = glob.glob(os.path.join(dir_path, "*.jpg")) + \
                    glob.glob(os.path.join(dir_path, "*.png"))
             self.image_paths.extend(paths)
             self.labels.extend([1] * len(paths))
         
-        # Load fake images
         for dir_path in fake_dirs:
             paths = glob.glob(os.path.join(dir_path, "*.jpg")) + \
                    glob.glob(os.path.join(dir_path, "*.png"))
@@ -52,13 +52,25 @@ class DeepfakeDataset(Dataset):
             return torch.zeros(3, 224, 224), torch.tensor(label, dtype=torch.float32)
 
 
-def setup(rank, world_size):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
+def find_free_port():
+    """پیدا کردن یک پورت آزاد در سیستم"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+    return str(port)
+
+
+def setup(rank, world_size, master_port):
+    """راه‌اندازی DDP با پورت پویا"""
+    os.environ['MASTER_ADDR'] = '127.0.0.1'
+    os.environ['MASTER_PORT'] = master_port
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
 
 def cleanup():
     dist.destroy_process_group()
+
 
 def train_one_epoch(model, dataloader, criterion, optimizer, device, rank, epoch):
     model.train()
@@ -95,8 +107,8 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, rank, epoch
     
     avg_loss = running_loss / len(dataloader)
     accuracy = 100 * correct / total
-    
     return avg_loss, accuracy
+
 
 def validate(model, dataloader, criterion, device, rank):
     model.eval()
@@ -119,11 +131,10 @@ def validate(model, dataloader, criterion, device, rank):
     
     avg_loss = running_loss / len(dataloader)
     accuracy = 100 * correct / total
-    
     return avg_loss, accuracy
 
+
 def test_model(model, dataloader, criterion, device, rank):
-    """Test the model and return detailed metrics"""
     model.eval()
     running_loss = 0.0
     correct = 0
@@ -153,7 +164,6 @@ def test_model(model, dataloader, criterion, device, rank):
             correct += (predictions == labels).sum().item()
             total += labels.size(0)
             
-            # Calculate confusion matrix elements
             true_positives += ((predictions == 1) & (labels == 1)).sum().item()
             true_negatives += ((predictions == 0) & (labels == 0)).sum().item()
             false_positives += ((predictions == 1) & (labels == 0)).sum().item()
@@ -162,7 +172,6 @@ def test_model(model, dataloader, criterion, device, rank):
     avg_loss = running_loss / len(dataloader)
     accuracy = 100 * correct / total
     
-    # Calculate precision, recall, F1
     precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
     recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
     f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
@@ -179,14 +188,16 @@ def test_model(model, dataloader, criterion, device, rank):
         'false_negatives': false_negatives
     }
 
-def main_worker(rank, world_size, args):
-    setup(rank, world_size)
+
+def main_worker(rank, world_size, master_port, args):
+    setup(rank, world_size, master_port)
     device = torch.device(f'cuda:{rank}')
     torch.cuda.set_device(device)
     
     if rank == 0:
         print(f"\n{'='*70}")
         print(f"Starting DDP Training on {world_size} GPUs")
+        print(f"Using dynamic port: {master_port}")
         print(f"{'='*70}\n")
 
     train_transform = transforms.Compose([
@@ -203,7 +214,6 @@ def main_worker(rank, world_size, args):
         transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
     ])
 
-    # Train dataset
     if rank == 0:
         print("Loading training dataset...")
     train_dataset = DeepfakeDataset(
@@ -212,7 +222,6 @@ def main_worker(rank, world_size, args):
         transform=train_transform
     )
     
-    # Validation dataset
     if rank == 0:
         print("Loading validation dataset...")
     val_dataset = DeepfakeDataset(
@@ -221,7 +230,6 @@ def main_worker(rank, world_size, args):
         transform=val_transform
     )
     
-    # Test dataset
     if rank == 0:
         print("Loading test dataset...")
     test_dataset = DeepfakeDataset(
@@ -230,52 +238,13 @@ def main_worker(rank, world_size, args):
         transform=val_transform
     )
     
-    # Samplers
-    train_sampler = DistributedSampler(
-        train_dataset,
-        num_replicas=world_size,
-        rank=rank,
-        shuffle=True
-    )
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
+    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+    test_sampler = DistributedSampler(test_dataset, num_replicas=world_size, rank=rank, shuffle=False)
     
-    val_sampler = DistributedSampler(
-        val_dataset,
-        num_replicas=world_size,
-        rank=rank,
-        shuffle=False
-    )
-    
-    test_sampler = DistributedSampler(
-        test_dataset,
-        num_replicas=world_size,
-        rank=rank,
-        shuffle=False
-    )
-    
-    # DataLoaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        sampler=train_sampler,
-        num_workers=4,
-        pin_memory=True
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        sampler=val_sampler,
-        num_workers=4,
-        pin_memory=True
-    )
-    
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=args.batch_size,
-        sampler=test_sampler,
-        num_workers=4,
-        pin_memory=True
-    )
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=train_sampler, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, sampler=val_sampler, num_workers=4, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, sampler=test_sampler, num_workers=4, pin_memory=True)
     
     if rank == 0:
         print(f"\nLoading pretrained model from {args.model_path}...")
@@ -286,8 +255,6 @@ def main_worker(rank, world_size, args):
     model = ResNet_50_pruned_hardfakevsreal(masks=masks)
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(device)
-    
-    # Wrap model with DDP
     model = DDP(model, device_ids=[rank], find_unused_parameters=False)
     
     if rank == 0:
@@ -297,31 +264,15 @@ def main_worker(rank, world_size, args):
         print(f"   Total parameters: {total_params:,}")
         print(f"   Trainable parameters: {trainable_params:,}\n")
     
-    # Loss and optimizer
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     
-    # Warmup + Cosine Annealing Scheduler
-    warmup_scheduler = optim.lr_scheduler.LinearLR(
-        optimizer, 
-        start_factor=0.1, 
-        end_factor=1.0, 
-        total_iters=args.warmup_epochs
-    )
-    cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, 
-        T_max=args.epochs - args.warmup_epochs,
-        eta_min=1e-6
-    )
-    scheduler = optim.lr_scheduler.SequentialLR(
-        optimizer,
-        schedulers=[warmup_scheduler, cosine_scheduler],
-        milestones=[args.warmup_epochs]
-    )
+    warmup_scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=args.warmup_epochs)
+    cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs - args.warmup_epochs, eta_min=1e-6)
+    scheduler = optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[args.warmup_epochs])
     
     best_val_acc = 0.0
     
-    # Training loop
     for epoch in range(1, args.epochs + 1):
         train_sampler.set_epoch(epoch)
         
@@ -330,12 +281,8 @@ def main_worker(rank, world_size, args):
             print(f"Epoch {epoch}/{args.epochs}")
             print(f"{'='*70}")
         
-        train_loss, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, rank, epoch
-        )
-        
+        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device, rank, epoch)
         val_loss, val_acc = validate(model, val_loader, criterion, device, rank)
-        
         scheduler.step()
         
         if rank == 0:
@@ -344,7 +291,6 @@ def main_worker(rank, world_size, args):
             print(f"   Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
             print(f"   Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
             
-            # Save best model
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 save_path = os.path.join(args.output_dir, 'best_model_finetuned.pt')
@@ -358,18 +304,14 @@ def main_worker(rank, world_size, args):
                 }, save_path)
                 print(f"   💾 New best model saved! (Val Acc: {val_acc:.2f}%)")
     
-    # Test the best model
     if rank == 0:
         print(f"\n{'='*70}")
         print(f"Loading best model for testing...")
         print(f"{'='*70}")
     
-    # Load best model
     best_model_path = os.path.join(args.output_dir, 'best_model_finetuned.pt')
     checkpoint = torch.load(best_model_path, map_location='cpu')
     model.module.load_state_dict(checkpoint['model_state_dict'])
-    
-    # Test on test dataset
     test_results = test_model(model, test_loader, criterion, device, rank)
     
     if rank == 0:
@@ -393,7 +335,6 @@ def main_worker(rank, world_size, args):
         print(f"   Test accuracy: {test_results['accuracy']:.2f}%")
         print(f"{'='*70}\n")
         
-        # Save test results
         results_path = os.path.join(args.output_dir, 'test_results.txt')
         with open(results_path, 'w') as f:
             f.write(f"Test Results\n")
@@ -412,7 +353,8 @@ def main_worker(rank, world_size, args):
         print(f"📝 Test results saved to: {results_path}")
     
     cleanup()
-  
+
+
 def main():
     parser = argparse.ArgumentParser(description='DDP Training for Pruned ResNet50')
     parser.add_argument('--model_path', type=str, default='/kaggle/working/10k_final.pt',
@@ -420,11 +362,11 @@ def main():
     parser.add_argument('--output_dir', type=str, default='/kaggle/working',
                         help='Directory to save outputs')
     parser.add_argument('--batch_size', type=int, default=64,
-                        help='Batch size per GPU (پیشنهادی: 64 یا 128)')
+                        help='Batch size per GPU')
     parser.add_argument('--epochs', type=int, default=20,
-                        help='Number of training epochs (پیشنهادی: 15-25)')
+                        help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=5e-5,
-                        help='Learning rate (پیشنهادی: 5e-5 یا 1e-4)')
+                        help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-4,
                         help='Weight decay for optimizer')
     parser.add_argument('--warmup_epochs', type=int, default=2,
@@ -433,15 +375,19 @@ def main():
                         help='Number of GPUs to use')
     
     args = parser.parse_args()
-    
     os.makedirs(args.output_dir, exist_ok=True)
+
+    master_port = find_free_port()
+    if args.world_size > 1:
+        print(f"🌐 Using dynamic port for DDP: {master_port}")
 
     torch.multiprocessing.spawn(
         main_worker,
-        args=(args.world_size, args),
+        args=(args.world_size, master_port, args),
         nprocs=args.world_size,
         join=True
     )
+
 
 if __name__ == '__main__':
     main()
