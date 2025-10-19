@@ -299,8 +299,25 @@ def main_worker(rank, world_size, args):
     
     # Loss and optimizer
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    
+    # Warmup + Cosine Annealing Scheduler
+    warmup_scheduler = optim.lr_scheduler.LinearLR(
+        optimizer, 
+        start_factor=0.1, 
+        end_factor=1.0, 
+        total_iters=args.warmup_epochs
+    )
+    cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, 
+        T_max=args.epochs - args.warmup_epochs,
+        eta_min=1e-6
+    )
+    scheduler = optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[args.warmup_epochs]
+    )
     
     best_val_acc = 0.0
     
@@ -402,12 +419,16 @@ def main():
                         help='Path to the pretrained pruned model')
     parser.add_argument('--output_dir', type=str, default='/kaggle/working',
                         help='Directory to save outputs')
-    parser.add_argument('--batch_size', type=int, default=32,
-                        help='Batch size per GPU')
-    parser.add_argument('--epochs', type=int, default=30,
-                        help='Number of training epochs')
-    parser.add_argument('--lr', type=float, default=1e-4,
-                        help='Learning rate')
+    parser.add_argument('--batch_size', type=int, default=64,
+                        help='Batch size per GPU (پیشنهادی: 64 یا 128)')
+    parser.add_argument('--epochs', type=int, default=20,
+                        help='Number of training epochs (پیشنهادی: 15-25)')
+    parser.add_argument('--lr', type=float, default=5e-5,
+                        help='Learning rate (پیشنهادی: 5e-5 یا 1e-4)')
+    parser.add_argument('--weight_decay', type=float, default=1e-4,
+                        help='Weight decay for optimizer')
+    parser.add_argument('--warmup_epochs', type=int, default=2,
+                        help='Number of warmup epochs')
     parser.add_argument('--world_size', type=int, default=2,
                         help='Number of GPUs to use')
     
