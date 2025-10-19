@@ -49,7 +49,6 @@ class DeepfakeDataset(Dataset):
             return image, torch.tensor(label, dtype=torch.float32)
         except Exception as e:
             print(f"Error loading {img_path}: {e}")
-            # Return a blank image if loading fails
             return torch.zeros(3, 224, 224), torch.tensor(label, dtype=torch.float32)
 
 
@@ -123,6 +122,63 @@ def validate(model, dataloader, criterion, device, rank):
     
     return avg_loss, accuracy
 
+def test_model(model, dataloader, criterion, device, rank):
+    """Test the model and return detailed metrics"""
+    model.eval()
+    running_loss = 0.0
+    correct = 0
+    total = 0
+    
+    true_positives = 0
+    true_negatives = 0
+    false_positives = 0
+    false_negatives = 0
+    
+    if rank == 0:
+        print("\n🧪 Testing model on test dataset...")
+        pbar = tqdm(dataloader, desc="Testing")
+    else:
+        pbar = dataloader
+    
+    with torch.no_grad():
+        for images, labels in pbar:
+            images = images.to(device)
+            labels = labels.to(device).unsqueeze(1)
+            
+            outputs, _ = model(images)
+            loss = criterion(outputs, labels)
+            
+            running_loss += loss.item()
+            predictions = (torch.sigmoid(outputs) > 0.5).float()
+            correct += (predictions == labels).sum().item()
+            total += labels.size(0)
+            
+            # Calculate confusion matrix elements
+            true_positives += ((predictions == 1) & (labels == 1)).sum().item()
+            true_negatives += ((predictions == 0) & (labels == 0)).sum().item()
+            false_positives += ((predictions == 1) & (labels == 0)).sum().item()
+            false_negatives += ((predictions == 0) & (labels == 1)).sum().item()
+    
+    avg_loss = running_loss / len(dataloader)
+    accuracy = 100 * correct / total
+    
+    # Calculate precision, recall, F1
+    precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
+    recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
+    f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+    
+    return {
+        'loss': avg_loss,
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1_score': f1_score,
+        'true_positives': true_positives,
+        'true_negatives': true_negatives,
+        'false_positives': false_positives,
+        'false_negatives': false_negatives
+    }
+
 def main_worker(rank, world_size, args):
     setup(rank, world_size)
     device = torch.device(f'cuda:{rank}')
@@ -142,22 +198,39 @@ def main_worker(rank, world_size, args):
     ])
     
     val_transform = transforms.Compose([
+        transforms.CenterCrop(224),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
     ])
 
+    # Train dataset
+    if rank == 0:
+        print("Loading training dataset...")
     train_dataset = DeepfakeDataset(
         real_dirs=["/kaggle/input/wild-deepfake/train/real"],
         fake_dirs=["/kaggle/input/wild-deepfake/train/fake"],
         transform=train_transform
     )
     
+    # Validation dataset
+    if rank == 0:
+        print("Loading validation dataset...")
     val_dataset = DeepfakeDataset(
         real_dirs=["/kaggle/input/wild-deepfake/valid/real"],
         fake_dirs=["/kaggle/input/wild-deepfake/valid/fake"],
         transform=val_transform
     )
     
+    # Test dataset
+    if rank == 0:
+        print("Loading test dataset...")
+    test_dataset = DeepfakeDataset(
+        real_dirs=["/kaggle/input/wild-deepfake/test/real"],
+        fake_dirs=["/kaggle/input/wild-deepfake/test/fake"],
+        transform=val_transform
+    )
+    
+    # Samplers
     train_sampler = DistributedSampler(
         train_dataset,
         num_replicas=world_size,
@@ -172,6 +245,14 @@ def main_worker(rank, world_size, args):
         shuffle=False
     )
     
+    test_sampler = DistributedSampler(
+        test_dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=False
+    )
+    
+    # DataLoaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -184,6 +265,14 @@ def main_worker(rank, world_size, args):
         val_dataset,
         batch_size=args.batch_size,
         sampler=val_sampler,
+        num_workers=4,
+        pin_memory=True
+    )
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        sampler=test_sampler,
         num_workers=4,
         pin_memory=True
     )
@@ -204,7 +293,7 @@ def main_worker(rank, world_size, args):
     if rank == 0:
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"   Model loaded successfully!")
+        print(f"   ✅ Model loaded successfully!")
         print(f"   Total parameters: {total_params:,}")
         print(f"   Trainable parameters: {trainable_params:,}\n")
     
@@ -233,7 +322,7 @@ def main_worker(rank, world_size, args):
         scheduler.step()
         
         if rank == 0:
-            print(f"\n Epoch {epoch} Results:")
+            print(f"\n📊 Epoch {epoch} Results:")
             print(f"   Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
             print(f"   Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
             print(f"   Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
@@ -241,7 +330,7 @@ def main_worker(rank, world_size, args):
             # Save best model
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-                save_path = os.path.join(args.output_dir, 'best_model.pt')
+                save_path = os.path.join(args.output_dir, 'best_model_finetuned.pt')
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': model.module.state_dict(),
@@ -250,33 +339,66 @@ def main_worker(rank, world_size, args):
                     'val_acc': val_acc,
                     'train_acc': train_acc
                 }, save_path)
-                print(f"   New best model saved! (Val Acc: {val_acc:.2f}%)")
-            
-            # Save checkpoint every 5 epochs
-            if epoch % 5 == 0:
-                checkpoint_path = os.path.join(args.output_dir, f'checkpoint_epoch_{epoch}.pt')
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model.module.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'masks': masks,
-                    'val_acc': val_acc,
-                    'train_acc': train_acc
-                }, checkpoint_path)
-                print(f"  Checkpoint saved: {checkpoint_path}")
+                print(f"   💾 New best model saved! (Val Acc: {val_acc:.2f}%)")
+    
+    # Test the best model
+    if rank == 0:
+        print(f"\n{'='*70}")
+        print(f"Loading best model for testing...")
+        print(f"{'='*70}")
+    
+    # Load best model
+    best_model_path = os.path.join(args.output_dir, 'best_model_finetuned.pt')
+    checkpoint = torch.load(best_model_path, map_location='cpu')
+    model.module.load_state_dict(checkpoint['model_state_dict'])
+    
+    # Test on test dataset
+    test_results = test_model(model, test_loader, criterion, device, rank)
     
     if rank == 0:
         print(f"\n{'='*70}")
-        print(f"Training completed!")
+        print(f"🎯 FINAL TEST RESULTS")
+        print(f"{'='*70}")
+        print(f"   Test Loss: {test_results['loss']:.4f}")
+        print(f"   Test Accuracy: {test_results['accuracy']:.2f}%")
+        print(f"   Precision: {test_results['precision']:.4f}")
+        print(f"   Recall: {test_results['recall']:.4f}")
+        print(f"   F1 Score: {test_results['f1_score']:.4f}")
+        print(f"\n📊 Confusion Matrix:")
+        print(f"   True Positives (Real detected as Real): {test_results['true_positives']}")
+        print(f"   True Negatives (Fake detected as Fake): {test_results['true_negatives']}")
+        print(f"   False Positives (Fake detected as Real): {test_results['false_positives']}")
+        print(f"   False Negatives (Real detected as Fake): {test_results['false_negatives']}")
+        print(f"{'='*70}")
+        
+        print(f"\n✅ Training completed!")
         print(f"   Best validation accuracy: {best_val_acc:.2f}%")
+        print(f"   Test accuracy: {test_results['accuracy']:.2f}%")
         print(f"{'='*70}\n")
+        
+        # Save test results
+        results_path = os.path.join(args.output_dir, 'test_results.txt')
+        with open(results_path, 'w') as f:
+            f.write(f"Test Results\n")
+            f.write(f"{'='*50}\n")
+            f.write(f"Test Loss: {test_results['loss']:.4f}\n")
+            f.write(f"Test Accuracy: {test_results['accuracy']:.2f}%\n")
+            f.write(f"Precision: {test_results['precision']:.4f}\n")
+            f.write(f"Recall: {test_results['recall']:.4f}\n")
+            f.write(f"F1 Score: {test_results['f1_score']:.4f}\n")
+            f.write(f"\nConfusion Matrix:\n")
+            f.write(f"True Positives: {test_results['true_positives']}\n")
+            f.write(f"True Negatives: {test_results['true_negatives']}\n")
+            f.write(f"False Positives: {test_results['false_positives']}\n")
+            f.write(f"False Negatives: {test_results['false_negatives']}\n")
+        
+        print(f"📝 Test results saved to: {results_path}")
     
     cleanup()
   
 def main():
     parser = argparse.ArgumentParser(description='DDP Training for Pruned ResNet50')
-    parser.add_argument('--model_path', type=str, required=True,
+    parser.add_argument('--model_path', type=str, default='/kaggle/working/10k_final.pt',
                         help='Path to the pretrained pruned model')
     parser.add_argument('--output_dir', type=str, default='/kaggle/working',
                         help='Directory to save outputs')
