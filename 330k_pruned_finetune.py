@@ -18,13 +18,53 @@ from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
 import pandas as pd
 from pathlib import Path
 
-# ---------- Dataset جدید بر اساس CSV ----------
+
+# ---------- Dataset برای تست (بر اساس پوشه) ----------
+class WildDeepfakeDataset(Dataset):
+    def __init__(self, real_path, fake_path, transform=None):
+        self.transform = transform
+        self.images = []
+        self.labels = []
+
+        if os.path.exists(real_path):
+            real_files = [f for f in os.listdir(real_path) if f.endswith(('.jpg', '.jpeg', '.png'))]
+            for fname in real_files:
+                self.images.append(os.path.join(real_path, fname))
+                self.labels.append(1)  # real = 1
+
+        if os.path.exists(fake_path):
+            fake_files = [f for f in os.listdir(fake_path) if f.endswith(('.jpg', '.jpeg', '.png'))]
+            for fname in fake_files:
+                self.images.append(os.path.join(fake_path, fname))
+                self.labels.append(0)  # fake = 0
+
+        print(f"📊 Test Dataset loaded: {len(self.images)} images "
+              f"({sum(1 for l in self.labels if l == 1)} real, {sum(1 for l in self.labels if l == 0)} fake)")
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        img_path = self.images[idx]
+        label = self.labels[idx]
+        try:
+            img = Image.open(img_path).convert('RGB')
+            if self.transform:
+                img = self.transform(img)
+            return img, torch.tensor(float(label), dtype=torch.float32)
+        except Exception as e:
+            print(f"❌ Error loading {img_path}: {e}")
+            return torch.zeros(3, 256, 256), torch.tensor(float(label), dtype=torch.float32)
+
+
+# ---------- Dataset برای train/val (بر اساس CSV) ----------
 class CSVImageDataset(Dataset):
     def __init__(self, csv_file, real_dir, fake_dir, transform=None):
         self.df = pd.read_csv(csv_file)
         self.real_dir = Path(real_dir)
         self.fake_dir = Path(fake_dir)
         self.transform = transform
+        # نرمال‌سازی برچسب: 1 → real, 0 → fake
         self.df['label'] = self.df['label'].apply(lambda x: 1 if str(x).strip() in ['1', '1.0'] else 0)
         print(f"📊 Loaded {len(self.df)} samples from {csv_file}")
         print(f"   Real (label=1): {self.df['label'].sum()}")
@@ -47,6 +87,7 @@ class CSVImageDataset(Dataset):
             print(f"❌ Error loading {img_path}: {e}")
             return torch.zeros(3, 256, 256), torch.tensor(float(label), dtype=torch.float32)
 
+
 # ---------- Transform ها ----------
 train_transform = transforms.Compose([
     transforms.RandomCrop(256),
@@ -66,7 +107,8 @@ val_transform = transforms.Compose([
     transforms.Normalize(mean=[0.4868, 0.3972, 0.3624], std=[0.2296, 0.2066, 0.2009])
 ])
 
-# ---------- DataLoaders بدون DDP ----------
+
+# ---------- DataLoaders ----------
 def create_dataloaders(batch_size=256, num_workers=4):
     REAL_DIR = "/kaggle/input/200k-real-vs-ai-visuals-by-mbilal/my_real_vs_ai_dataset/my_real_vs_ai_dataset/real"
     FAKE_DIR = "/kaggle/input/200k-real-vs-ai-visuals-by-mbilal/my_real_vs_ai_dataset/my_real_vs_ai_dataset/ai_images"
@@ -85,10 +127,9 @@ def create_dataloaders(batch_size=256, num_workers=4):
         transform=val_transform
     )
 
-    test_dataset = CSVImageDataset(
-        csv_file="/kaggle/working/Test/test_labels.csv",  # ⚠️ نیاز به CSV برای تست!
-        real_dir="/kaggle/working/Test/real",
-        fake_dir="/kaggle/working/Test/fake",
+    test_dataset = WildDeepfakeDataset(
+        real_path="/kaggle/working/Test/real",
+        fake_path="/kaggle/working/Test/fake",
         transform=val_transform
     )
 
@@ -101,7 +142,8 @@ def create_dataloaders(batch_size=256, num_workers=4):
 
     return train_loader, val_loader, test_loader
 
-# ---------- Train و Validate بدون DDP ----------
+
+# ---------- Train Epoch ----------
 def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epoch, accum_steps=1):
     model.train()
     running_loss = 0.0
@@ -143,6 +185,8 @@ def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epo
 
     return avg_loss, avg_acc
 
+
+# ---------- Validate ----------
 @torch.no_grad()
 def validate(model, loader, criterion, device, writer, epoch):
     model.eval()
@@ -172,7 +216,8 @@ def validate(model, loader, criterion, device, writer, epoch):
 
     return avg_loss, avg_acc
 
-# ---------- Main بدون DDP ----------
+
+# ---------- Main ----------
 def main(args):
     SEED = 42
     random.seed(SEED)
@@ -205,7 +250,7 @@ def main(args):
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(DEVICE)
 
-    # فریز و آزادسازی لایه‌ها
+    # فریز کردن همه و آزاد کردن layer3, layer4, fc
     for param in model.parameters():
         param.requires_grad = False
     for param in model.layer3.parameters(): param.requires_grad = True
@@ -253,7 +298,11 @@ def main(args):
 
     # تست نهایی
     if os.path.exists(best_model_path):
-        model.load_state_dict(torch.load(best_model_path))
+        model.load_state_dict(torch.load(best_model_path, map_location=DEVICE))
+        print("✅ Loaded best model for final test.")
+    else:
+        print("⚠️ Using last epoch weights for test.")
+
     test_loss, test_acc = validate(model, test_loader, criterion, DEVICE, writer, NUM_EPOCHS)
     print("\n" + "=" * 70)
     print("🧪 Final Test Results")
@@ -274,6 +323,7 @@ def main(args):
 
     print("✅ Inference-ready model saved!")
     writer.close()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
