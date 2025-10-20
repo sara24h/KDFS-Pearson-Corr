@@ -245,7 +245,7 @@ def main(args):
         print("=" * 70)
 
     # لود مدل اصلی بدون تغییر ساختار fc
-    input_model_path = '/kaggle/working/330k_final.pt'
+    input_model_path = '/kaggle/working/resnet50_pruned_model_learnable_masks.pt'
     checkpoint = torch.load(input_model_path, map_location=DEVICE)
     masks_detached = [m.detach().clone() if m is not None else None for m in checkpoint['masks']]
 
