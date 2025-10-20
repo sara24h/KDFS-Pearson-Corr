@@ -56,8 +56,6 @@ class CSVImageDataset(Dataset):
             print(f"❌ Error loading {img_path}: {e}")
             return torch.zeros(3, 256, 256), torch.tensor(float(label), dtype=torch.float32)
 
-
-# ---------- Transform ها (بدون تغییر) ----------
 train_transform = transforms.Compose([
     transforms.RandomCrop(256),
     transforms.RandomHorizontalFlip(p=0.5),
@@ -115,10 +113,36 @@ def create_dataloaders(batch_size=256, num_workers=4):
 
     return train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler
 
+def setup_ddp(seed):
+    import os
+    import torch
+    import torch.distributed as dist
+    import random
+    import numpy as np
 
-# ---------- باقی کد بدون تغییر (اما با اصلاح کوچک در تست) ----------
-# ... (بقیه توابع train_epoch, validate, setup_ddp, cleanup_ddp بدون تغییر)
+    os.environ['TORCH_NCCL_TIMEOUT_MS'] = '1800000'
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend='nccl')
+    
+    # Set seeds for reproducibility per rank
+    seed = seed + dist.get_rank()
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.enabled = True
+    
+    return local_rank
 
+
+def cleanup_ddp():
+    import torch.distributed as dist
+    if dist.is_initialized():
+        dist.destroy_process_group()
 def main(args):
     SEED = 42
     local_rank = setup_ddp(SEED)
