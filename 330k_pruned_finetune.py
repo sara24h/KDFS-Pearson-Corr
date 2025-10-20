@@ -79,7 +79,7 @@ def create_dataloaders(batch_size=256, num_workers=4):
     )
 
     val_dataset = CSVImageDataset(
-        csv_file="/kaggle/input/200k-real-vs-ai-visuals-by-mbilal/valid_labels.csv",
+        csv_file="/kaggle/input/200k-real-vs-ai-visuals-by-mbilal/val_labels.csv",
         real_dir=REAL_DIR,
         fake_dir=FAKE_DIR,
         transform=val_transform
