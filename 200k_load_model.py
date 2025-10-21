@@ -293,7 +293,7 @@ print("مرحله 7: ذخیره مدل Pruned")
 print("="*70)
 
 try:
-    save_path = '/kaggle/working/140k-resnet50_pruned_model_learnable_masks.pt'
+    save_path = '/kaggle/working/resnet50_pruned_model_learnable_masks.pt'
     
     checkpoint_to_save = {
         'model_state_dict': model_pruned.state_dict(),
