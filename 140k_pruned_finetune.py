@@ -22,7 +22,6 @@ import pandas as pd
 from pathlib import Path
 from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
 
-
 def setup_ddp(seed):
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
@@ -37,11 +36,9 @@ def setup_ddp(seed):
     torch.backends.cudnn.benchmark = True
     return local_rank
 
-
 def cleanup_ddp():
     if dist.is_initialized():
         dist.destroy_process_group()
-
 
 class WildDeepfakeDataset(Dataset):
     def __init__(self, real_path, fake_path, transform=None):
@@ -80,7 +77,6 @@ class WildDeepfakeDataset(Dataset):
             if dist.is_initialized() and dist.get_rank() == 0:
                 print(f"❌ Error loading {img_path}: {e}")
             return torch.zeros(3, 256, 256), torch.tensor(float(label), dtype=torch.float32)
-
 
 class CSVImageDataset(Dataset):
     def __init__(self, csv_file, real_dir, fake_dir, transform=None):
@@ -131,7 +127,6 @@ val_transform = transforms.Compose([
     transforms.Normalize(mean=[0.4868, 0.3972, 0.3624], std=[0.2296, 0.2066, 0.2009])
 ])
 
-
 def create_dataloaders(batch_size_per_gpu, num_workers=4):
     REAL_DIR = "/kaggle/input/200k-real-vs-ai-visuals-by-mbilal/my_real_vs_ai_dataset/my_real_vs_ai_dataset/real"
     FAKE_DIR = "/kaggle/input/200k-real-vs-ai-visuals-by-mbilal/my_real_vs_ai_dataset/my_real_vs_ai_dataset/ai_images"
@@ -174,7 +169,6 @@ def create_dataloaders(batch_size_per_gpu, num_workers=4):
     )
 
     return train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler
-
 
 def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epoch, rank, accum_steps=1):
     model.train()
@@ -222,7 +216,6 @@ def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epo
 
     return avg_loss, avg_acc
 
-
 @torch.no_grad()
 def validate(model, loader, criterion, device, writer, epoch, rank, world_size):
     model.eval()
@@ -230,8 +223,8 @@ def validate(model, loader, criterion, device, writer, epoch, rank, world_size):
     correct = 0
     total = 0
 
-    all_labels = []
-    all_preds = []
+    all_labels_gpu = []
+    all_preds_gpu = []
 
     for inputs, labels in tqdm(loader, desc="Validation", disable=(rank != 0)):
         inputs, labels = inputs.to(device), labels.to(device)
@@ -247,18 +240,17 @@ def validate(model, loader, criterion, device, writer, epoch, rank, world_size):
         correct += (preds == labels).sum().item()
         total += labels.size(0)
 
-        all_labels.append(labels.cpu())
-        all_preds.append(preds.cpu())
+        all_labels_gpu.append(labels)
+        all_preds_gpu.append(preds)
 
-    all_labels = torch.cat(all_labels).long().squeeze()
-    all_preds = torch.cat(all_preds).long().squeeze()
+    all_labels_gpu = torch.cat(all_labels_gpu).long().squeeze()
+    all_preds_gpu = torch.cat(all_preds_gpu).long().squeeze()
 
-    # Gather all predictions and labels to rank 0
-    gathered_labels = [torch.zeros_like(all_labels) for _ in range(world_size)]
-    gathered_preds = [torch.zeros_like(all_preds) for _ in range(world_size)]
+    gathered_labels = [torch.zeros_like(all_labels_gpu) for _ in range(world_size)]
+    gathered_preds = [torch.zeros_like(all_preds_gpu) for _ in range(world_size)]
 
-    dist.gather(all_labels, gather_list=gathered_labels if rank == 0 else None, dst=0)
-    dist.gather(all_preds, gather_list=gathered_preds if rank == 0 else None, dst=0)
+    dist.gather(all_labels_gpu, gather_list=gathered_labels if rank == 0 else None, dst=0)
+    dist.gather(all_preds_gpu, gather_list=gathered_preds if rank == 0 else None, dst=0)
 
     avg_loss = torch.tensor(running_loss / len(loader)).to(device)
     avg_acc = torch.tensor(100. * correct / total).to(device)
@@ -270,8 +262,8 @@ def validate(model, loader, criterion, device, writer, epoch, rank, world_size):
     metrics = {'loss': avg_loss, 'acc': avg_acc}
 
     if rank == 0:
-        final_labels = torch.cat(gathered_labels).numpy()
-        final_preds = torch.cat(gathered_preds).numpy()
+        final_labels = torch.cat(gathered_labels).cpu().numpy()
+        final_preds = torch.cat(gathered_preds).cpu().numpy()
 
         precision = precision_score(final_labels, final_preds, zero_division=0)
         recall = recall_score(final_labels, final_preds, zero_division=0)
@@ -294,7 +286,6 @@ def validate(model, loader, criterion, device, writer, epoch, rank, world_size):
         print(f"   Confusion Matrix:\n{cm}")
 
     return metrics
-
 
 def main(args):
     SEED = 42
@@ -395,7 +386,6 @@ def main(args):
 
             scheduler.step()
 
-        # Final test
         if global_rank == 0:
             if os.path.exists(best_model_path):
                 model.module.load_state_dict(torch.load(best_model_path, map_location=DEVICE))
@@ -428,7 +418,6 @@ def main(args):
         if writer:
             writer.close()
         cleanup_ddp()
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
