@@ -20,6 +20,7 @@ import argparse
 from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
 import pandas as pd
 from pathlib import Path
+from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
 
 
 def setup_ddp(seed):
@@ -131,7 +132,6 @@ val_transform = transforms.Compose([
 ])
 
 
-# ---------- DataLoaders با DDP ----------
 def create_dataloaders(batch_size_per_gpu, num_workers=4):
     REAL_DIR = "/kaggle/input/200k-real-vs-ai-visuals-by-mbilal/my_real_vs_ai_dataset/my_real_vs_ai_dataset/real"
     FAKE_DIR = "/kaggle/input/200k-real-vs-ai-visuals-by-mbilal/my_real_vs_ai_dataset/my_real_vs_ai_dataset/ai_images"
@@ -174,6 +174,7 @@ def create_dataloaders(batch_size_per_gpu, num_workers=4):
     )
 
     return train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler
+
 
 def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epoch, rank, accum_steps=1):
     model.train()
@@ -221,12 +222,16 @@ def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epo
 
     return avg_loss, avg_acc
 
+
 @torch.no_grad()
-def validate(model, loader, criterion, device, writer, epoch, rank):
+def validate(model, loader, criterion, device, writer, epoch, rank, world_size):
     model.eval()
     running_loss = 0.0
     correct = 0
     total = 0
+
+    all_labels = []
+    all_preds = []
 
     for inputs, labels in tqdm(loader, desc="Validation", disable=(rank != 0)):
         inputs, labels = inputs.to(device), labels.to(device)
@@ -238,21 +243,58 @@ def validate(model, loader, criterion, device, writer, epoch, rank):
 
         running_loss += loss.item()
         preds = (torch.sigmoid(outputs) > 0.5).float()
+
         correct += (preds == labels).sum().item()
         total += labels.size(0)
+
+        all_labels.append(labels.cpu())
+        all_preds.append(preds.cpu())
+
+    all_labels = torch.cat(all_labels).long().squeeze()
+    all_preds = torch.cat(all_preds).long().squeeze()
+
+    # Gather all predictions and labels to rank 0
+    gathered_labels = [torch.zeros_like(all_labels) for _ in range(world_size)]
+    gathered_preds = [torch.zeros_like(all_preds) for _ in range(world_size)]
+
+    dist.gather(all_labels, gather_list=gathered_labels if rank == 0 else None, dst=0)
+    dist.gather(all_preds, gather_list=gathered_preds if rank == 0 else None, dst=0)
 
     avg_loss = torch.tensor(running_loss / len(loader)).to(device)
     avg_acc = torch.tensor(100. * correct / total).to(device)
     dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
     dist.all_reduce(avg_acc, op=dist.ReduceOp.SUM)
-    avg_loss = avg_loss.item() / dist.get_world_size()
-    avg_acc = avg_acc.item() / dist.get_world_size()
+    avg_loss = avg_loss.item() / world_size
+    avg_acc = avg_acc.item() / world_size
 
-    if rank == 0 and writer is not None:
-        writer.add_scalar("val/loss", avg_loss, epoch)
-        writer.add_scalar("val/acc", avg_acc, epoch)
+    metrics = {'loss': avg_loss, 'acc': avg_acc}
 
-    return avg_loss, avg_acc
+    if rank == 0:
+        final_labels = torch.cat(gathered_labels).numpy()
+        final_preds = torch.cat(gathered_preds).numpy()
+
+        precision = precision_score(final_labels, final_preds, zero_division=0)
+        recall = recall_score(final_labels, final_preds, zero_division=0)
+        f1 = f1_score(final_labels, final_preds, zero_division=0)
+        cm = confusion_matrix(final_labels, final_preds)
+
+        metrics.update({
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'confusion_matrix': cm
+        })
+
+        if writer is not None:
+            writer.add_scalar("val/precision", precision, epoch)
+            writer.add_scalar("val/recall", recall, epoch)
+            writer.add_scalar("val/f1", f1, epoch)
+
+        print(f"   Precision: {precision:.4f} | Recall: {recall:.4f} | F1: {f1:.4f}")
+        print(f"   Confusion Matrix:\n{cm}")
+
+    return metrics
+
 
 def main(args):
     SEED = 42
@@ -341,9 +383,11 @@ def main(args):
             if global_rank == 0:
                 print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
 
-            val_loss, val_acc = validate(model, val_loader, criterion, DEVICE, writer, epoch, global_rank)
+            val_metrics = validate(model, val_loader, criterion, DEVICE, writer, epoch, global_rank, world_size)
+            val_acc = val_metrics['acc']
             if global_rank == 0:
-                print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
+                val_f1 = val_metrics['f1']
+                print(f"Val Loss: {val_metrics['loss']:.4f} | Val Acc: {val_acc:.2f}% | F1: {val_f1:.4f}")
                 if val_acc > best_val_acc:
                     best_val_acc = val_acc
                     torch.save(model.module.state_dict(), best_model_path)
@@ -351,16 +395,18 @@ def main(args):
 
             scheduler.step()
 
-        # تست نهایی
+        # Final test
         if global_rank == 0:
             if os.path.exists(best_model_path):
                 model.module.load_state_dict(torch.load(best_model_path, map_location=DEVICE))
-            test_loss, test_acc = validate(model, test_loader, criterion, DEVICE, writer, NUM_EPOCHS, global_rank)
+            test_metrics = validate(model, test_loader, criterion, DEVICE, writer, NUM_EPOCHS, global_rank, world_size)
             print("\n" + "=" * 70)
             print("🧪 Final Test Results")
-            print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.2f}%")
+            print(f"Test Loss: {test_metrics['loss']:.4f} | Test Acc: {test_metrics['acc']:.2f}%")
+            print(f"Test Precision: {test_metrics['precision']:.4f} | Recall: {test_metrics['recall']:.4f} | F1: {test_metrics['f1']:.4f}")
+            print(f"Confusion Matrix:\n{test_metrics['confusion_matrix']}")
 
-            # ذخیره مدل استنتاج
+            # Save inference-ready model
             model_inference = ResNet_50_pruned_hardfakevsreal(masks=checkpoint['masks'])
             model_inference.load_state_dict(model.module.state_dict())
             model_inference = model_inference.cpu().eval()
@@ -370,7 +416,11 @@ def main(args):
                 'total_params': sum(p.numel() for p in model_inference.parameters()),
                 'masks': checkpoint['masks'],
                 'best_val_acc': best_val_acc,
-                'test_acc': test_acc,
+                'test_acc': test_metrics['acc'],
+                'test_f1': test_metrics['f1'],
+                'test_precision': test_metrics['precision'],
+                'test_recall': test_metrics['recall'],
+                'test_confusion_matrix': test_metrics['confusion_matrix'].tolist()
             }, '/kaggle/working/final_pruned_finetuned_200k_inference_ddp.pt')
             print("✅ Inference-ready model saved!")
 
