@@ -64,16 +64,32 @@ class WildDeepfakeDataset(Dataset):
             real_files = [f for f in os.listdir(real_path) if f.endswith(('.jpg', '.jpeg', '.png'))]
             for fname in real_files:
                 self.images.append(os.path.join(real_path, fname))
-                self.labels.append(1)  # ✅ real = 1
+                self.labels.append(1)  # real = 1
 
         if os.path.exists(fake_path):
             fake_files = [f for f in os.listdir(fake_path) if f.endswith(('.jpg', '.jpeg', '.png'))]
             for fname in fake_files:
                 self.images.append(os.path.join(fake_path, fname))
-                self.labels.append(0)  # ✅ fake = 0
+                self.labels.append(0)  # fake = 0
 
         print(f"📊 Dataset loaded: {len(self.images)} images "
               f"({sum(1 for l in self.labels if l == 1)} real, {sum(1 for l in self.labels if l == 0)} fake)")
+
+    def __len__(self):
+        return len(self.images)  
+
+    def __getitem__(self, idx):
+        img_path = self.images[idx]
+        label = self.labels[idx]
+
+        try:
+            img = Image.open(img_path).convert('RGB')
+            if self.transform:
+                img = self.transform(img)
+            return img, torch.tensor(label, dtype=torch.float32)
+        except Exception as e:
+            print(f"❌ Error loading {img_path}: {e}")
+            return torch.zeros(3, 256, 256), torch.tensor(label, dtype=torch.float32)
 
 
 def create_dataloaders(
