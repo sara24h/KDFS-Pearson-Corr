@@ -20,6 +20,40 @@ import argparse
 from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
 
 
+# === آمار نرمال‌سازی هر دیتاست ===
+WILD_MEAN = [0.4414, 0.3448, 0.3159]
+WILD_STD  = [0.1854, 0.1623, 0.1562]
+
+REALVSFAKE_MEAN = [0.5256, 0.4289, 0.3770]
+REALVSFAKE_STD  = [0.2414, 0.2127, 0.2079]
+
+
+def get_transforms(dataset_name, is_train=True):
+    """بازگرداندن ترنسفورم مناسب بر اساس دیتاست و حالت آموزش/ارزیابی."""
+    if dataset_name == "wild":
+        mean, std = WILD_MEAN, WILD_STD
+    elif dataset_name == "realvsfake":
+        mean, std = REALVSFAKE_MEAN, REALVSFAKE_STD
+    else:
+        raise ValueError(f"Dataset '{dataset_name}' پشتیبانی نمی‌شود. گزینه‌های معتبر: 'wild', 'realvsfake'")
+
+    if is_train:
+        return transforms.Compose([
+            transforms.Resize((256, 256)),  # تبدیل به 256x256 — همان ابعادی که مدل با آن آموزش دیده
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+            transforms.RandomErasing(p=0.2, scale=(0.02, 0.15))
+        ])
+    else:
+        return transforms.Compose([
+            transforms.Resize((256, 256)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std)
+        ])
+
+
 class WildDeepfakeDataset(Dataset):
     def __init__(self, real_path, fake_path, transform=None):
         self.transform = transform
@@ -38,7 +72,8 @@ class WildDeepfakeDataset(Dataset):
                 self.images.append(os.path.join(fake_path, fname))
                 self.labels.append(1)
 
-        print(f"📊 Dataset loaded: {len(self.images)} images ({sum(1 for l in self.labels if l == 0)} real, {sum(1 for l in self.labels if l == 1)} fake)")
+        print(f"📊 Dataset loaded: {len(self.images)} images "
+              f"({sum(1 for l in self.labels if l == 0)} real, {sum(1 for l in self.labels if l == 1)} fake)")
 
     def __len__(self):
         return len(self.images)
@@ -54,53 +89,37 @@ class WildDeepfakeDataset(Dataset):
             return img, torch.tensor(label, dtype=torch.float32)
         except Exception as e:
             print(f"❌ Error loading {img_path}: {e}")
-            return torch.zeros(3, 224, 224), torch.tensor(label, dtype=torch.float32)
+            return torch.zeros(3, 256, 256), torch.tensor(label, dtype=torch.float32)
 
 
-train_transform = transforms.Compose([
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562]),
-    transforms.RandomErasing(p=0.2, scale=(0.02, 0.15))
-])
+def create_dataloaders(
+    train_real_path,
+    train_fake_path,
+    val_real_path,
+    val_fake_path,
+    test_real_path,
+    test_fake_path,
+    dataset_name,
+    batch_size=256,
+    num_workers=4
+):
+    train_transform = get_transforms(dataset_name, is_train=True)
+    val_transform   = get_transforms(dataset_name, is_train=False)
 
-val_transform = transforms.Compose([
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.4414, 0.3448, 0.3159], std=[0.1854, 0.1623, 0.1562])
-])
-
-
-def create_dataloaders(batch_size=256, num_workers=4):
-    train_dataset = WildDeepfakeDataset(
-        real_path="/kaggle/input/wild-deepfake/train/real",
-        fake_path="/kaggle/input/wild-deepfake/train/fake",
-        transform=train_transform
-    )
-
-    val_dataset = WildDeepfakeDataset(
-        real_path="/kaggle/input/wild-deepfake/valid/real",
-        fake_path="/kaggle/input/wild-deepfake/valid/fake",
-        transform=val_transform
-    )
-
-    test_dataset = WildDeepfakeDataset(
-        real_path="/kaggle/input/wild-deepfake/test/real",
-        fake_path="/kaggle/input/wild-deepfake/test/fake",
-        transform=val_transform
-    )
+    train_dataset = WildDeepfakeDataset(train_real_path, train_fake_path, transform=train_transform)
+    val_dataset   = WildDeepfakeDataset(val_real_path,   val_fake_path,   transform=val_transform)
+    test_dataset  = WildDeepfakeDataset(test_real_path,  test_fake_path,  transform=val_transform)
 
     train_sampler = DistributedSampler(train_dataset)
-    val_sampler = DistributedSampler(val_dataset, shuffle=False)
-    test_sampler = DistributedSampler(test_dataset, shuffle=False)
+    val_sampler   = DistributedSampler(val_dataset, shuffle=False)
+    test_sampler  = DistributedSampler(test_dataset, shuffle=False)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler,
                               num_workers=num_workers, pin_memory=True, drop_last=False)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler,
-                            num_workers=num_workers, pin_memory=True, drop_last=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, sampler=test_sampler,
-                             num_workers=num_workers, pin_memory=True, drop_last=False)
+    val_loader   = DataLoader(val_dataset,   batch_size=batch_size, sampler=val_sampler,
+                              num_workers=num_workers, pin_memory=True, drop_last=False)
+    test_loader  = DataLoader(test_dataset,  batch_size=batch_size, sampler=test_sampler,
+                              num_workers=num_workers, pin_memory=True, drop_last=False)
 
     return train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler
 
@@ -154,7 +173,6 @@ def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epo
 
     return avg_loss, avg_acc
 
-
 @torch.no_grad()
 def validate(model, loader, criterion, device, writer, epoch, rank=0):
     model.eval()
@@ -188,7 +206,6 @@ def validate(model, loader, criterion, device, writer, epoch, rank=0):
 
     return avg_loss, avg_acc
 
-
 def setup_ddp(seed):
     os.environ['TORCH_NCCL_TIMEOUT_MS'] = '1800000'
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -209,7 +226,6 @@ def setup_ddp(seed):
 def cleanup_ddp():
     if dist.is_initialized():
         dist.destroy_process_group()
-
 
 def main(args):
     SEED = 42
@@ -238,9 +254,32 @@ def main(args):
         print(f"   تعداد Epochs: {NUM_EPOCHS}")
         print(f"   Learning Rate: {BASE_LR}")
         print(f"   Weight Decay: {WEIGHT_DECAY}")
+        print(f"   Dataset: {args.dataset}")
+        print(f"   Input Size: 256×256 (سازگار با مدل آموزش‌دیده)")
         print("=" * 70)
 
-    input_model_path = '/kaggle/working/10k_final.pt'
+    # 🗂️ مسیرهای دیتاست بر اساس انتخاب کاربر
+    if args.dataset == "wild":
+        base_path = "/kaggle/input/wild-deepfake"
+        train_real = os.path.join(base_path, "train/real")
+        train_fake = os.path.join(base_path, "train/fake")
+        val_real = os.path.join(base_path, "valid/real")
+        val_fake = os.path.join(base_path, "valid/fake")
+        test_real = os.path.join(base_path, "test/real")
+        test_fake = os.path.join(base_path, "test/fake")
+    elif args.dataset == "realvsfake":
+        base_path = "/kaggle/input/realvsfake/whole"
+        train_real = os.path.join(base_path, "train/real")
+        train_fake = os.path.join(base_path, "train/fake")
+        val_real = os.path.join(base_path, "val/valid_real")
+        val_fake = os.path.join(base_path, "val/valid_fake")
+        test_real = os.path.join(base_path, "test/test_real")
+        test_fake = os.path.join(base_path, "test/test_fake")
+    else:
+        raise ValueError("Dataset باید یکی از 'wild' یا 'realvsfake' باشد.")
+
+    # 🔁 بارگذاری مدل
+    input_model_path = '/kaggle/input/10k-pruned-model/pytorch/default/1/10k_final (1).pt'
     checkpoint = torch.load(input_model_path, map_location=DEVICE)
     masks_detached = [m.detach().clone() if m is not None else None for m in checkpoint['masks']]
 
@@ -248,11 +287,13 @@ def main(args):
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(DEVICE)
 
+    # ❌ فریز کردن تمام لایه‌ها
     for param in model.parameters():
         param.requires_grad = False
 
-    #for param in model.layer3.parameters():
-        #param.requires_grad = True
+    # ✅ فعال‌سازی لایه‌های مورد نظر برای فاین‌تون
+    # for param in model.layer3.parameters():  # غیرفعال شده طبق کد قبلی
+    #     param.requires_grad = True
     for param in model.layer4.parameters():
         param.requires_grad = True
     for param in model.fc.parameters():
@@ -267,12 +308,19 @@ def main(args):
         print(f"✅ مدل لود و تنظیم شد")
         print(f"   - تعداد کل پارامترها: {total_params:,}")
         print(f"   - تعداد پارامترهای قابل آموزش: {trainable_params:,}")
-        print(f"   - لایه‌های قابل آموزش: layer3, layer4, fc")
+        print(f"   - لایه‌های قابل آموزش: layer4, fc")
 
     if global_rank == 0:
         print("\n📊 آماده‌سازی DataLoaders...")
 
     train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler = create_dataloaders(
+        train_real_path=train_real,
+        train_fake_path=train_fake,
+        val_real_path=val_real,
+        val_fake_path=val_fake,
+        test_real_path=test_real,
+        test_fake_path=test_fake,
+        dataset_name=args.dataset,
         batch_size=BATCH_SIZE_PER_GPU,
         num_workers=2
     )
@@ -287,7 +335,7 @@ def main(args):
 
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer, T_0=10, T_mult=2, eta_min=1e-6
-    ) 
+    )
     scaler = GradScaler(enabled=True)
 
     best_val_acc = 0.0
@@ -322,6 +370,7 @@ def main(args):
 
             scheduler.step()
 
+        # 🔍 تست نهایی
         if global_rank == 0:
             if os.path.exists(best_model_path):
                 model.module.load_state_dict(torch.load(best_model_path))
@@ -355,7 +404,9 @@ def main(args):
                     'batch_size': BATCH_SIZE,
                     'accum_steps': ACCUM_STEPS,
                     'epochs': NUM_EPOCHS,
-                    'loss': 'BCEWithLogitsLoss'
+                    'loss': 'BCEWithLogitsLoss',
+                    'dataset': args.dataset,
+                    'input_size': [256, 256]
                 }
             }
 
@@ -376,12 +427,15 @@ def main(args):
     finally:
         cleanup_ddp()
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Fine-tune Pruned ResNet50 for WildDeepfake Dataset (BCE Loss)")
+    parser = argparse.ArgumentParser(description="Fine-tune Pruned ResNet50 for Deepfake Detection")
     parser.add_argument('--num_epochs', type=int, default=15, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size per GPU')
     parser.add_argument('--learning_rate', type=float, default=0.0001, help='Base learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.00005, help='Weight decay for optimizer')
     parser.add_argument('--accum_steps', type=int, default=1, help='Gradient accumulation steps')
+    parser.add_argument('--dataset', type=str, default='wild', choices=['wild', 'realvsfake'],
+                        help="Choose dataset: 'wild' or 'realvsfake'")
     args = parser.parse_args()
     main(args)
