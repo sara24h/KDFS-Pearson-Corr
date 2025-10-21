@@ -312,7 +312,7 @@ try:
     file_size_mb = os.path.getsize(save_path) / (1024 * 1024)
     print(f"✅ حجم فایل: {file_size_mb:.2f} MB")
     
-    save_path_weights = '/kaggle/working/140k-resnet50_pruned_weights_learnable_masks.pt'
+    save_path_weights = '/kaggle/working/resnet50_pruned_weights_learnable_masks.pt'
     torch.save(model_pruned.state_dict(), save_path_weights)
     file_size_weights_mb = os.path.getsize(save_path_weights) / (1024 * 1024)
     print(f"✅ فقط وزن‌ها ذخیره شد در: {save_path_weights}")
