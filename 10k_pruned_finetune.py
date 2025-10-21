@@ -292,8 +292,8 @@ def main(args):
         param.requires_grad = False
 
     # ✅ فعال‌سازی لایه‌های مورد نظر برای فاین‌تون
-    # for param in model.layer3.parameters():  # غیرفعال شده طبق کد قبلی
-    #     param.requires_grad = True
+    for param in model.layer3.parameters():  # غیرفعال شده طبق کد قبلی
+        param.requires_grad = True
     for param in model.layer4.parameters():
         param.requires_grad = True
     for param in model.fc.parameters():
@@ -328,11 +328,14 @@ def main(args):
     criterion = nn.BCEWithLogitsLoss()
 
     optimizer = optim.AdamW([
+        {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.3, 'weight_decay': WEIGHT_DECAY * 1.5},
         {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 0.6, 'weight_decay': WEIGHT_DECAY * 1.5},
         {'params': model.module.fc.parameters(),     'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY * 2.5}
     ])
 
-    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2, eta_min=1e-6)
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=10, T_mult=2, eta_min=1e-6
+    )
     scaler = GradScaler(enabled=True)
 
     best_val_acc = 0.0
@@ -345,8 +348,9 @@ def main(args):
 
             if global_rank == 0:
                 print(f"\n📍 Epoch {epoch+1}/{NUM_EPOCHS}")
-                print(f"   LR (layer4): {optimizer.param_groups[0]['lr']:.7f}")
-                print(f"   LR (fc):    {optimizer.param_groups[1]['lr']:.7f}")
+                print(f"   LR (layer3): {optimizer.param_groups[0]['lr']:.7f}")
+                print(f"   LR (layer4): {optimizer.param_groups[1]['lr']:.7f}")
+                print(f"   LR (fc):    {optimizer.param_groups[2]['lr']:.7f}")
                 print("-" * 70)
 
             train_loss, train_acc = train_epoch(
