@@ -50,7 +50,7 @@ class WildDeepfakeDataset(Dataset):
             return image, label, img_path
         except Exception as e:
             print(f"❌ error in loading {img_path}: {e}")
-            return torch.zeros(3, 224, 224), label, img_path
+            return torch.zeros(3, 1024, 1024), label, img_path
 
 
 def load_pruned_model(checkpoint_path, device):
@@ -215,7 +215,7 @@ def main():
         print(f"🚀 GPU: {torch.cuda.get_device_name(0)}")
 
     val_transform = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize((1024, 1024)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.3594, 0.3140, 0.3242], std=[0.2499, 0.2249, 0.2268])
     ])
