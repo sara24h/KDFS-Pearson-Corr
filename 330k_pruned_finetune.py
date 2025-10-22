@@ -257,7 +257,6 @@ def main(args):
         print(f"   Input Size: 256×256 (سازگار با مدل آموزش‌دیده)")
         print("=" * 70)
 
-    # 🗂️ مسیرهای دیتاست بر اساس انتخاب کاربر
     if args.dataset == "wild":
         base_path = "/kaggle/input/wild-deepfake"
         train_real = os.path.join(base_path, "train/real")
@@ -326,7 +325,7 @@ def main(args):
     optimizer = optim.AdamW([
         {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.5, 'weight_decay': WEIGHT_DECAY * 1.5},
         {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 0.8, 'weight_decay': WEIGHT_DECAY * 1.5},
-        {'params': model.module.fc.parameters(),     'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY * 2.0}
+        {'params': model.module.fc.parameters(),     'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY * 2.5}
     ])
 
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=1, verbose=True)
@@ -360,16 +359,15 @@ def main(args):
                 if val_acc > best_val_acc:
                     best_val_acc = val_acc
                     torch.save(model.module.state_dict(), best_model_path)
-                    print(f"✅ بهترین مدل ذخیره شد با Val Acc: {val_acc:.2f}%")
+                    print(f"best Val Acc saved: {val_acc:.2f}%")
 
             scheduler.step(val_loss)
 
-        # 🔍 تست نهایی
         if global_rank == 0:
             if os.path.exists(best_model_path):
                 model.module.load_state_dict(torch.load(best_model_path))
             else:
-                print("⚠️ No best model found. Using last epoch weights.")
+                print(" No best model found. Using last epoch weights.")
 
         test_loss, test_acc = validate(model, test_loader, criterion, DEVICE, writer, NUM_EPOCHS, global_rank)
 
@@ -420,7 +418,6 @@ def main(args):
 
     finally:
         cleanup_ddp()
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fine-tune Pruned ResNet50 for Deepfake Detection")
