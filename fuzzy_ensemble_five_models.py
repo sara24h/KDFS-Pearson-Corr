@@ -20,7 +20,7 @@ class WildDeepfakeDataset(Dataset):
             real_files = [f for f in os.listdir(real_path) if f.endswith(('.jpg', '.jpeg', '.png'))]
             for fname in real_files:
                 self.images.append(os.path.join(real_path, fname))
-                self.labels.append(0)
+                self.labels.append(1)
         else:
             raise FileNotFoundError(f"real folder not found: {real_path}")
         
@@ -28,7 +28,7 @@ class WildDeepfakeDataset(Dataset):
             fake_files = [f for f in os.listdir(fake_path) if f.endswith(('.jpg', '.jpeg', '.png'))]
             for fname in fake_files:
                 self.images.append(os.path.join(fake_path, fname))
-                self.labels.append(1)
+                self.labels.append(0)
         else:
             raise FileNotFoundError(f"fake folder not found: {fake_path}")
         
