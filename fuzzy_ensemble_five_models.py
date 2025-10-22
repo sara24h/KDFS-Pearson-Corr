@@ -10,7 +10,6 @@ import os
 from tqdm import tqdm
 import pandas as pd
 
-
 class WildDeepfakeDataset(Dataset):
     def __init__(self, real_path, fake_path, transform=None):
         self.transform = transform
@@ -50,7 +49,7 @@ class WildDeepfakeDataset(Dataset):
             return image, label, img_path
         except Exception as e:
             print(f"❌ error in loading {img_path}: {e}")
-            return torch.zeros(3, 1024, 1024), label, img_path
+            return torch.zeros(3, 256, 256), label, img_path
 
 
 def load_pruned_model(checkpoint_path, device):
@@ -208,14 +207,19 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # With 2 models:
+  # با 2 مدل (سایز پیش‌فرض 224×224):
   python script.py --model_paths model1.pth model2.pth --test_real_dir ./real --test_fake_dir ./fake
   
-  # With 5 models:
-  python script.py --model_paths m1.pth m2.pth m3.pth m4.pth m5.pth --test_real_dir ./real --test_fake_dir ./fake
+  # با 5 مدل و سایز سفارشی:
+  python script.py --model_paths m1.pth m2.pth m3.pth m4.pth m5.pth \
+    --test_real_dir ./real --test_fake_dir ./fake --input_size 224
   
-  # With custom batch size:
-  python script.py --model_paths m1.pth m2.pth --test_real_dir ./real --test_fake_dir ./fake --batch_size 128
+  # با normalization سفارشی (دیتاست خودتان):
+  python script.py --model_paths m1.pth m2.pth \
+    --test_real_dir ./real --test_fake_dir ./fake \
+    --input_size 224 \
+    --norm_mean 0.3594 0.3140 0.3242 \
+    --norm_std 0.2499 0.2249 0.2268
         """
     )
     
@@ -231,6 +235,12 @@ Examples:
                         help='Number of data loading workers (default: 4)')
     parser.add_argument('--output_prefix', type=str, default='fuzzy_ensemble',
                         help='Prefix for output files (default: fuzzy_ensemble)')
+    parser.add_argument('--input_size', type=int, default=224,
+                        help='Input image size - must match fine-tuning size (default: 224)')
+    parser.add_argument('--norm_mean', type=float, nargs=3, default=[0.485, 0.456, 0.406],
+                        help='Normalization mean values (default: ImageNet)')
+    parser.add_argument('--norm_std', type=float, nargs=3, default=[0.229, 0.224, 0.225],
+                        help='Normalization std values (default: ImageNet)')
     
     args = parser.parse_args()
 
@@ -248,17 +258,23 @@ Examples:
     if torch.cuda.is_available():
         print(f"🚀 GPU: {torch.cuda.get_device_name(0)}")
 
-    val_transform = transforms.Compose([
-        transforms.Resize((256, 256)),
+    # Transform باید دقیقاً مثل زمان fine-tune باشد
+    print(f"\n⚙️  Transform Settings:")
+    print(f"   - Input Size: {args.input_size}×{args.input_size}")
+    print(f"   - Normalize Mean: {args.norm_mean}")
+    print(f"   - Normalize Std: {args.norm_std}")
+    
+    test_transform = transforms.Compose([
+        transforms.Resize((args.input_size, args.input_size)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5256, 0.4289, 0.3770], std=[0.2414, 0.2127, 0.2079])
+        transforms.Normalize(mean=args.norm_mean, std=args.norm_std)
     ])
 
     print("\nloading the dataset...")
     test_dataset = WildDeepfakeDataset(
         real_path=args.test_real_dir,
         fake_path=args.test_fake_dir,
-        transform=val_transform
+        transform=test_transform
     )
 
     test_loader = DataLoader(
@@ -295,7 +311,6 @@ Examples:
     print(f"\naccuracy of fuzzy ensemble: {accuracy * 100:.2f}%")
     print_detailed_results(labels, final_predictions, all_probs)
 
-    # Save results
     results = {
         'final_predictions': final_predictions,
         'true_labels': labels,
@@ -333,6 +348,7 @@ Examples:
     print(f"   - {output_pt}")
     print(f"   - {output_csv}")
     print(f"{'='*70}")
+
 
 if __name__ == "__main__":
     main()
