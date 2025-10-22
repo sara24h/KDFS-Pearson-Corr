@@ -19,8 +19,6 @@ from torch.amp import autocast, GradScaler
 import argparse
 from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
 
-
-# === آمار نرمال‌سازی هر دیتاست ===
 WILD_MEAN = [0.4414, 0.3448, 0.3159]
 WILD_STD  = [0.1854, 0.1623, 0.1562]
 
@@ -39,7 +37,7 @@ def get_transforms(dataset_name, is_train=True):
 
     if is_train:
         return transforms.Compose([
-            transforms.Resize((256, 256)),  # تبدیل به 256x256 — همان ابعادی که مدل با آن آموزش دیده
+            transforms.Resize((256, 256)),  
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
             transforms.ToTensor(),
@@ -258,7 +256,6 @@ def main(args):
         print(f"   Input Size: 256×256 (سازگار با مدل آموزش‌دیده)")
         print("=" * 70)
 
-    # 🗂️ مسیرهای دیتاست بر اساس انتخاب کاربر
     if args.dataset == "wild":
         base_path = "/kaggle/input/wild-deepfake"
         train_real = os.path.join(base_path, "train/real")
@@ -289,8 +286,8 @@ def main(args):
     for param in model.parameters():
         param.requires_grad = False
 
-    for param in model.layer3.parameters():  # غیرفعال شده طبق کد قبلی
-        param.requires_grad = True
+    #for param in model.layer3.parameters():  # غیرفعال شده طبق کد قبلی
+        #param.requires_grad = True
     for param in model.layer4.parameters():
         param.requires_grad = True
     for param in model.fc.parameters():
