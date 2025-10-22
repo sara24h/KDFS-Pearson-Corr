@@ -324,14 +324,12 @@ def main(args):
     criterion = nn.BCEWithLogitsLoss()
 
     optimizer = optim.AdamW([
-        {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.3, 'weight_decay': WEIGHT_DECAY * 1.5},
-        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 0.6, 'weight_decay': WEIGHT_DECAY * 1.5},
-        {'params': model.module.fc.parameters(),     'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY * 2.5}
+        {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.5, 'weight_decay': WEIGHT_DECAY * 1.5},
+        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 0.8, 'weight_decay': WEIGHT_DECAY * 1.5},
+        {'params': model.module.fc.parameters(),     'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY * 2.0}
     ])
 
-    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=10, T_mult=2, eta_min=1e-6
-    )
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=1, verbose=True)
     scaler = GradScaler(enabled=True)
 
     best_val_acc = 0.0
