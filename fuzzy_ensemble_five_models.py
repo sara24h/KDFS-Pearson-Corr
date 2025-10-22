@@ -32,8 +32,8 @@ class WildDeepfakeDataset(Dataset):
         else:
             raise FileNotFoundError(f"fake folder not found: {fake_path}")
         
-        print(f"number of Real images: {len([l for l in self.labels if l==0])}")
-        print(f"number of Fake images: {len([l for l in self.labels if l==1])}")
+        print(f"number of Real images: {len([l for l in self.labels if l==1])}")
+        print(f"number of Fake images: {len([l for l in self.labels if l==0])}")
         print(f"sum of images: {len(self.images)}")
     
     def __len__(self):
