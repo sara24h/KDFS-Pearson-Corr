@@ -277,7 +277,7 @@ def main(args):
     else:
         raise ValueError("Dataset باید یکی از 'wild' یا 'realvsfake' باشد.")
 
-    input_model_path = ''
+    input_model_path = '/kaggle/input/330k-pruned-model/pytorch/default/1/330k_final.pt'
     checkpoint = torch.load(input_model_path, map_location=DEVICE)
     masks_detached = [m.detach().clone() if m is not None else None for m in checkpoint['masks']]
 
