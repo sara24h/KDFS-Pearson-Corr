@@ -362,7 +362,7 @@ def main(args):
                     torch.save(model.module.state_dict(), best_model_path)
                     print(f"✅ بهترین مدل ذخیره شد با Val Acc: {val_acc:.2f}%")
 
-            scheduler.step()
+            scheduler.step(val_loss)
 
         # 🔍 تست نهایی
         if global_rank == 0:
