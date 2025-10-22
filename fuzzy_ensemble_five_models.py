@@ -145,8 +145,8 @@ def fuzzy_ensemble_multi(model_probs_list, labels, class_no=2):
             score_sum += probs[i]
 
         score_avg = score_sum / num_models
-        fused_score = (rank_sum.T) * (1 - score_avg)  # shape: (1, class_no)
-        cls = np.argmin(rank_sum)  # or np.argmax(fused_score) — but original uses rankSum min
+        fused_score = (rank_sum.T) * (1 - score_avg)
+        cls = np.argmin(rank_sum)
         predictions.append(cls)
 
         fusion_details.append({
@@ -182,6 +182,9 @@ def print_detailed_results(labels, predictions, model_probs_list):
     print(f"✅ Fake correctly classified: {cm[1,1]} / {cm[1,0] + cm[1,1]}")
     print(f"❌ Fake misclassified as Real: {cm[1,0]} / {cm[1,0] + cm[1,1]}")
     
+    print("\n" + "="*70)
+    print("Individual Model Performance:")
+    print("="*70)
     individual_accs = []
     for idx, probs in enumerate(model_probs_list):
         preds = np.argmax(probs, axis=1)
@@ -192,22 +195,53 @@ def print_detailed_results(labels, predictions, model_probs_list):
     ensemble_acc = (predictions == labels).mean()
     best_single = max(individual_accs)
     improvement = (ensemble_acc - best_single) * 100
+    print(f"\n{'='*70}")
     print(f"Fuzzy Ensemble Accuracy: {ensemble_acc*100:.2f}%")
+    print(f"Best Single Model Accuracy: {best_single*100:.2f}%")
     print(f"Improvement over best single model: {improvement:+.2f}%")
+    print(f"{'='*70}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Fuzzy Ensemble for 5 models")
-    parser.add_argument('--model1_path', type=str, required=True)
-    parser.add_argument('--model2_path', type=str, required=True)
-    parser.add_argument('--model3_path', type=str, required=True)
-    parser.add_argument('--model4_path', type=str, required=True)
-    parser.add_argument('--model5_path', type=str, required=True)
-    parser.add_argument('--test_real_dir', type=str, required=True)
-    parser.add_argument('--test_fake_dir', type=str, required=True)
-    parser.add_argument('--batch_size', type=int, default=256)
-    parser.add_argument('--num_workers', type=int, default=4)
+    parser = argparse.ArgumentParser(
+        description="Flexible Fuzzy Ensemble for N models",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # With 2 models:
+  python script.py --model_paths model1.pth model2.pth --test_real_dir ./real --test_fake_dir ./fake
+  
+  # With 5 models:
+  python script.py --model_paths m1.pth m2.pth m3.pth m4.pth m5.pth --test_real_dir ./real --test_fake_dir ./fake
+  
+  # With custom batch size:
+  python script.py --model_paths m1.pth m2.pth --test_real_dir ./real --test_fake_dir ./fake --batch_size 128
+        """
+    )
+    
+    parser.add_argument('--model_paths', type=str, nargs='+', required=True,
+                        help='Paths to model checkpoints (at least 2 models required)')
+    parser.add_argument('--test_real_dir', type=str, required=True,
+                        help='Directory containing real test images')
+    parser.add_argument('--test_fake_dir', type=str, required=True,
+                        help='Directory containing fake test images')
+    parser.add_argument('--batch_size', type=int, default=256,
+                        help='Batch size for inference (default: 256)')
+    parser.add_argument('--num_workers', type=int, default=4,
+                        help='Number of data loading workers (default: 4)')
+    parser.add_argument('--output_prefix', type=str, default='fuzzy_ensemble',
+                        help='Prefix for output files (default: fuzzy_ensemble)')
+    
     args = parser.parse_args()
+
+    # Validate number of models
+    if len(args.model_paths) < 2:
+        raise ValueError("At least 2 models are required for ensemble!")
+    
+    num_models = len(args.model_paths)
+    print(f"\n{'='*70}")
+    print(f"🎯 Fuzzy Ensemble with {num_models} Models")
+    print(f"{'='*70}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device: {device}")
@@ -215,9 +249,9 @@ def main():
         print(f"🚀 GPU: {torch.cuda.get_device_name(0)}")
 
     val_transform = transforms.Compose([
-        transforms.Resize((1024, 1024)),
+        transforms.Resize((256, 256)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.3594, 0.3140, 0.3242], std=[0.2499, 0.2249, 0.2268])
+        transforms.Normalize(mean=[0.5256, 0.4289, 0.3770], std=[0.2414, 0.2127, 0.2079])
     ])
 
     print("\nloading the dataset...")
@@ -236,28 +270,25 @@ def main():
         drop_last=False
     )
 
-    model_paths = [
-        args.model1_path,
-        args.model2_path,
-        args.model3_path,
-        args.model4_path,
-        args.model5_path
-    ]
+    print(f"\nloading {num_models} models...")
+    models = []
+    for i, path in enumerate(args.model_paths, 1):
+        print(f"\n--- Model {i}/{num_models} ---")
+        model = load_pruned_model(path, device)
+        models.append(model)
 
-    print("\nloading models...")
-    models = [load_pruned_model(path, device) for path in model_paths]
-
-    print("getting predictions from all models...")
+    print(f"\ngetting predictions from all {num_models} models...")
     all_probs = []
     labels = None
     for i, model in enumerate(models, 1):
+        print(f"\nModel {i}/{num_models}:")
         probs, lbls = get_predictions(model, test_loader, device)
         all_probs.append(probs)
         if labels is None:
             labels = lbls
 
     print("\n" + "="*70)
-    print("ensembeling 5 models with fuzzy logic...")
+    print(f"ensembeling {num_models} models with fuzzy logic...")
     print("="*70)
     final_predictions, accuracy, fusion_details = fuzzy_ensemble_multi(all_probs, labels)
 
@@ -269,7 +300,9 @@ def main():
         'final_predictions': final_predictions,
         'true_labels': labels,
         'accuracy': accuracy,
-        'model_probabilities': all_probs,  # list of 5 arrays
+        'num_models': num_models,
+        'model_paths': args.model_paths,
+        'model_probabilities': all_probs,
         'fusion_details': fusion_details[:100],
         'dataset_info': {
             'total_samples': len(labels),
@@ -277,21 +310,29 @@ def main():
             'fake_samples': int((labels == 1).sum())
         }
     }
-    torch.save(results, 'fuzzy_ensemble_5models_results.pt')
+    
+    output_pt = f'{args.output_prefix}_{num_models}models_results.pt'
+    torch.save(results, output_pt)
 
     df_dict = {
         'true_label': labels,
         'fuzzy_prediction': final_predictions,
         'is_correct': (final_predictions == labels).astype(int)
     }
+    
     for i, probs in enumerate(all_probs):
         df_dict[f'model{i+1}_prob_real'] = probs[:, 0]
         df_dict[f'model{i+1}_prob_fake'] = probs[:, 1]
 
     df_results = pd.DataFrame(df_dict)
-    df_results.to_csv('fuzzy_ensemble_5models_results.csv', index=False)
-    print("\nresults saved: fuzzy_ensemble_5models_results.pt and fuzzy_ensemble_5models_results.csv")
-
+    output_csv = f'{args.output_prefix}_{num_models}models_results.csv'
+    df_results.to_csv(output_csv, index=False)
+    
+    print(f"\n{'='*70}")
+    print(f"✅ Results saved:")
+    print(f"   - {output_pt}")
+    print(f"   - {output_csv}")
+    print(f"{'='*70}")
 
 if __name__ == "__main__":
     main()
