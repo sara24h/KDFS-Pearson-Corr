@@ -93,9 +93,6 @@ def get_predictions(model, dataloader, device):
         for images, labels, _ in tqdm(dataloader, desc="Getting predictions"):
             images = images.to(device)
             outputs, _ = model(images)
-            probs_fake = torch.sigmoid(outputs).squeeze()
-            if probs_fake.dim() == 0:
-                probs_fake = probs_fake.unsqueeze(0)
             probs_real = torch.sigmoid(outputs).squeeze()
             probs_fake = 1 - probs_real
             probs_2class = torch.stack([probs_fake, probs_real], dim=1)  # 0: fake, 1: real
@@ -140,7 +137,7 @@ def fuzzy_ensemble_multi(model_probs_list, labels, class_no=2):
         
         # Final decision score
         fds = frs * ccfs
-        cls = np.argmin(fds)  # Lowest FDS is the best class
+        cls = np.argmax(fds)  # Highest FDS is the best class (as per paper's "highest combined score")
         
         predictions.append(cls)
         
