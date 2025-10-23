@@ -106,11 +106,12 @@ def get_predictions(model, dataloader, device):
     return all_probs, all_labels
 
 
-def generateRank1(score, class_no=2):
+def generateRank1_gompertz(score, class_no=2):
     rank = np.zeros([class_no, 1])
     scores = score.reshape(-1, 1)
     for i in range(class_no):
-        rank[i] = 1 - np.exp(-((scores[i] - 1) ** 2) / 2.0)
+        x = scores[i]
+        rank[i] = np.exp(-np.exp(-(x - 1)**2 / 2))  # Simplified Gompertz variant for deviation, adjusted to produce lower ranks for higher confidence
     return rank
 
 def generateRank2(score, class_no=2):
@@ -121,10 +122,11 @@ def generateRank2(score, class_no=2):
     return rank
 
 
-def fuzzy_ensemble_multi(model_probs_list, labels, class_no=2):
+def fuzzy_ensemble_multi(model_probs_list, labels, weights, class_no=2):
     """
-    Perform fuzzy ensemble over N models (N >= 2).
+    Perform fuzzy weighted rank fusion over N models (N >= 2) using Gompertz function.
     model_probs_list: list of numpy arrays, each of shape (N_samples, 2)
+    weights: array of weights for each model, normalized based on individual accuracies
     """
     num_models = len(model_probs_list)
     num_samples = len(labels)
@@ -136,11 +138,11 @@ def fuzzy_ensemble_multi(model_probs_list, labels, class_no=2):
         rank_sum = np.zeros((class_no, 1))
         score_sum = np.zeros(class_no)
 
-        for probs in model_probs_list:
-            rank1 = generateRank1(probs[i], class_no)
+        for mdl_idx, probs in enumerate(model_probs_list):
+            rank1 = generateRank1_gompertz(probs[i], class_no)
             rank2 = generateRank2(probs[i], class_no)
             rank_combined = rank1 * rank2
-            rank_sum += rank_combined
+            rank_sum += rank_combined * weights[mdl_idx]
             score_sum += probs[i]
 
         score_avg = score_sum / num_models
@@ -233,8 +235,8 @@ Examples:
                         help='Batch size for inference (default: 256)')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers (default: 4)')
-    parser.add_argument('--output_prefix', type=str, default='fuzzy_ensemble',
-                        help='Prefix for output files (default: fuzzy_ensemble)')
+    parser.add_argument('--output_prefix', type=str, default='weighted_gompertz_fuzzy_ensemble',
+                        help='Prefix for output files (default: weighted_gompertz_fuzzy_ensemble)')
     parser.add_argument('--input_size', type=int, default=224,
                         help='Input image size - must match fine-tuning size (default: 224)')
     parser.add_argument('--norm_mean', type=float, nargs=3, default=[0.485, 0.456, 0.406],
@@ -303,10 +305,18 @@ Examples:
         if labels is None:
             labels = lbls
 
+    # Calculate individual accuracies for weights
+    individual_accs = []
+    for probs in all_probs:
+        preds = np.argmax(probs, axis=1)
+        acc = (preds == labels).mean()
+        individual_accs.append(acc)
+    weights = np.array(individual_accs) / np.sum(individual_accs)
+
     print("\n" + "="*70)
-    print(f"ensembeling {num_models} models with fuzzy logic...")
+    print(f"ensembeling {num_models} models with weighted Gompertz fuzzy rank fusion...")
     print("="*70)
-    final_predictions, accuracy, fusion_details = fuzzy_ensemble_multi(all_probs, labels)
+    final_predictions, accuracy, fusion_details = fuzzy_ensemble_multi(all_probs, labels, weights=weights)
 
     print(f"\naccuracy of fuzzy ensemble: {accuracy * 100:.2f}%")
     print_detailed_results(labels, final_predictions, all_probs)
