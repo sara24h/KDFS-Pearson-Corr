@@ -20,7 +20,7 @@ class WildDeepfakeDataset(Dataset):
             real_files = [f for f in os.listdir(real_path) if f.endswith(('.jpg', '.jpeg', '.png'))]
             for fname in real_files:
                 self.images.append(os.path.join(real_path, fname))
-                self.labels.append(1)  # 1 for real
+                self.labels.append(1)
         else:
             raise FileNotFoundError(f"real folder not found: {real_path}")
         
@@ -28,7 +28,7 @@ class WildDeepfakeDataset(Dataset):
             fake_files = [f for f in os.listdir(fake_path) if f.endswith(('.jpg', '.jpeg', '.png'))]
             for fname in fake_files:
                 self.images.append(os.path.join(fake_path, fname))
-                self.labels.append(0)  # 0 for fake
+                self.labels.append(0)
         else:
             raise FileNotFoundError(f"fake folder not found: {fake_path}")
         
@@ -85,6 +85,7 @@ def load_pruned_model(checkpoint_path, device):
     model.eval()
     return model
 
+
 def get_predictions(model, dataloader, device):
     all_probs = []
     all_labels = []
@@ -93,56 +94,37 @@ def get_predictions(model, dataloader, device):
         for images, labels, _ in tqdm(dataloader, desc="Getting predictions"):
             images = images.to(device)
             outputs, _ = model(images)
-            probs_real = torch.sigmoid(outputs).squeeze()
-            probs_fake = 1 - probs_real
-            probs_2class = torch.stack([probs_fake, probs_real], dim=1)  # 0: fake, 1: real
+            probs_fake = torch.sigmoid(outputs).squeeze()
+            if probs_fake.dim() == 0:
+                probs_fake = probs_fake.unsqueeze(0)
+            probs_real = 1 - probs_fake
+            probs_2class = torch.stack([probs_real, probs_fake], dim=1)
             all_probs.append(probs_2class.cpu().numpy())
             all_labels.append(labels.numpy())
     all_probs = np.vstack(all_probs)
     all_labels = np.concatenate(all_labels)
     return all_probs, all_labels
 
-# === تابع جدید برای میانگین‌گیری وزنی ===
-def simple_weighted_ensemble(model_probs_list, labels, weights=None):
-    """
-    Performs simple or weighted averaging of model probabilities.
-    model_probs_list: list of numpy arrays, each of shape (N_samples, class_no).
-    labels: true labels for the samples.
-    weights: optional list of weights for each model. If None, simple averaging is used.
-    """
-    num_models = len(model_probs_list)
-    if weights is None:
-        # Simple averaging
-        weights = np.ones(num_models) / num_models
-        method_name = "Simple Averaging"
-    else:
-        # Weighted averaging
-        weights = np.array(weights)
-        # Normalize weights to sum to 1
-        weights = weights / np.sum(weights)
-        method_name = "Weighted Averaging"
 
-    # Stack probabilities into a single array of shape (num_models, N_samples, class_no)
-    stacked_probs = np.stack(model_probs_list, axis=0)
-    
-    # Perform weighted average across the model axis (axis=0)
-    # Reshape weights to be broadcastable: (num_models, 1, 1)
-    reshaped_weights = weights.reshape(num_models, 1, 1)
-    weighted_probs = np.sum(stacked_probs * reshaped_weights, axis=0)
-    
-    # Get final predictions by taking the argmax
-    final_predictions = np.argmax(weighted_probs, axis=1)
-    
-    # Calculate accuracy
-    accuracy = (final_predictions == labels).mean()
-    
-    return final_predictions, accuracy, method_name
+def generateRank1(score, class_no=2):
+    rank = np.zeros([class_no, 1])
+    scores = score.reshape(-1, 1)
+    for i in range(class_no):
+        rank[i] = 1 - np.exp(-((scores[i] - 1) ** 2) / 2.0)
+    return rank
+
+def generateRank2(score, class_no=2):
+    rank = np.zeros([class_no, 1])
+    scores = score.reshape(-1, 1)
+    for i in range(class_no):
+        rank[i] = 1 - np.tanh(((scores[i] - 1) ** 2) / 2)
+    return rank
+
 
 def fuzzy_ensemble_multi(model_probs_list, labels, class_no=2):
     """
-    Perform fuzzy rank-based ensemble using Gompertz function as described in the paper.
-    model_probs_list: list of numpy arrays, each of shape (N_samples, class_no), with probs summing to 1 per sample.
-    Assumes class 0: fake (label 0), class 1: real (label 1)
+    Perform fuzzy ensemble over N models (N >= 2).
+    model_probs_list: list of numpy arrays, each of shape (N_samples, 2)
     """
     num_models = len(model_probs_list)
     num_samples = len(labels)
@@ -151,91 +133,93 @@ def fuzzy_ensemble_multi(model_probs_list, labels, class_no=2):
     fusion_details = []
 
     for i in range(num_samples):
-        frs = np.zeros(class_no)
-        ccfs = np.zeros(class_no)
-        for c in range(class_no):
-            rank_sum = 0.0
-            cf_sum = 0.0
-            for m in range(num_models):
-                cf = model_probs_list[m][i, c]
-                # Compute fuzzy rank using re-parameterized Gompertz function
-                r = 1 - np.exp(-np.exp(-2.0 * cf))
-                # Determine if this class is the top predicted class for this model (k=1 for binary)
-                top_class = np.argmax(model_probs_list[m][i])
-                if c == top_class:
-                    rank_sum += r
-                    cf_sum += cf
-                else:
-                    rank_sum += 0.5  # Penalty for rank
-                    cf_sum += 0.0     # Penalty for confidence
-            frs[c] = rank_sum
-            ccfs[c] = cf_sum / num_models  # Average confidence (with penalties)
-        
-        # Final decision score
-        fds = frs * ccfs
-        cls = np.argmax(fds)  # Highest FDS is the best class (as per paper's "highest combined score")
-        
+        rank_sum = np.zeros((class_no, 1))
+        score_sum = np.zeros(class_no)
+
+        for probs in model_probs_list:
+            rank1 = generateRank1(probs[i], class_no)
+            rank2 = generateRank2(probs[i], class_no)
+            rank_combined = rank1 * rank2
+            rank_sum += rank_combined
+            score_sum += probs[i]
+
+        score_avg = score_sum / num_models
+        fused_score = (rank_sum.T) * (1 - score_avg)
+        cls = np.argmin(rank_sum)
         predictions.append(cls)
-        
+
         fusion_details.append({
             'sample_idx': i,
-            'frs': frs.flatten(),
-            'ccfs': ccfs.flatten(),
-            'fds': fds.flatten(),
+            'rank_sum': rank_sum.flatten(),
             'prediction': cls,
             'true_label': labels[i]
         })
-        
+
         if cls == labels[i]:
             correct += 1
 
     accuracy = correct / num_samples
-    return np.array(predictions), accuracy, "Fuzzy Ensemble (Gompertz)", fusion_details
+    return np.array(predictions), accuracy, fusion_details
 
 
-def print_comparison_report(labels, results_list):
-    """
-    Prints a final comparison report for all ensemble methods.
-    results_list: A list of dictionaries, each containing results for a method.
-    """
+def print_detailed_results(labels, predictions, model_probs_list):
     from sklearn.metrics import classification_report, confusion_matrix
+    print("\n" + "="*70)
+    print(classification_report(labels, predictions, target_names=['Real', 'Fake'], digits=4))
     
-    print("\n" + "="*80)
-    print("🏆 FINAL COMPARISON REPORT")
-    print("="*80)
-
-    # Sort results by accuracy for better presentation
-    results_list.sort(key=lambda x: x['accuracy'], reverse=True)
-
-    for i, res in enumerate(results_list):
-        print(f"\n--- Method {i+1}: {res['name']} ---")
-        print(f"Accuracy: {res['accuracy']*100:.4f}%")
-        print("Classification Report:")
-        print(classification_report(labels, res['predictions'], target_names=['Fake', 'Real'], digits=4))
-        
-        cm = confusion_matrix(labels, res['predictions'])
-        print("Confusion Matrix:")
-        print(f"\n{'':15} {'Predicted Fake':>15} {'Predicted Real':>15}")
-        print(f"{'Actual Fake':15} {cm[0,0]:>15} {cm[0,1]:>15}")
-        print(f"{'Actual Real':15} {cm[1,0]:>15} {cm[1,1]:>15}")
-        print("-" * 50)
-
-    print("\n" + "="*80)
-    print("Summary of Accuracies:")
-    for res in results_list:
-        print(f"  - {res['name']:<35}: {res['accuracy']*100:.4f}%")
-    print("="*80)
+    print("\n" + "="*70)
+    print("confusion matrix:")
+    print("="*70)
+    cm = confusion_matrix(labels, predictions)
+    print(f"\n{'':15} {'Predicted Real':>15} {'Predicted Fake':>15}")
+    print(f"{'Actual Real':15} {cm[0,0]:>15} {cm[0,1]:>15}")
+    print(f"{'Actual Fake':15} {cm[1,0]:>15} {cm[1,1]:>15}")
+    
+    print("\n" + "="*70)
+    print(f"✅ Real correctly classified: {cm[0,0]} / {cm[0,0] + cm[0,1]}")
+    print(f"❌ Real misclassified as Fake: {cm[0,1]} / {cm[0,0] + cm[0,1]}")
+    print(f"✅ Fake correctly classified: {cm[1,1]} / {cm[1,0] + cm[1,1]}")
+    print(f"❌ Fake misclassified as Real: {cm[1,0]} / {cm[1,0] + cm[1,1]}")
+    
+    print("\n" + "="*70)
+    print("Individual Model Performance:")
+    print("="*70)
+    individual_accs = []
+    for idx, probs in enumerate(model_probs_list):
+        preds = np.argmax(probs, axis=1)
+        acc = (preds == labels).mean()
+        individual_accs.append(acc)
+        print(f"Model {idx+1} Accuracy: {acc*100:.2f}%")
+    
+    ensemble_acc = (predictions == labels).mean()
+    best_single = max(individual_accs)
+    improvement = (ensemble_acc - best_single) * 100
+    print(f"\n{'='*70}")
+    print(f"Fuzzy Ensemble Accuracy: {ensemble_acc*100:.2f}%")
+    print(f"Best Single Model Accuracy: {best_single*100:.2f}%")
+    print(f"Improvement over best single model: {improvement:+.2f}%")
+    print(f"{'='*70}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Flexible Ensemble for N models (Baseline + Fuzzy)",
+        description="Flexible Fuzzy Ensemble for N models",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # با 5 مدل:
+  # با 2 مدل (سایز پیش‌فرض 224×224):
+  python script.py --model_paths model1.pth model2.pth --test_real_dir ./real --test_fake_dir ./fake
+  
+  # با 5 مدل و سایز سفارشی:
   python script.py --model_paths m1.pth m2.pth m3.pth m4.pth m5.pth \
-    --test_real_dir ./real --test_fake_dir ./fake
+    --test_real_dir ./real --test_fake_dir ./fake --input_size 224
+  
+  # با normalization سفارشی (دیتاست خودتان):
+  python script.py --model_paths m1.pth m2.pth \
+    --test_real_dir ./real --test_fake_dir ./fake \
+    --input_size 224 \
+    --norm_mean 0.3594 0.3140 0.3242 \
+    --norm_std 0.2499 0.2249 0.2268
         """
     )
     
@@ -249,8 +233,8 @@ Examples:
                         help='Batch size for inference (default: 256)')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers (default: 4)')
-    parser.add_argument('--output_prefix', type=str, default='ensemble_comparison',
-                        help='Prefix for output files (default: ensemble_comparison)')
+    parser.add_argument('--output_prefix', type=str, default='fuzzy_ensemble',
+                        help='Prefix for output files (default: fuzzy_ensemble)')
     parser.add_argument('--input_size', type=int, default=224,
                         help='Input image size - must match fine-tuning size (default: 224)')
     parser.add_argument('--norm_mean', type=float, nargs=3, default=[0.485, 0.456, 0.406],
@@ -260,12 +244,13 @@ Examples:
     
     args = parser.parse_args()
 
+    # Validate number of models
     if len(args.model_paths) < 2:
         raise ValueError("At least 2 models are required for ensemble!")
     
     num_models = len(args.model_paths)
     print(f"\n{'='*70}")
-    print(f"🎯 Running Ensemble Comparison with {num_models} Models")
+    print(f"🎯 Fuzzy Ensemble with {num_models} Models")
     print(f"{'='*70}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -273,6 +258,12 @@ Examples:
     if torch.cuda.is_available():
         print(f"🚀 GPU: {torch.cuda.get_device_name(0)}")
 
+    # Transform باید دقیقاً مثل زمان fine-tune باشد
+    print(f"\n⚙️  Transform Settings:")
+    print(f"   - Input Size: {args.input_size}×{args.input_size}")
+    print(f"   - Normalize Mean: {args.norm_mean}")
+    print(f"   - Normalize Std: {args.norm_std}")
+    
     test_transform = transforms.Compose([
         transforms.Resize((args.input_size, args.input_size)),
         transforms.ToTensor(),
@@ -312,64 +303,41 @@ Examples:
         if labels is None:
             labels = lbls
 
-    # === شروع بخش اسمبل ===
-    all_results = []
-    
-    # 1. روش اول: میانگین‌گیری ساده (Simple Averaging)
     print("\n" + "="*70)
-    print("Running Method 1: Simple Averaging")
+    print(f"ensembeling {num_models} models with fuzzy logic...")
     print("="*70)
-    simple_preds, simple_acc, simple_name = simple_weighted_ensemble(all_probs, labels, weights=None)
-    all_results.append({'name': simple_name, 'predictions': simple_preds, 'accuracy': simple_acc})
+    final_predictions, accuracy, fusion_details = fuzzy_ensemble_multi(all_probs, labels)
 
-    # 2. روش دوم: میانگین‌گیری وزنی (Weighted Averaging)
-    print("\n" + "="*70)
-    print("Running Method 2: Weighted Averaging")
-    print("="*70)
-    # محاسبه وزن‌ها بر اساس دقت هر مدل روی دیتاست تست
-    print("⚠️  NOTE: Calculating weights on the test set can lead to optimistic results (data leakage).")
-    print("    For a robust evaluation, use a separate validation set to determine weights.")
-    individual_accs = []
-    for idx, probs in enumerate(all_probs):
-        preds = np.argmax(probs, axis=1)
-        acc = (preds == labels).mean()
-        individual_accs.append(acc)
-        print(f"  - Model {idx+1} Accuracy (for weight): {acc*100:.2f}%")
-    
-    weighted_preds, weighted_acc, weighted_name = simple_weighted_ensemble(all_probs, labels, weights=individual_accs)
-    all_results.append({'name': weighted_name, 'predictions': weighted_preds, 'accuracy': weighted_acc})
+    print(f"\naccuracy of fuzzy ensemble: {accuracy * 100:.2f}%")
+    print_detailed_results(labels, final_predictions, all_probs)
 
-    # 3. روش سوم: اسمبل فازی (Fuzzy Ensemble)
-    print("\n" + "="*70)
-    print("Running Method 3: Fuzzy Ensemble (Gompertz-based)")
-    print("="*70)
-    fuzzy_preds, fuzzy_acc, fuzzy_name, fusion_details = fuzzy_ensemble_multi(all_probs, labels)
-    all_results.append({'name': fuzzy_name, 'predictions': fuzzy_preds, 'accuracy': fuzzy_acc, 'details': fusion_details})
-
-    # چاپ گزارش نهایی مقایسه‌ای
-    print_comparison_report(labels, all_results)
-
-    # ذخیره نتایج
-    final_results_dict = {
-        'comparison_report': all_results,
+    results = {
+        'final_predictions': final_predictions,
         'true_labels': labels,
+        'accuracy': accuracy,
+        'num_models': num_models,
+        'model_paths': args.model_paths,
         'model_probabilities': all_probs,
-        'individual_model_accuracies': individual_accs
+        'fusion_details': fusion_details[:100],
+        'dataset_info': {
+            'total_samples': len(labels),
+            'real_samples': int((labels == 0).sum()),
+            'fake_samples': int((labels == 1).sum())
+        }
     }
     
     output_pt = f'{args.output_prefix}_{num_models}models_results.pt'
-    torch.save(final_results_dict, output_pt)
+    torch.save(results, output_pt)
 
-    df_dict = {'true_label': labels}
-    for res in all_results:
-        # Create a safe column name
-        col_name = res['name'].lower().replace(" ", "_").replace("(", "").replace(")", "").replace(".", "")
-        df_dict[f'{col_name}_prediction'] = res['predictions']
-        df_dict[f'{col_name}_is_correct'] = (res['predictions'] == labels).astype(int)
-
+    df_dict = {
+        'true_label': labels,
+        'fuzzy_prediction': final_predictions,
+        'is_correct': (final_predictions == labels).astype(int)
+    }
+    
     for i, probs in enumerate(all_probs):
-        df_dict[f'model{i+1}_prob_fake'] = probs[:, 0]
-        df_dict[f'model{i+1}_prob_real'] = probs[:, 1]
+        df_dict[f'model{i+1}_prob_real'] = probs[:, 0]
+        df_dict[f'model{i+1}_prob_fake'] = probs[:, 1]
 
     df_results = pd.DataFrame(df_dict)
     output_csv = f'{args.output_prefix}_{num_models}models_results.csv'
@@ -377,8 +345,8 @@ Examples:
     
     print(f"\n{'='*70}")
     print(f"✅ Results saved:")
-    print(f"   - PyTorch results: {output_pt}")
-    print(f"   - CSV results:      {output_csv}")
+    print(f"   - {output_pt}")
+    print(f"   - {output_csv}")
     print(f"{'='*70}")
 
 
