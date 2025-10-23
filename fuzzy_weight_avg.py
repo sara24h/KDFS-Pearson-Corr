@@ -107,30 +107,60 @@ def get_predictions(model, dataloader, device):
     return all_probs, all_labels
 
 
-def simple_fuzzy_ensemble(model_probs_list, labels):
+def generateRank1(score, class_no=2):
+    rank = np.zeros([class_no, 1])
+    scores = score.reshape(-1, 1)
+    for i in range(class_no):
+        rank[i] = 1 - np.exp(-((scores[i] - 1) ** 2) / 2.0)
+    return rank
+
+def generateRank2(score, class_no=2):
+    rank = np.zeros([class_no, 1])
+    scores = score.reshape(-1, 1)
+    for i in range(class_no):
+        rank[i] = 1 - np.tanh(((scores[i] - 1) ** 2) / 2)
+    return rank
+
+
+def fuzzy_ensemble_multi(model_probs_list, labels, class_no=2):
     """
-    Simple fuzzy ensemble using weighted average of probabilities.
-    Weights are based on individual model accuracies (fuzzy weighting).
+    Perform fuzzy ensemble over N models (N >= 2).
+    model_probs_list: list of numpy arrays, each of shape (N_samples, 2)
     """
     num_models = len(model_probs_list)
     num_samples = len(labels)
-    
-    # Calculate individual accuracies for weights
-    individual_accs = [accuracy_score(labels, np.argmax(probs, axis=1)) for probs in model_probs_list]
-    weights = np.array(individual_accs) / np.sum(individual_accs)
-    
-    # Weighted average of probabilities
-    fused_probs = np.zeros_like(model_probs_list[0])
-    for i, probs in enumerate(model_probs_list):
-        fused_probs += weights[i] * probs
-    
-    predictions = np.argmax(fused_probs, axis=1)
-    accuracy = accuracy_score(labels, predictions)
-    
-    # Simple fusion details (optional, can expand if needed)
-    fusion_details = [{'sample_idx': i, 'prediction': pred, 'true_label': labels[i]} for i, pred in enumerate(predictions)]
-    
-    return predictions, accuracy, fusion_details
+    correct = 0
+    predictions = []
+    fusion_details = []
+
+    for i in range(num_samples):
+        rank_sum = np.zeros((class_no, 1))
+        score_sum = np.zeros(class_no)
+
+        for probs in model_probs_list:
+            rank1 = generateRank1(probs[i], class_no)
+            rank2 = generateRank2(probs[i], class_no)
+            rank_combined = rank1 * rank2
+            rank_sum += rank_combined
+            score_sum += probs[i]
+
+        score_avg = score_sum / num_models
+        fused_score = (rank_sum.T) * (1 - score_avg)
+        cls = np.argmin(rank_sum)
+        predictions.append(cls)
+
+        fusion_details.append({
+            'sample_idx': i,
+            'rank_sum': rank_sum.flatten(),
+            'prediction': cls,
+            'true_label': labels[i]
+        })
+
+        if cls == labels[i]:
+            correct += 1
+
+    accuracy = correct / num_samples
+    return np.array(predictions), accuracy, fusion_details
 
 
 def print_detailed_results(labels, predictions, model_probs_list):
@@ -166,7 +196,7 @@ def print_detailed_results(labels, predictions, model_probs_list):
     best_single = max(individual_accs)
     improvement = (ensemble_acc - best_single) * 100
     print(f"\n{'='*70}")
-    print(f"Simple Fuzzy Ensemble Accuracy: {ensemble_acc*100:.2f}%")
+    print(f"Fuzzy Ensemble Accuracy: {ensemble_acc*100:.2f}%")
     print(f"Best Single Model Accuracy: {best_single*100:.2f}%")
     print(f"Improvement over best single model: {improvement:+.2f}%")
     print(f"{'='*70}")
@@ -174,7 +204,7 @@ def print_detailed_results(labels, predictions, model_probs_list):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Flexible Simple Fuzzy Ensemble for N models",
+        description="Flexible Fuzzy Ensemble for N models",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -204,8 +234,8 @@ Examples:
                         help='Batch size for inference (default: 256)')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers (default: 4)')
-    parser.add_argument('--output_prefix', type=str, default='simple_fuzzy_ensemble',
-                        help='Prefix for output files (default: simple_fuzzy_ensemble)')
+    parser.add_argument('--output_prefix', type=str, default='fuzzy_ensemble',
+                        help='Prefix for output files (default: fuzzy_ensemble)')
     parser.add_argument('--input_size', type=int, default=224,
                         help='Input image size - must match fine-tuning size (default: 224)')
     parser.add_argument('--norm_mean', type=float, nargs=3, default=[0.485, 0.456, 0.406],
@@ -221,7 +251,7 @@ Examples:
     
     num_models = len(args.model_paths)
     print(f"\n{'='*70}")
-    print(f"🎯 Simple Fuzzy Ensemble with {num_models} Models")
+    print(f"🎯 Fuzzy Ensemble with {num_models} Models")
     print(f"{'='*70}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -275,12 +305,31 @@ Examples:
             labels = lbls
 
     print("\n" + "="*70)
-    print(f"ensembeling {num_models} models with simple fuzzy logic...")
+    print(f"ensembeling {num_models} models with fuzzy logic...")
     print("="*70)
-    final_predictions, accuracy, fusion_details = simple_fuzzy_ensemble(all_probs, labels)
+    final_predictions, accuracy, fusion_details = fuzzy_ensemble_multi(all_probs, labels)
 
-    print(f"\naccuracy of simple fuzzy ensemble: {accuracy * 100:.2f}%")
+    print(f"\naccuracy of fuzzy ensemble: {accuracy * 100:.2f}%")
     print_detailed_results(labels, final_predictions, all_probs)
+
+    # اعمال Weighted Ensemble به عنوان روش جایگزین
+    print("\n" + "="*70)
+    print("applying Weighted Average Ensemble...")
+    print("="*70)
+    
+    individual_accs = [accuracy_score(labels, np.argmax(probs, axis=1)) for probs in all_probs]
+    weights = np.array(individual_accs) / np.sum(individual_accs)
+
+    fused_probs = np.zeros_like(all_probs[0])
+    for i, probs in enumerate(all_probs):
+        fused_probs += weights[i] * probs
+
+    weighted_predictions = np.argmax(fused_probs, axis=1)
+    weighted_accuracy = accuracy_score(labels, weighted_predictions)
+    print(f"Weighted Ensemble Accuracy: {weighted_accuracy * 100:.2f}%")
+    
+    # نمایش نتایج دقیق برای weighted ensemble
+    print_detailed_results(labels, weighted_predictions, all_probs)
 
     results = {
         'final_predictions': final_predictions,
@@ -294,7 +343,10 @@ Examples:
             'total_samples': len(labels),
             'real_samples': int((labels == 0).sum()),
             'fake_samples': int((labels == 1).sum())
-        }
+        },
+        # افزودن نتایج weighted
+        'weighted_predictions': weighted_predictions,
+        'weighted_accuracy': weighted_accuracy
     }
     
     output_pt = f'{args.output_prefix}_{num_models}models_results.pt'
@@ -303,7 +355,9 @@ Examples:
     df_dict = {
         'true_label': labels,
         'fuzzy_prediction': final_predictions,
-        'is_correct': (final_predictions == labels).astype(int)
+        'is_correct_fuzzy': (final_predictions == labels).astype(int),
+        'weighted_prediction': weighted_predictions,
+        'is_correct_weighted': (weighted_predictions == labels).astype(int)
     }
     
     for i, probs in enumerate(all_probs):
