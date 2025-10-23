@@ -10,6 +10,7 @@ import os
 from tqdm import tqdm
 import pandas as pd
 from sklearn.metrics import accuracy_score
+from itertools import chain, combinations
 
 class WildDeepfakeDataset(Dataset):
     def __init__(self, real_path, fake_path, transform=None):
@@ -107,58 +108,65 @@ def get_predictions(model, dataloader, device):
     return all_probs, all_labels
 
 
-def generateRank1(score, class_no=2):
-    rank = np.zeros([class_no, 1])
-    scores = score.reshape(-1, 1)
-    for i in range(class_no):
-        rank[i] = 1 - np.exp(-((scores[i] - 1) ** 2) / 2.0)
-    return rank
+def all_subsets(elements):
+    return chain(*[combinations(elements, i) for i in range(len(elements) + 1)])
 
-def generateRank2(score, class_no=2):
-    rank = np.zeros([class_no, 1])
-    scores = score.reshape(-1, 1)
-    for i in range(class_no):
-        rank[i] = 1 - np.tanh(((scores[i] - 1) ** 2) / 2)
-    return rank
+def calculate_fuzzy_measures(num_models, model_weights):
+    mu = {(): 0.0}
+    model_ids = list(range(num_models))
+    subsets = list(all_subsets(model_ids))[1:]  # Exclude empty
+    # Simple additive measures based on weights
+    for s in subsets:
+        mu[s] = sum(model_weights[i] for i in s)
+    # Normalize to [0,1]
+    max_mu = mu[tuple(model_ids)]
+    for s in mu:
+        mu[s] /= max_mu
+    return mu
 
+def choquet_integral(probs, mu, model_ids):
+    sorted_idx = np.argsort(probs)  # Ascending
+    sorted_probs = probs[sorted_idx]
+    integral = 0.0
+    prev_mu = 0.0
+    for j in range(len(probs)):
+        A = tuple(sorted_idx[j:])
+        current_mu = mu.get(A, 0.0)
+        integral += sorted_probs[j] * (current_mu - prev_mu)
+        prev_mu = current_mu
+    return integral
 
-def fuzzy_ensemble_multi(model_probs_list, labels, class_no=2):
-    """
-    Perform fuzzy ensemble over N models (N >= 2).
-    model_probs_list: list of numpy arrays, each of shape (N_samples, 2)
-    """
+def choquet_fuzzy_ensemble(model_probs_list, labels):
     num_models = len(model_probs_list)
     num_samples = len(labels)
-    correct = 0
+    individual_accs = [accuracy_score(labels, np.argmax(probs, axis=1)) for probs in model_probs_list]
+    weights = np.array(individual_accs) / np.sum(individual_accs)
+    
+    mu = calculate_fuzzy_measures(num_models, weights)
+    model_ids = list(range(num_models))
+    
     predictions = []
+    correct = 0
     fusion_details = []
-
     for i in range(num_samples):
-        rank_sum = np.zeros((class_no, 1))
-        score_sum = np.zeros(class_no)
-
-        for probs in model_probs_list:
-            rank1 = generateRank1(probs[i], class_no)
-            rank2 = generateRank2(probs[i], class_no)
-            rank_combined = rank1 * rank2
-            rank_sum += rank_combined
-            score_sum += probs[i]
-
-        score_avg = score_sum / num_models
-        fused_score = (rank_sum.T) * (1 - score_avg)
-        cls = np.argmin(rank_sum)
+        sample_probs = np.array([probs[i] for probs in model_probs_list])  # (num_models, 2)
+        fused_scores = np.zeros(2)
+        for c in range(2):
+            class_probs = sample_probs[:, c]
+            fused_scores[c] = choquet_integral(class_probs, mu, model_ids)
+        cls = np.argmax(fused_scores)
         predictions.append(cls)
-
+        
         fusion_details.append({
             'sample_idx': i,
-            'rank_sum': rank_sum.flatten(),
+            'fused_scores': fused_scores,
             'prediction': cls,
             'true_label': labels[i]
         })
-
+        
         if cls == labels[i]:
             correct += 1
-
+    
     accuracy = correct / num_samples
     return np.array(predictions), accuracy, fusion_details
 
@@ -182,29 +190,15 @@ def print_detailed_results(labels, predictions, model_probs_list):
     print(f"✅ Fake correctly classified: {cm[1,1]} / {cm[1,0] + cm[1,1]}")
     print(f"❌ Fake misclassified as Real: {cm[1,0]} / {cm[1,0] + cm[1,1]}")
     
-    print("\n" + "="*70)
-    print("Individual Model Performance:")
-    print("="*70)
-    individual_accs = []
-    for idx, probs in enumerate(model_probs_list):
-        preds = np.argmax(probs, axis=1)
-        acc = (preds == labels).mean()
-        individual_accs.append(acc)
-        print(f"Model {idx+1} Accuracy: {acc*100:.2f}%")
-    
     ensemble_acc = (predictions == labels).mean()
-    best_single = max(individual_accs)
-    improvement = (ensemble_acc - best_single) * 100
     print(f"\n{'='*70}")
-    print(f"Fuzzy Ensemble Accuracy: {ensemble_acc*100:.2f}%")
-    print(f"Best Single Model Accuracy: {best_single*100:.2f}%")
-    print(f"Improvement over best single model: {improvement:+.2f}%")
+    print(f"Choquet Fuzzy Ensemble Accuracy: {ensemble_acc*100:.2f}%")
     print(f"{'='*70}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Flexible Fuzzy Ensemble for N models",
+        description="Flexible Choquet Fuzzy Ensemble for N models",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -234,8 +228,8 @@ Examples:
                         help='Batch size for inference (default: 256)')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers (default: 4)')
-    parser.add_argument('--output_prefix', type=str, default='fuzzy_ensemble',
-                        help='Prefix for output files (default: fuzzy_ensemble)')
+    parser.add_argument('--output_prefix', type=str, default='choquet_fuzzy_ensemble',
+                        help='Prefix for output files (default: choquet_fuzzy_ensemble)')
     parser.add_argument('--input_size', type=int, default=224,
                         help='Input image size - must match fine-tuning size (default: 224)')
     parser.add_argument('--norm_mean', type=float, nargs=3, default=[0.485, 0.456, 0.406],
@@ -251,7 +245,7 @@ Examples:
     
     num_models = len(args.model_paths)
     print(f"\n{'='*70}")
-    print(f"🎯 Fuzzy Ensemble with {num_models} Models")
+    print(f"🎯 Choquet Fuzzy Ensemble with {num_models} Models")
     print(f"{'='*70}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -305,31 +299,12 @@ Examples:
             labels = lbls
 
     print("\n" + "="*70)
-    print(f"ensembeling {num_models} models with fuzzy logic...")
+    print(f"ensembeling {num_models} models with Choquet fuzzy logic...")
     print("="*70)
-    final_predictions, accuracy, fusion_details = fuzzy_ensemble_multi(all_probs, labels)
+    final_predictions, accuracy, fusion_details = choquet_fuzzy_ensemble(all_probs, labels)
 
-    print(f"\naccuracy of fuzzy ensemble: {accuracy * 100:.2f}%")
+    print(f"\naccuracy of Choquet fuzzy ensemble: {accuracy * 100:.2f}%")
     print_detailed_results(labels, final_predictions, all_probs)
-
-    # اعمال Weighted Ensemble به عنوان روش جایگزین
-    print("\n" + "="*70)
-    print("applying Weighted Average Ensemble...")
-    print("="*70)
-    
-    individual_accs = [accuracy_score(labels, np.argmax(probs, axis=1)) for probs in all_probs]
-    weights = np.array(individual_accs) / np.sum(individual_accs)
-
-    fused_probs = np.zeros_like(all_probs[0])
-    for i, probs in enumerate(all_probs):
-        fused_probs += weights[i] * probs
-
-    weighted_predictions = np.argmax(fused_probs, axis=1)
-    weighted_accuracy = accuracy_score(labels, weighted_predictions)
-    print(f"Weighted Ensemble Accuracy: {weighted_accuracy * 100:.2f}%")
-    
-    # نمایش نتایج دقیق برای weighted ensemble
-    print_detailed_results(labels, weighted_predictions, all_probs)
 
     results = {
         'final_predictions': final_predictions,
@@ -343,10 +318,7 @@ Examples:
             'total_samples': len(labels),
             'real_samples': int((labels == 0).sum()),
             'fake_samples': int((labels == 1).sum())
-        },
-        # افزودن نتایج weighted
-        'weighted_predictions': weighted_predictions,
-        'weighted_accuracy': weighted_accuracy
+        }
     }
     
     output_pt = f'{args.output_prefix}_{num_models}models_results.pt'
@@ -355,9 +327,7 @@ Examples:
     df_dict = {
         'true_label': labels,
         'fuzzy_prediction': final_predictions,
-        'is_correct_fuzzy': (final_predictions == labels).astype(int),
-        'weighted_prediction': weighted_predictions,
-        'is_correct_weighted': (weighted_predictions == labels).astype(int)
+        'is_correct': (final_predictions == labels).astype(int)
     }
     
     for i, probs in enumerate(all_probs):
