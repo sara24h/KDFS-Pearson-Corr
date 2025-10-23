@@ -20,7 +20,7 @@ class WildDeepfakeDataset(Dataset):
             real_files = [f for f in os.listdir(real_path) if f.endswith(('.jpg', '.jpeg', '.png'))]
             for fname in real_files:
                 self.images.append(os.path.join(real_path, fname))
-                self.labels.append(1)
+                self.labels.append(1)  # 1 for real
         else:
             raise FileNotFoundError(f"real folder not found: {real_path}")
         
@@ -28,7 +28,7 @@ class WildDeepfakeDataset(Dataset):
             fake_files = [f for f in os.listdir(fake_path) if f.endswith(('.jpg', '.jpeg', '.png'))]
             for fname in fake_files:
                 self.images.append(os.path.join(fake_path, fname))
-                self.labels.append(0)
+                self.labels.append(0)  # 0 for fake
         else:
             raise FileNotFoundError(f"fake folder not found: {fake_path}")
         
@@ -98,7 +98,7 @@ def get_predictions(model, dataloader, device):
             if probs_fake.dim() == 0:
                 probs_fake = probs_fake.unsqueeze(0)
             probs_real = 1 - probs_fake
-            probs_2class = torch.stack([probs_real, probs_fake], dim=1)
+            probs_2class = torch.stack([probs_fake, probs_real], dim=1)  # index 0: fake (label 0), 1: real (label 1)
             all_probs.append(probs_2class.cpu().numpy())
             all_labels.append(labels.numpy())
     all_probs = np.vstack(all_probs)
@@ -106,27 +106,11 @@ def get_predictions(model, dataloader, device):
     return all_probs, all_labels
 
 
-def generateRank1_gompertz(score, class_no=2):
-    rank = np.zeros([class_no, 1])
-    scores = score.reshape(-1, 1)
-    for i in range(class_no):
-        x = scores[i]
-        rank[i] = np.exp(-np.exp(-(x - 1)**2 / 2))  # Simplified Gompertz variant for deviation, adjusted to produce lower ranks for higher confidence
-    return rank
-
-def generateRank2(score, class_no=2):
-    rank = np.zeros([class_no, 1])
-    scores = score.reshape(-1, 1)
-    for i in range(class_no):
-        rank[i] = 1 - np.tanh(((scores[i] - 1) ** 2) / 2)
-    return rank
-
-
-def fuzzy_ensemble_multi(model_probs_list, labels, weights, class_no=2):
+def fuzzy_ensemble_multi(model_probs_list, labels, class_no=2):
     """
-    Perform fuzzy weighted rank fusion over N models (N >= 2) using Gompertz function.
-    model_probs_list: list of numpy arrays, each of shape (N_samples, 2)
-    weights: array of weights for each model, normalized based on individual accuracies
+    Perform fuzzy rank-based ensemble using Gompertz function as described in the paper.
+    model_probs_list: list of numpy arrays, each of shape (N_samples, class_no), with probs summing to 1 per sample.
+    Assumes class 0: fake (label 0), class 1: real (label 1)
     """
     num_models = len(model_probs_list)
     num_samples = len(labels)
@@ -135,28 +119,41 @@ def fuzzy_ensemble_multi(model_probs_list, labels, weights, class_no=2):
     fusion_details = []
 
     for i in range(num_samples):
-        rank_sum = np.zeros((class_no, 1))
-        score_sum = np.zeros(class_no)
-
-        for mdl_idx, probs in enumerate(model_probs_list):
-            rank1 = generateRank1_gompertz(probs[i], class_no)
-            rank2 = generateRank2(probs[i], class_no)
-            rank_combined = rank1 * rank2
-            rank_sum += rank_combined * weights[mdl_idx]
-            score_sum += probs[i]
-
-        score_avg = score_sum / num_models
-        fused_score = (rank_sum.T) * (1 - score_avg)
-        cls = np.argmin(rank_sum)
+        frs = np.zeros(class_no)
+        ccfs = np.zeros(class_no)
+        for c in range(class_no):
+            rank_sum = 0.0
+            cf_sum = 0.0
+            for m in range(num_models):
+                cf = model_probs_list[m][i, c]
+                # Compute fuzzy rank using re-parameterized Gompertz function
+                r = 1 - np.exp(-np.exp(-2.0 * cf))
+                # Determine if this class is the top predicted class for this model (k=1 for binary)
+                top_class = np.argmax(model_probs_list[m][i])
+                if c == top_class:
+                    rank_sum += r
+                    cf_sum += cf
+                else:
+                    rank_sum += 0.632  # Penalty for rank
+                    cf_sum += 0.0     # Penalty for confidence
+            frs[c] = rank_sum
+            ccfs[c] = cf_sum / num_models  # Average confidence (with penalties)
+        
+        # Final decision score
+        fds = frs * ccfs
+        cls = np.argmin(fds)  # Lowest FDS is the best class
+        
         predictions.append(cls)
-
+        
         fusion_details.append({
             'sample_idx': i,
-            'rank_sum': rank_sum.flatten(),
+            'frs': frs.flatten(),
+            'ccfs': ccfs.flatten(),
+            'fds': fds.flatten(),
             'prediction': cls,
             'true_label': labels[i]
         })
-
+        
         if cls == labels[i]:
             correct += 1
 
@@ -167,21 +164,21 @@ def fuzzy_ensemble_multi(model_probs_list, labels, weights, class_no=2):
 def print_detailed_results(labels, predictions, model_probs_list):
     from sklearn.metrics import classification_report, confusion_matrix
     print("\n" + "="*70)
-    print(classification_report(labels, predictions, target_names=['Real', 'Fake'], digits=4))
+    print(classification_report(labels, predictions, target_names=['Fake', 'Real'], digits=4))
     
     print("\n" + "="*70)
     print("confusion matrix:")
     print("="*70)
     cm = confusion_matrix(labels, predictions)
-    print(f"\n{'':15} {'Predicted Real':>15} {'Predicted Fake':>15}")
-    print(f"{'Actual Real':15} {cm[0,0]:>15} {cm[0,1]:>15}")
-    print(f"{'Actual Fake':15} {cm[1,0]:>15} {cm[1,1]:>15}")
+    print(f"\n{'':15} {'Predicted Fake':>15} {'Predicted Real':>15}")
+    print(f"{'Actual Fake':15} {cm[0,0]:>15} {cm[0,1]:>15}")
+    print(f"{'Actual Real':15} {cm[1,0]:>15} {cm[1,1]:>15}")
     
     print("\n" + "="*70)
-    print(f"✅ Real correctly classified: {cm[0,0]} / {cm[0,0] + cm[0,1]}")
-    print(f"❌ Real misclassified as Fake: {cm[0,1]} / {cm[0,0] + cm[0,1]}")
-    print(f"✅ Fake correctly classified: {cm[1,1]} / {cm[1,0] + cm[1,1]}")
-    print(f"❌ Fake misclassified as Real: {cm[1,0]} / {cm[1,0] + cm[1,1]}")
+    print(f"✅ Fake correctly classified: {cm[0,0]} / {cm[0,0] + cm[0,1]}")
+    print(f"❌ Fake misclassified as Real: {cm[0,1]} / {cm[0,0] + cm[0,1]}")
+    print(f"✅ Real correctly classified: {cm[1,1]} / {cm[1,0] + cm[1,1]}")
+    print(f"❌ Real misclassified as Fake: {cm[1,0]} / {cm[1,0] + cm[1,1]}")
     
     print("\n" + "="*70)
     print("Individual Model Performance:")
@@ -235,8 +232,8 @@ Examples:
                         help='Batch size for inference (default: 256)')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers (default: 4)')
-    parser.add_argument('--output_prefix', type=str, default='weighted_gompertz_fuzzy_ensemble',
-                        help='Prefix for output files (default: weighted_gompertz_fuzzy_ensemble)')
+    parser.add_argument('--output_prefix', type=str, default='fuzzy_ensemble',
+                        help='Prefix for output files (default: fuzzy_ensemble)')
     parser.add_argument('--input_size', type=int, default=224,
                         help='Input image size - must match fine-tuning size (default: 224)')
     parser.add_argument('--norm_mean', type=float, nargs=3, default=[0.485, 0.456, 0.406],
@@ -252,7 +249,7 @@ Examples:
     
     num_models = len(args.model_paths)
     print(f"\n{'='*70}")
-    print(f"🎯 Fuzzy Ensemble with {num_models} Models")
+    print(f"🎯 Fuzzy Ensemble with {num_models} Models (Paper Method)")
     print(f"{'='*70}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -305,18 +302,10 @@ Examples:
         if labels is None:
             labels = lbls
 
-    # Calculate individual accuracies for weights
-    individual_accs = []
-    for probs in all_probs:
-        preds = np.argmax(probs, axis=1)
-        acc = (preds == labels).mean()
-        individual_accs.append(acc)
-    weights = np.array(individual_accs) / np.sum(individual_accs)
-
     print("\n" + "="*70)
-    print(f"ensembeling {num_models} models with weighted Gompertz fuzzy rank fusion...")
+    print(f"ensembeling {num_models} models with fuzzy logic (Gompertz-based)...")
     print("="*70)
-    final_predictions, accuracy, fusion_details = fuzzy_ensemble_multi(all_probs, labels, weights=weights)
+    final_predictions, accuracy, fusion_details = fuzzy_ensemble_multi(all_probs, labels)
 
     print(f"\naccuracy of fuzzy ensemble: {accuracy * 100:.2f}%")
     print_detailed_results(labels, final_predictions, all_probs)
@@ -331,8 +320,8 @@ Examples:
         'fusion_details': fusion_details[:100],
         'dataset_info': {
             'total_samples': len(labels),
-            'real_samples': int((labels == 0).sum()),
-            'fake_samples': int((labels == 1).sum())
+            'real_samples': int((labels == 1).sum()),  # Adjusted for label 1=real
+            'fake_samples': int((labels == 0).sum())
         }
     }
     
@@ -346,8 +335,8 @@ Examples:
     }
     
     for i, probs in enumerate(all_probs):
-        df_dict[f'model{i+1}_prob_real'] = probs[:, 0]
-        df_dict[f'model{i+1}_prob_fake'] = probs[:, 1]
+        df_dict[f'model{i+1}_prob_fake'] = probs[:, 0]  # class 0: fake
+        df_dict[f'model{i+1}_prob_real'] = probs[:, 1]  # class 1: real
 
     df_results = pd.DataFrame(df_dict)
     output_csv = f'{args.output_prefix}_{num_models}models_results.csv'
