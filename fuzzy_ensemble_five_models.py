@@ -85,7 +85,6 @@ def load_pruned_model(checkpoint_path, device):
     model.eval()
     return model
 
-
 def get_predictions(model, dataloader, device):
     all_probs = []
     all_labels = []
@@ -97,14 +96,14 @@ def get_predictions(model, dataloader, device):
             probs_fake = torch.sigmoid(outputs).squeeze()
             if probs_fake.dim() == 0:
                 probs_fake = probs_fake.unsqueeze(0)
-            probs_real = 1 - probs_fake
-            probs_2class = torch.stack([probs_fake, probs_real], dim=1)  # index 0: fake (label 0), 1: real (label 1)
+            probs_real = torch.sigmoid(outputs).squeeze()
+            probs_fake = 1 - probs_real
+            probs_2class = torch.stack([probs_fake, probs_real], dim=1)  # 0: fake, 1: real
             all_probs.append(probs_2class.cpu().numpy())
             all_labels.append(labels.numpy())
     all_probs = np.vstack(all_probs)
     all_labels = np.concatenate(all_labels)
     return all_probs, all_labels
-
 
 def fuzzy_ensemble_multi(model_probs_list, labels, class_no=2):
     """
