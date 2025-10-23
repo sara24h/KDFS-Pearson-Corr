@@ -11,6 +11,8 @@ from tqdm import tqdm
 import pandas as pd
 from sklearn.metrics import accuracy_score
 from itertools import chain, combinations
+from scipy.optimize import minimize
+from sklearn.model_selection import train_test_split
 
 class WildDeepfakeDataset(Dataset):
     def __init__(self, real_path, fake_path, transform=None):
@@ -111,19 +113,6 @@ def get_predictions(model, dataloader, device):
 def all_subsets(elements):
     return chain(*[combinations(elements, i) for i in range(len(elements) + 1)])
 
-def calculate_fuzzy_measures(num_models, model_weights):
-    mu = {(): 0.0}
-    model_ids = list(range(num_models))
-    subsets = list(all_subsets(model_ids))[1:]  # Exclude empty
-    # Simple additive measures based on weights
-    for s in subsets:
-        mu[s] = sum(model_weights[i] for i in s)
-    # Normalize to [0,1]
-    max_mu = mu[tuple(model_ids)]
-    for s in mu:
-        mu[s] /= max_mu
-    return mu
-
 def choquet_integral(probs, mu, model_ids):
     sorted_idx = np.argsort(probs)  # Ascending
     sorted_probs = probs[sorted_idx]
@@ -136,13 +125,54 @@ def choquet_integral(probs, mu, model_ids):
         prev_mu = current_mu
     return integral
 
-def choquet_fuzzy_ensemble(model_probs_list, labels):
+def optimize_fuzzy_measures(num_models, probs_list, labels):
+    # Split to train/val for measure optimization
+    probs_train, probs_val, labels_train, labels_val = train_test_split(probs_list, labels, test_size=0.2, random_state=42)
+    probs_train = [np.array(p) for p in zip(*probs_train)]  # Transpose to list of arrays
+    probs_val = [np.array(p) for p in zip(*probs_val)]
+    
+    model_ids = list(range(num_models))
+    subsets = list(all_subsets(model_ids))[1:]  # Exclude empty
+    
+    def objective(mu_params):
+        mu = {(): 0.0}
+        for i, s in enumerate(subsets):
+            mu[s] = mu_params[i]
+        
+        # Penalty for non-monotonicity
+        penalty = 0
+        for s in subsets:
+            for t in subsets:
+                if set(s).issubset(set(t)) and mu.get(s, 0) > mu.get(t, 0):
+                    penalty += 1  # Simple penalty
+        
+        # Compute accuracy on train
+        train_preds = []
+        for i in range(len(labels_train)):
+            sample_probs = np.array([p[i] for p in probs_train])  # (num_models, 2)
+            fused = np.zeros(2)
+            for c in range(2):
+                class_probs = sample_probs[:, c]
+                fused[c] = choquet_integral(class_probs, mu, model_ids)
+            train_preds.append(np.argmax(fused))
+        
+        acc = accuracy_score(labels_train, train_preds)
+        return -acc + penalty  # Minimize negative acc + penalty
+    
+    # Bounds [0,1] and initial
+    bounds = [(0, 1)] * len(subsets)
+    init_mu = np.random.uniform(0, 1, len(subsets))
+    
+    res = minimize(objective, init_mu, bounds=bounds, method='L-BFGS-B')
+    optimized_mu = {(): 0.0}
+    for i, s in enumerate(subsets):
+        optimized_mu[s] = res.x[i]
+    
+    return optimized_mu
+
+def choquet_fuzzy_ensemble(model_probs_list, labels, mu):
     num_models = len(model_probs_list)
     num_samples = len(labels)
-    individual_accs = [accuracy_score(labels, np.argmax(probs, axis=1)) for probs in model_probs_list]
-    weights = np.array(individual_accs) / np.sum(individual_accs)
-    
-    mu = calculate_fuzzy_measures(num_models, weights)
     model_ids = list(range(num_models))
     
     predictions = []
@@ -198,7 +228,7 @@ def print_detailed_results(labels, predictions, model_probs_list):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Flexible Choquet Fuzzy Ensemble for N models",
+        description="Flexible Choquet Fuzzy Ensemble with Optimization for N models",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -299,11 +329,14 @@ Examples:
             labels = lbls
 
     print("\n" + "="*70)
-    print(f"ensembeling {num_models} models with Choquet fuzzy logic...")
+    print(f"optimizing fuzzy measures...")
+    mu = optimize_fuzzy_measures(num_models, all_probs, labels)
+    
+    print(f"ensembeling {num_models} models with optimized Choquet fuzzy logic...")
     print("="*70)
-    final_predictions, accuracy, fusion_details = choquet_fuzzy_ensemble(all_probs, labels)
+    final_predictions, accuracy, fusion_details = choquet_fuzzy_ensemble(all_probs, labels, mu)
 
-    print(f"\naccuracy of Choquet fuzzy ensemble: {accuracy * 100:.2f}%")
+    print(f"\naccuracy of optimized Choquet fuzzy ensemble: {accuracy * 100:.2f}%")
     print_detailed_results(labels, final_predictions, all_probs)
 
     results = {
