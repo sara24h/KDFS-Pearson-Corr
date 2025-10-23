@@ -130,7 +130,7 @@ def fuzzy_ensemble_multi(model_probs_list, labels, class_no=2):
                     rank_sum += r
                     cf_sum += cf
                 else:
-                    rank_sum += 0.632  # Penalty for rank
+                    rank_sum += 0.5  # Penalty for rank
                     cf_sum += 0.0     # Penalty for confidence
             frs[c] = rank_sum
             ccfs[c] = cf_sum / num_models  # Average confidence (with penalties)
