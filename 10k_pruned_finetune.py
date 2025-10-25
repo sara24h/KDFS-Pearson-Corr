@@ -300,7 +300,7 @@ def main(args):
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     if global_rank == 0:
-        print(f"✅ Model loaded and configured")
+        print(f" Model loaded and configured")
         print(f"   - Total parameters: {total_params:,}")
         print(f"   - Trainable parameters: {trainable_params:,}")
         print(f"   - Trainable layers: layer4, fc")
@@ -344,8 +344,8 @@ def main(args):
             if global_rank == 0:
                 print(f"\n📍 Epoch {epoch+1}/{NUM_EPOCHS}")
                 #print(f"   LR (layer3): {optimizer.param_groups[0]['lr']:.7f}")
-                print(f"   LR (layer4): {optimizer.param_groups[1]['lr']:.7f}")
-                print(f"   LR (fc):    {optimizer.param_groups[2]['lr']:.7f}")
+                print(f"   LR (layer4): {optimizer.param_groups[0]['lr']:.7f}")
+                print(f"   LR (fc):    {optimizer.param_groups[1]['lr']:.7f}")
                 print("-" * 70)
 
             train_loss, train_acc = train_epoch(
@@ -370,13 +370,13 @@ def main(args):
             if os.path.exists(best_model_path):
                 model.module.load_state_dict(torch.load(best_model_path))
             else:
-                print("⚠️ No best model found. Using last epoch weights.")
+                print("No best model found. Using last epoch weights.")
 
         test_loss, test_acc = validate(model, test_loader, criterion, DEVICE, writer, NUM_EPOCHS, global_rank)
 
         if global_rank == 0:
             print("\n" + "=" * 70)
-            print("🧪 Final test and saving inference-ready model")
+            print("Final test and saving inference-ready model")
             print("=" * 70)
             print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.2f}%")
 
