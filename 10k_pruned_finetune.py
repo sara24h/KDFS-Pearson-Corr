@@ -19,10 +19,8 @@ from torch.amp import autocast, GradScaler
 import argparse
 from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
 
-
-# === آمار نرمال‌سازی هر دیتاست ===
-WILD_MEAN = [0.4414, 0.3448, 0.3159]
-WILD_STD  = [0.1854, 0.1623, 0.1562]
+WILD_MEAN = [0.4415, 0.3450, 0.3161]
+WILD_STD  = [0.2400, 0.2104, 0.2132]
 
 REALVSFAKE_MEAN = [0.5256, 0.4289, 0.3770]
 REALVSFAKE_STD  = [0.2414, 0.2127, 0.2079]
@@ -292,8 +290,8 @@ def main(args):
         param.requires_grad = False
 
     # ✅ فعال‌سازی لایه‌های مورد نظر برای فاین‌تون
-    for param in model.layer3.parameters():  # غیرفعال شده طبق کد قبلی
-        param.requires_grad = True
+    # for param in model.layer3.parameters():  # غیرفعال شده طبق کد قبلی
+    #     param.requires_grad = True
     for param in model.layer4.parameters():
         param.requires_grad = True
     for param in model.fc.parameters():
