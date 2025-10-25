@@ -27,17 +27,17 @@ REALVSFAKE_STD  = [0.2414, 0.2127, 0.2079]
 
 
 def get_transforms(dataset_name, is_train=True):
-    """بازگرداندن ترنسفورم مناسب بر اساس دیتاست و حالت آموزش/ارزیابی."""
+    """Return the appropriate transforms based on dataset and train/eval mode."""
     if dataset_name == "wild":
         mean, std = WILD_MEAN, WILD_STD
     elif dataset_name == "realvsfake":
         mean, std = REALVSFAKE_MEAN, REALVSFAKE_STD
     else:
-        raise ValueError(f"Dataset '{dataset_name}' پشتیبانی نمی‌شود. گزینه‌های معتبر: 'wild', 'realvsfake'")
+        raise ValueError(f"Dataset '{dataset_name}' is not supported. Valid options: 'wild', 'realvsfake'")
 
     if is_train:
         return transforms.Compose([
-            transforms.Resize((256, 256)),  # تبدیل به 256x256 — همان ابعادی که مدل با آن آموزش دیده
+            transforms.Resize((256, 256)),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
             transforms.ToTensor(),
@@ -74,7 +74,7 @@ class WildDeepfakeDataset(Dataset):
               f"({sum(1 for l in self.labels if l == 1)} real, {sum(1 for l in self.labels if l == 0)} fake)")
 
     def __len__(self):
-        return len(self.images)  
+        return len(self.images)
 
     def __getitem__(self, idx):
         img_path = self.images[idx]
@@ -88,7 +88,6 @@ class WildDeepfakeDataset(Dataset):
         except Exception as e:
             print(f"❌ Error loading {img_path}: {e}")
             return torch.zeros(3, 256, 256), torch.tensor(label, dtype=torch.float32)
-
 
 def create_dataloaders(
     train_real_path,
@@ -244,19 +243,18 @@ def main(args):
 
     if global_rank == 0:
         print("=" * 70)
-        print("🚀 شروع Fine-tuning مدل Pruned ResNet50 — Layer3 + Layer4 + FC (BCE Loss)")
-        print(f"   تعداد گرافیک: {world_size}")
-        print(f"   Batch Size کل: {BATCH_SIZE}")
+        print("    Starting fine-tuning of Pruned ResNet50 — Layer3 + Layer4 + FC (BCE Loss)")
+        print(f"   Number of GPUs: {world_size}")
+        print(f"   Total Batch Size: {BATCH_SIZE}")
         print(f"   Gradient Accumulation Steps: {ACCUM_STEPS}")
         print(f"   Effective Batch Size: {BATCH_SIZE * ACCUM_STEPS}")
-        print(f"   تعداد Epochs: {NUM_EPOCHS}")
+        print(f"   Number of Epochs: {NUM_EPOCHS}")
         print(f"   Learning Rate: {BASE_LR}")
         print(f"   Weight Decay: {WEIGHT_DECAY}")
         print(f"   Dataset: {args.dataset}")
-        print(f"   Input Size: 256×256 (سازگار با مدل آموزش‌دیده)")
+        print(f"   Input Size: 256×256 (compatible with the pretrained model)")
         print("=" * 70)
 
-    # 🗂️ مسیرهای دیتاست بر اساس انتخاب کاربر
     if args.dataset == "wild":
         base_path = "/kaggle/input/wild-deepfake"
         train_real = os.path.join(base_path, "train/real")
@@ -274,9 +272,8 @@ def main(args):
         test_real = os.path.join(base_path, "test/test_real")
         test_fake = os.path.join(base_path, "test/test_fake")
     else:
-        raise ValueError("Dataset باید یکی از 'wild' یا 'realvsfake' باشد.")
+        raise ValueError("Dataset must be either 'wild' or 'realvsfake'.")
 
-    # 🔁 بارگذاری مدل
     input_model_path = '/kaggle/input/10k-pruned-model/pytorch/default/1/10k_final (1).pt'
     checkpoint = torch.load(input_model_path, map_location=DEVICE)
     masks_detached = [m.detach().clone() if m is not None else None for m in checkpoint['masks']]
@@ -285,12 +282,12 @@ def main(args):
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(DEVICE)
 
-    # ❌ فریز کردن تمام لایه‌ها
+    # ❌ Freeze all layers
     for param in model.parameters():
         param.requires_grad = False
 
-    # ✅ فعال‌سازی لایه‌های مورد نظر برای فاین‌تون
-    # for param in model.layer3.parameters():  # غیرفعال شده طبق کد قبلی
+    # ✅ Enable the desired layers for fine-tuning
+    # for param in model.layer3.parameters():  # commented out based on previous code
     #     param.requires_grad = True
     for param in model.layer4.parameters():
         param.requires_grad = True
@@ -303,13 +300,13 @@ def main(args):
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     if global_rank == 0:
-        print(f"✅ مدل لود و تنظیم شد")
-        print(f"   - تعداد کل پارامترها: {total_params:,}")
-        print(f"   - تعداد پارامترهای قابل آموزش: {trainable_params:,}")
-        print(f"   - لایه‌های قابل آموزش: layer4, fc")
+        print(f"✅ Model loaded and configured")
+        print(f"   - Total parameters: {total_params:,}")
+        print(f"   - Trainable parameters: {trainable_params:,}")
+        print(f"   - Trainable layers: layer4, fc")
 
     if global_rank == 0:
-        print("\n📊 آماده‌سازی DataLoaders...")
+        print("\n📊 Preparing DataLoaders...")
 
     train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler = create_dataloaders(
         train_real_path=train_real,
@@ -326,7 +323,7 @@ def main(args):
     criterion = nn.BCEWithLogitsLoss()
 
     optimizer = optim.AdamW([
-        {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.3, 'weight_decay': WEIGHT_DECAY * 1.5},
+        #{'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.3, 'weight_decay': WEIGHT_DECAY * 1.5},
         {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 0.6, 'weight_decay': WEIGHT_DECAY * 1.5},
         {'params': model.module.fc.parameters(),     'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY * 2.5}
     ])
@@ -346,7 +343,7 @@ def main(args):
 
             if global_rank == 0:
                 print(f"\n📍 Epoch {epoch+1}/{NUM_EPOCHS}")
-                print(f"   LR (layer3): {optimizer.param_groups[0]['lr']:.7f}")
+                #print(f"   LR (layer3): {optimizer.param_groups[0]['lr']:.7f}")
                 print(f"   LR (layer4): {optimizer.param_groups[1]['lr']:.7f}")
                 print(f"   LR (fc):    {optimizer.param_groups[2]['lr']:.7f}")
                 print("-" * 70)
@@ -364,11 +361,11 @@ def main(args):
                 if val_acc > best_val_acc:
                     best_val_acc = val_acc
                     torch.save(model.module.state_dict(), best_model_path)
-                    print(f"✅ بهترین مدل ذخیره شد با Val Acc: {val_acc:.2f}%")
+                    print(f"*** Best model saved with Val Acc: {val_acc:.2f}%***")
 
             scheduler.step()
 
-        # 🔍 تست نهایی
+        # 🔍 Final testing
         if global_rank == 0:
             if os.path.exists(best_model_path):
                 model.module.load_state_dict(torch.load(best_model_path))
@@ -379,7 +376,7 @@ def main(args):
 
         if global_rank == 0:
             print("\n" + "=" * 70)
-            print("🧪 تست نهایی و ذخیره مدل inference-ready")
+            print("🧪 Final test and saving inference-ready model")
             print("=" * 70)
             print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.2f}%")
 
@@ -411,13 +408,13 @@ def main(args):
             inference_save_path = '/kaggle/working/final_pruned_finetuned_inference_ready.pt'
             torch.save(checkpoint_inference, inference_save_path)
 
-            print("✅ مدل هرس‌شده با موفقیت ذخیره شد!")
-            print(f"تعداد پارامترها: {total_params_inf:,}")
-            print(f"بهترین Val Acc: {best_val_acc:.2f}%")
+            print("*** Pruned model successfully saved!***")
+            print(f"Total parameters: {total_params_inf:,}")
+            print(f"Best Val Acc: {best_val_acc:.2f}%")
             print(f"Test Acc: {test_acc:.2f}%")
 
             file_size_mb = os.path.getsize(inference_save_path) / (1024 * 1024)
-            print(f"حجم فایل: {file_size_mb:.2f} MB")
+            print(f"File size: {file_size_mb:.2f} MB")
 
             if writer:
                 writer.close()
