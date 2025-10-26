@@ -1,25 +1,42 @@
-import os
 import json
+import os
+import random
+import time
+from datetime import datetime
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
 from PIL import Image
 from tqdm import tqdm
 from torch.amp import autocast
 import argparse
-from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
+from model.pruned_model.Resnet_test import ResNet_50_pruned_hardfakevsreal
 
 WILD_MEAN = [0.4415, 0.3450, 0.3161]
 WILD_STD  = [0.2400, 0.2104, 0.2132]
 
-def get_test_transforms():
-    """Return test-time transforms for Wild dataset."""
+REALVSFAKE_MEAN = [0.5256, 0.4289, 0.3770]
+REALVSFAKE_STD  = [0.2414, 0.2127, 0.2079]
+
+
+def get_transforms(dataset_name):
+    """Return the appropriate transforms for evaluation."""
+    if dataset_name == "wild":
+        mean, std = WILD_MEAN, WILD_STD
+    elif dataset_name == "realvsfake":
+        mean, std = REALVSFAKE_MEAN, REALVSFAKE_STD
+    else:
+        raise ValueError(f"Dataset '{dataset_name}' is not supported. Valid options: 'wild', 'realvsfake'")
+
     return transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=WILD_MEAN, std=WILD_STD)
+        transforms.Normalize(mean=mean, std=std)
     ])
 
 
@@ -61,176 +78,266 @@ class WildDeepfakeDataset(Dataset):
             return torch.zeros(3, 256, 256), torch.tensor(label, dtype=torch.float32)
 
 
+def create_dataloader(real_path, fake_path, dataset_name, batch_size=128, num_workers=4):
+    """Create a single dataloader for testing."""
+    transform = get_transforms(dataset_name)
+    dataset = WildDeepfakeDataset(real_path, fake_path, transform=transform)
+    sampler = DistributedSampler(dataset, shuffle=False)
+    loader = DataLoader(
+        dataset, 
+        batch_size=batch_size, 
+        sampler=sampler,
+        num_workers=num_workers,
+        prefetch_factor=2, 
+        pin_memory=True, 
+        drop_last=False
+    )
+    return loader, sampler
+
+
 @torch.no_grad()
-def test_model(model, loader, device):
-    """Test the model and calculate metrics."""
+def evaluate_model(model, loader, criterion, device, rank=0):
+    """Evaluate model and return detailed metrics."""
     model.eval()
     
     all_preds = []
     all_labels = []
     all_probs = []
+    running_loss = 0.0
     
-    correct = 0
-    total = 0
-    
-    true_positives = 0
-    true_negatives = 0
-    false_positives = 0
-    false_negatives = 0
-    
-    print("\n🔍 Starting inference...")
-    for inputs, labels in tqdm(loader, desc="Testing"):
-        inputs = inputs.to(device)
-        labels_np = labels.numpy()
-        labels = labels.to(device).unsqueeze(1)
+    for inputs, labels in tqdm(loader, desc="Testing", disable=rank != 0):
+        inputs, labels = inputs.to(device), labels.to(device)
+        labels_unsqueezed = labels.unsqueeze(1)
         
-        with autocast(device_type='cuda', dtype=torch.float16):
+        with autocast(device_type='cuda', dtype=torch.bfloat16):
             outputs, _ = model(inputs)
+            loss = criterion(outputs, labels_unsqueezed)
         
-        probs = torch.sigmoid(outputs).cpu().numpy()
-        preds = (probs > 0.5).astype(float)
+        running_loss += loss.item()
+        probs = torch.sigmoid(outputs).squeeze()
+        preds = (probs > 0.5).float()
         
-        all_probs.extend(probs.flatten())
-        all_preds.extend(preds.flatten())
-        all_labels.extend(labels_np)
-        
-        # Calculate metrics
-        for pred, label in zip(preds.flatten(), labels_np):
-            if pred == 1 and label == 1:
-                true_positives += 1
-            elif pred == 0 and label == 0:
-                true_negatives += 1
-            elif pred == 1 and label == 0:
-                false_positives += 1
-            elif pred == 0 and label == 1:
-                false_negatives += 1
-        
-        correct += (preds.flatten() == labels_np).sum()
-        total += len(labels_np)
+        all_preds.extend(preds.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+        all_probs.extend(probs.cpu().numpy())
+    
+    # Convert to numpy arrays
+    all_preds = np.array(all_preds)
+    all_labels = np.array(all_labels)
+    all_probs = np.array(all_probs)
     
     # Calculate metrics
-    accuracy = 100.0 * correct / total
+    accuracy = 100.0 * (all_preds == all_labels).sum() / len(all_labels)
+    avg_loss = running_loss / len(loader)
     
-    precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
-    recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
-    f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+    # Confusion matrix
+    tp = ((all_preds == 1) & (all_labels == 1)).sum()
+    tn = ((all_preds == 0) & (all_labels == 0)).sum()
+    fp = ((all_preds == 1) & (all_labels == 0)).sum()
+    fn = ((all_preds == 0) & (all_labels == 1)).sum()
     
-    specificity = true_negatives / (true_negatives + false_positives) if (true_negatives + false_positives) > 0 else 0
+    # Precision, Recall, F1
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
     
-    results = {
+    # Specificity (True Negative Rate)
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+    
+    metrics = {
+        'loss': avg_loss,
         'accuracy': accuracy,
         'precision': precision * 100,
         'recall': recall * 100,
-        'f1_score': f1_score * 100,
+        'f1_score': f1 * 100,
         'specificity': specificity * 100,
-        'true_positives': true_positives,
-        'true_negatives': true_negatives,
-        'false_positives': false_positives,
-        'false_negatives': false_negatives,
-        'total_samples': total,
-        'correct_predictions': correct
+        'confusion_matrix': {
+            'TP': int(tp), 'TN': int(tn),
+            'FP': int(fp), 'FN': int(fn)
+        }
     }
     
-    return results, all_preds, all_labels, all_probs
+    # Aggregate across GPUs
+    for key in ['loss', 'accuracy', 'precision', 'recall', 'f1_score', 'specificity']:
+        value_tensor = torch.tensor(metrics[key]).to(device)
+        dist.all_reduce(value_tensor, op=dist.ReduceOp.SUM)
+        metrics[key] = value_tensor.item() / dist.get_world_size()
+    
+    return metrics
+
+
+def setup_ddp(seed):
+    os.environ['TORCH_NCCL_TIMEOUT_MS'] = '1800000'
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend='nccl')
+    seed = seed + dist.get_rank()
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    return local_rank
+
+
+def cleanup_ddp():
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 
 def main(args):
-    print("=" * 70)
-    print("    Testing Pruned ResNet50 WITHOUT Fine-tuning")
-    print("    Dataset: WildDeepfake")
-    print("=" * 70)
-    
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\n🖥️  Device: {device}")
-    
+    SEED = 42
+    local_rank = setup_ddp(SEED)
+    world_size = dist.get_world_size()
+    global_rank = dist.get_rank()
+
+    DEVICE = torch.device(f"cuda:{local_rank}")
+    BATCH_SIZE_PER_GPU = args.batch_size
+
+    if global_rank == 0:
+        print("=" * 80)
+        print("        🧪 GENERALIZATION TEST - CROSS-DATASET EVALUATION")
+        print("=" * 80)
+        print(f"   📌 Source Dataset (Training): {args.source_dataset}")
+        print(f"   🎯 Target Dataset (Testing):  {args.target_dataset}")
+        print(f"   🔧 Model Path: {args.model_path}")
+        print(f"   💻 Number of GPUs: {world_size}")
+        print(f"   📦 Batch Size per GPU: {BATCH_SIZE_PER_GPU}")
+        print("=" * 80)
+
     # Load model
-    print(f"\n📦 Loading pretrained model from: {args.model_path}")
-    checkpoint = torch.load(args.model_path, map_location=device)
+    if global_rank == 0:
+        print("\n🔄 Loading model...")
     
-    masks_detached = [m.detach().clone() if m is not None else None for m in checkpoint['masks']]
-    model = ResNet_50_pruned_hardfakevsreal(masks=masks_detached)
+    checkpoint = torch.load(args.model_path, map_location=DEVICE)
+    
+    if 'masks' in checkpoint:
+        masks = checkpoint['masks']
+    else:
+        masks = None
+    
+    model = ResNet_50_pruned_hardfakevsreal(masks=masks)
     model.load_state_dict(checkpoint['model_state_dict'])
-    model = model.to(device)
-    model.eval()
+    model = model.to(DEVICE)
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank)
     
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"✅ Model loaded successfully")
-    print(f"   Total parameters: {total_params:,}")
+    if global_rank == 0:
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"✅ Model loaded successfully")
+        print(f"   Total parameters: {total_params:,}")
+        if 'best_val_acc' in checkpoint:
+            print(f"   Source dataset Val Acc: {checkpoint['best_val_acc']:.2f}%")
+
+    # Setup target dataset paths
+    if args.target_dataset == "wild":
+        base_path = "/kaggle/input/wild-deepfake"
+        test_real = os.path.join(base_path, "test/real")
+        test_fake = os.path.join(base_path, "test/fake")
+    elif args.target_dataset == "realvsfake":
+        base_path = "/kaggle/input/realvsfake/whole"
+        test_real = os.path.join(base_path, "test/test_real")
+        test_fake = os.path.join(base_path, "test/test_fake")
+    else:
+        raise ValueError("Target dataset must be either 'wild' or 'realvsfake'.")
+
+    if global_rank == 0:
+        print(f"\n📊 Loading target dataset: {args.target_dataset}")
     
-    # Prepare test dataset
-    print("\n📊 Preparing test dataset...")
-    base_path = args.data_path
-    test_real = os.path.join(base_path, "test/real")
-    test_fake = os.path.join(base_path, "test/fake")
-    
-    test_transform = get_test_transforms()
-    test_dataset = WildDeepfakeDataset(test_real, test_fake, transform=test_transform)
-    test_loader = DataLoader(
-        test_dataset, 
-        batch_size=args.batch_size, 
-        shuffle=False,
-        num_workers=args.num_workers, 
-        pin_memory=True
+    test_loader, test_sampler = create_dataloader(
+        real_path=test_real,
+        fake_path=test_fake,
+        dataset_name=args.target_dataset,
+        batch_size=BATCH_SIZE_PER_GPU,
+        num_workers=4
     )
-    
-    # Test the model
-    results, preds, labels, probs = test_model(model, test_loader, device)
-    
-    # Print results
-    print("\n" + "=" * 70)
-    print("📊 TEST RESULTS (Without Fine-tuning)")
-    print("=" * 70)
-    print(f"Accuracy:     {results['accuracy']:.2f}%")
-    print(f"Precision:    {results['precision']:.2f}%")
-    print(f"Recall:       {results['recall']:.2f}%")
-    print(f"F1-Score:     {results['f1_score']:.2f}%")
-    print(f"Specificity:  {results['specificity']:.2f}%")
-    print("\n" + "-" * 70)
-    print("Confusion Matrix:")
-    print(f"  True Positives:  {results['true_positives']}")
-    print(f"  True Negatives:  {results['true_negatives']}")
-    print(f"  False Positives: {results['false_positives']}")
-    print(f"  False Negatives: {results['false_negatives']}")
-    print(f"  Total Samples:   {results['total_samples']}")
-    print("=" * 70)
-    
-    # Save results to JSON
-    output_path = args.output_path
-    with open(output_path, 'w') as f:
-        json.dump(results, f, indent=4)
-    print(f"\n💾 Results saved to: {output_path}")
-    
-    # Optionally save predictions
-    if args.save_predictions:
-        pred_path = output_path.replace('.json', '_predictions.json')
-        pred_data = {
-            'predictions': [int(p) for p in preds],
-            'labels': [int(l) for l in labels],
-            'probabilities': [float(p) for p in probs]
-        }
-        with open(pred_path, 'w') as f:
-            json.dump(pred_data, f, indent=4)
-        print(f"💾 Predictions saved to: {pred_path}")
+
+    criterion = nn.BCEWithLogitsLoss()
+
+    try:
+        if global_rank == 0:
+            print("\n🚀 Starting evaluation on target dataset...")
+            print("-" * 80)
+        
+        test_sampler.set_epoch(0)
+        metrics = evaluate_model(model, test_loader, criterion, DEVICE, global_rank)
+
+        if global_rank == 0:
+            print("\n" + "=" * 80)
+            print("📊 GENERALIZATION TEST RESULTS")
+            print("=" * 80)
+            print(f"Source Dataset (trained on): {args.source_dataset}")
+            print(f"Target Dataset (tested on):  {args.target_dataset}")
+            print("-" * 80)
+            print(f"🎯 Accuracy:    {metrics['accuracy']:.2f}%")
+            print(f"📉 Loss:        {metrics['loss']:.4f}")
+            print(f"🎪 Precision:   {metrics['precision']:.2f}%")
+            print(f"🔍 Recall:      {metrics['recall']:.2f}%")
+            print(f"⚖️  F1-Score:    {metrics['f1_score']:.2f}%")
+            print(f"✨ Specificity: {metrics['specificity']:.2f}%")
+            print("-" * 80)
+            print("Confusion Matrix:")
+            cm = metrics['confusion_matrix']
+            print(f"   True Positives:  {cm['TP']:6d}  |  False Positives: {cm['FP']:6d}")
+            print(f"   False Negatives: {cm['FN']:6d}  |  True Negatives:  {cm['TN']:6d}")
+            print("=" * 80)
+
+            # Save results
+            results = {
+                'source_dataset': args.source_dataset,
+                'target_dataset': args.target_dataset,
+                'model_path': args.model_path,
+                'test_metrics': metrics,
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+            result_filename = f'/kaggle/working/generalization_test_{args.source_dataset}_to_{args.target_dataset}.json'
+            with open(result_filename, 'w') as f:
+                json.dump(results, f, indent=4)
+            
+            print(f"\n💾 Results saved to: {result_filename}")
+            
+            # Performance interpretation
+            print("\n📈 GENERALIZATION ANALYSIS:")
+            acc_drop = ""
+            if 'best_val_acc' in checkpoint:
+                source_acc = checkpoint['best_val_acc']
+                drop = source_acc - metrics['accuracy']
+                acc_drop = f"   Accuracy drop from source: {drop:.2f}%"
+                print(acc_drop)
+            
+            if metrics['accuracy'] >= 85:
+                print("    EXCELLENT generalization!")
+            elif metrics['accuracy'] >= 75:
+                print("   ✔️  GOOD generalization")
+            elif metrics['accuracy'] >= 65:
+                print("     MODERATE generalization")
+            else:
+                print("    POOR generalization - model may be overfitted to source dataset")
+            
+            print("=" * 80)
+
+    finally:
+        cleanup_ddp()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Test Pruned ResNet50 without fine-tuning on WildDeepfake")
-    parser.add_argument('--model_path', type=str, 
-                        default='/kaggle/input/10k-pruned-model/pytorch/default/1/10k_final (1).pt',
-                        help='Path to pretrained model checkpoint')
-    parser.add_argument('--data_path', type=str, 
-                        default='/kaggle/input/wild-deepfake',
-                        help='Path to WildDeepfake dataset')
+    parser = argparse.ArgumentParser(description="Test Generalization: Cross-Dataset Evaluation")
+    parser.add_argument('--model_path', type=str, required=True,
+                        help='Path to the trained model checkpoint (.pt file)')
+    parser.add_argument('--source_dataset', type=str, required=True, 
+                        choices=['wild', 'realvsfake'],
+                        help="Dataset the model was trained on")
+    parser.add_argument('--target_dataset', type=str, required=True, 
+                        choices=['wild', 'realvsfake'],
+                        help="Dataset to test generalization on")
     parser.add_argument('--batch_size', type=int, default=128, 
-                        help='Batch size for testing')
-    parser.add_argument('--num_workers', type=int, default=4, 
-                        help='Number of data loading workers')
-    parser.add_argument('--output_path', type=str, 
-                        default='/kaggle/working/test_results_no_finetuning.json',
-                        help='Path to save test results')
-    parser.add_argument('--save_predictions', action='store_true',
-                        help='Save individual predictions to file')
-    
+                        help='Batch size per GPU')
     args = parser.parse_args()
+    
+    if args.source_dataset == args.target_dataset:
+        print("  WARNING: Source and target datasets are the same!")
+        print("   This is NOT a generalization test, just a normal evaluation.")
+    
     main(args)
