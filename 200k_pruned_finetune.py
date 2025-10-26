@@ -340,9 +340,9 @@ def main(args):
 
             if global_rank == 0:
                 print(f"\n Epoch {epoch+1}/{NUM_EPOCHS}")
-                print(f"   LR (layer3): {optimizer.param_groups[0]['lr']:.7f}")
-                print(f"   LR (layer4): {optimizer.param_groups[0]['lr']:.7f}")
-                print(f"   LR (fc):    {optimizer.param_groups[1]['lr']:.7f}")
+                #print(f"   LR (layer3): {optimizer.param_groups[0]['lr']:.7f}")
+                #print(f"   LR (layer4): {optimizer.param_groups[1]['lr']:.7f}")
+                print(f"   LR (fc):    {optimizer.param_groups[0]['lr']:.7f}")
                 print("-" * 70)
 
             train_loss, train_acc = train_epoch(
