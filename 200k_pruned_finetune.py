@@ -27,22 +27,22 @@ REALVSFAKE_STD  = [0.2414, 0.2127, 0.2079]
 
 
 def get_transforms(dataset_name, is_train=True):
-    """Return the appropriate transforms based on dataset and train/eval mode."""
     if dataset_name == "wild":
         mean, std = WILD_MEAN, WILD_STD
-    elif dataset_name == "realvsfake":
-        mean, std = REALVSFAKE_MEAN, REALVSFAKE_STD
     else:
-        raise ValueError(f"Dataset '{dataset_name}' is not supported. Valid options: 'wild', 'realvsfake'")
+        mean, std = REALVSFAKE_MEAN, REALVSFAKE_STD
 
     if is_train:
         return transforms.Compose([
             transforms.Resize((256, 256)),
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            transforms.RandomRotation(20),  # اضافه
+            transforms.RandomAffine(degrees=0, translate=(0.15, 0.15)),  # اضافه
+            transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.2),  # افزایش
+            transforms.RandomPerspective(distortion_scale=0.2, p=0.3),  # اضافه
             transforms.ToTensor(),
             transforms.Normalize(mean=mean, std=std),
-            transforms.RandomErasing(p=0.2, scale=(0.02, 0.15))
+            transforms.RandomErasing(p=0.4, scale=(0.02, 0.25))  # افزایش
         ])
     else:
         return transforms.Compose([
