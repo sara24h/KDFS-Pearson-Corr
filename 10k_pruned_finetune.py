@@ -321,7 +321,7 @@ def main(args):
         test_fake_path=test_fake,
         dataset_name=args.dataset,
         batch_size=BATCH_SIZE_PER_GPU,
-        num_workers=2
+        num_workers=8
     )
 
     criterion = nn.BCEWithLogitsLoss()
