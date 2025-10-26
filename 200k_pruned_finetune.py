@@ -322,12 +322,20 @@ def main(args):
     criterion = nn.BCEWithLogitsLoss()
 
     optimizer = optim.AdamW([
-        {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.3, 'weight_decay': WEIGHT_DECAY * 1.5},
-        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 0.6, 'weight_decay': WEIGHT_DECAY * 1.5},
-        {'params': model.module.fc.parameters(),     'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY * 2.5}
-    ])
+        {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.1, 'weight_decay': WEIGHT_DECAY * 2.0},
+        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 0.3, 'weight_decay': WEIGHT_DECAY * 2.0},
+        {'params': model.module.fc.parameters(),     'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY * 3.0}
+    ], betas=(0.9, 0.999), eps=1e-8)
 
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=1e-6)
+# استفاده از ReduceLROnPlateau به جای CosineAnnealing
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, 
+        mode='max',  # برای accuracy
+        factor=0.5, 
+        patience=5, 
+        verbose=True,
+        min_lr=1e-7
+    )
     scaler = GradScaler(enabled=True)
 
     best_val_acc = 0.0
