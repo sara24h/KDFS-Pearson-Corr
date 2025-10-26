@@ -136,8 +136,12 @@ def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epo
         labels = labels.unsqueeze(1)
 
         with autocast(device_type='cuda', dtype=torch.bfloat16):
-            outputs, _ = model(inputs)
+            outputs, features = model(inputs)  # ✅ استفاده از features
             loss = criterion(outputs, labels) / accum_steps
+            # اضافه کردن aux_loss برای حفظ gradient graph
+            if features is not None:
+                aux_loss = features.mean() * 0.0
+                loss = loss + aux_loss
 
         scaler.scale(loss).backward()
 
@@ -170,6 +174,41 @@ def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epo
     if rank == 0 and writer is not None:
         writer.add_scalar("train/loss", avg_loss, epoch)
         writer.add_scalar("train/acc", avg_acc, epoch)
+
+    return avg_loss, avg_acc
+
+
+@torch.no_grad()
+def validate(model, loader, criterion, device, writer, epoch, rank=0):
+    model.eval()
+    running_loss = 0.0
+    correct = 0
+    total = 0
+
+    for inputs, labels in tqdm(loader, desc="Validation", disable=rank != 0):
+        inputs, labels = inputs.to(device), labels.to(device)
+        labels = labels.unsqueeze(1)
+
+        with autocast(device_type='cuda', dtype=torch.bfloat16):
+            outputs, features = model(inputs)  # ✅ استفاده از features
+            loss = criterion(outputs, labels)  # ✅ حذف تقسیم بر accum_steps
+            # در validation نیازی به aux_loss نیست چون gradient نداریم
+
+        running_loss += loss.item()
+        preds = (torch.sigmoid(outputs) > 0.5).float()
+        correct += (preds == labels).sum().item()
+        total += labels.size(0)
+
+    avg_loss = torch.tensor(running_loss / len(loader)).to(device)
+    avg_acc = torch.tensor(100. * correct / total).to(device)
+    dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
+    dist.all_reduce(avg_acc, op=dist.ReduceOp.SUM)
+    avg_loss = avg_loss.item() / dist.get_world_size()
+    avg_acc = avg_acc.item() / dist.get_world_size()
+
+    if rank == 0 and writer is not None:
+        writer.add_scalar("val/loss", avg_loss, epoch)
+        writer.add_scalar("val/acc", avg_acc, epoch)
 
     return avg_loss, avg_acc
 
