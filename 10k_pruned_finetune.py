@@ -185,8 +185,10 @@ def validate(model, loader, criterion, device, writer, epoch, rank=0):
         labels = labels.unsqueeze(1)
 
         with autocast(device_type='cuda', dtype=torch.bfloat16):
-            outputs, _ = model(inputs)
-            loss = criterion(outputs, labels)
+            outputs, features = model(inputs)
+            loss = criterion(outputs, labels) / accum_steps
+            aux_loss = features.mean() * 0  # وزن صفر برای عدم تأثیر
+            loss = loss + aux_loss
 
         running_loss += loss.item()
         preds = (torch.sigmoid(outputs) > 0.5).float()
