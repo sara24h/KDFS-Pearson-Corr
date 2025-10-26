@@ -117,9 +117,10 @@ def evaluate_model(model, loader, criterion, device, rank=0):
         probs = torch.sigmoid(outputs).squeeze()
         preds = (probs > 0.5).float()
         
-        all_preds.extend(preds.cpu().numpy())
-        all_labels.extend(labels.cpu().numpy())
-        all_probs.extend(probs.cpu().numpy())
+        # Convert to float32 before numpy conversion (bfloat16 not supported by numpy)
+        all_preds.extend(preds.float().cpu().numpy())
+        all_labels.extend(labels.float().cpu().numpy())
+        all_probs.extend(probs.float().cpu().numpy())
     
     # Convert to numpy arrays
     all_preds = np.array(all_preds)
