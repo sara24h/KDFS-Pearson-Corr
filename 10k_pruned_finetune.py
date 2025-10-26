@@ -17,10 +17,10 @@ from PIL import Image
 from tqdm import tqdm
 from torch.amp import autocast, GradScaler
 import argparse
-from model.pruned_model.Resnet_test import ResNet_50_pruned_hardfakevsreal
+from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
 
-WILD_MEAN = [0.4415, 0.3450, 0.3161]
-WILD_STD  = [0.2400, 0.2104, 0.2132]
+WILD_MEAN = [0.4416, 0.3445, 0.3151]
+WILD_STD  = [0.2397, 0.2104, 0.2130]
 
 REALVSFAKE_MEAN = [0.5256, 0.4289, 0.3770]
 REALVSFAKE_STD  = [0.2414, 0.2127, 0.2079]
@@ -36,17 +36,13 @@ def get_transforms(dataset_name, is_train=True):
         raise ValueError(f"Dataset '{dataset_name}' is not supported. Valid options: 'wild', 'realvsfake'")
 
     if is_train:
-
         return transforms.Compose([
-            transforms.Resize((288, 288)),  # بزرگتر از سایز نهایی
-            transforms.RandomCrop((256, 256)),  # Random crop برای تنوع بیشتر
+            transforms.Resize((256, 256)),
             transforms.RandomHorizontalFlip(p=0.5),
-            #transforms.RandomRotation(15),  # چرخش تصادفی
-            #transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3,hue=0.15),
-            #transforms.RandomGrayscale(p=0.1),  # تبدیل تصادفی به grayscale
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
             transforms.ToTensor(),
             transforms.Normalize(mean=mean, std=std),
-            transforms.RandomErasing(p=0.3, scale=(0.02, 0.2))  # افزایش یافته
+            transforms.RandomErasing(p=0.2, scale=(0.02, 0.15))
         ])
     else:
         return transforms.Compose([
@@ -54,6 +50,7 @@ def get_transforms(dataset_name, is_train=True):
             transforms.ToTensor(),
             transforms.Normalize(mean=mean, std=std)
         ])
+
 
 class WildDeepfakeDataset(Dataset):
     def __init__(self, real_path, fake_path, transform=None):
@@ -73,7 +70,7 @@ class WildDeepfakeDataset(Dataset):
                 self.images.append(os.path.join(fake_path, fname))
                 self.labels.append(0)  # fake = 0
 
-        print(f"📊 Dataset loaded: {len(self.images)} images "
+        print(f" Dataset loaded: {len(self.images)} images "
               f"({sum(1 for l in self.labels if l == 1)} real, {sum(1 for l in self.labels if l == 0)} fake)")
 
     def __len__(self):
@@ -89,7 +86,7 @@ class WildDeepfakeDataset(Dataset):
                 img = self.transform(img)
             return img, torch.tensor(label, dtype=torch.float32)
         except Exception as e:
-            print(f" Error loading {img_path}: {e}")
+            print(f"Error loading {img_path}: {e}")
             return torch.zeros(3, 256, 256), torch.tensor(label, dtype=torch.float32)
 
 def create_dataloaders(
@@ -115,11 +112,11 @@ def create_dataloaders(
     test_sampler  = DistributedSampler(test_dataset, shuffle=False)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler,
-                              num_workers=num_workers,prefetch_factor=2, pin_memory=True, drop_last=False)
+                              num_workers=num_workers, pin_memory=True, drop_last=False)
     val_loader   = DataLoader(val_dataset,   batch_size=batch_size, sampler=val_sampler,
-                              num_workers=num_workers,prefetch_factor=2, pin_memory=True, drop_last=False)
+                              num_workers=num_workers, pin_memory=True, drop_last=False)
     test_loader  = DataLoader(test_dataset,  batch_size=batch_size, sampler=test_sampler,
-                              num_workers=num_workers,prefetch_factor=2, pin_memory=True, drop_last=False)
+                              num_workers=num_workers, pin_memory=True, drop_last=False)
 
     return train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler
 
@@ -135,19 +132,9 @@ def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epo
         inputs, labels = inputs.to(device), labels.to(device)
         labels = labels.unsqueeze(1)
 
-        with autocast(device_type='cuda', dtype=torch.bfloat16):
-            outputs, features = model(inputs)
+        with autocast(device_type='cuda', dtype=torch.float16):
+            outputs, _ = model(inputs)
             loss = criterion(outputs, labels) / accum_steps
-            
-            # اگر features یک لیست است، به همه آیتم‌ها دسترسی داشته باشیم
-            if isinstance(features, list):
-                aux_loss = sum(f.mean() * 0.0 for f in features if f is not None)
-            elif features is not None:
-                aux_loss = features.mean() * 0.0
-            else:
-                aux_loss = 0.0
-            
-            loss = loss + aux_loss
 
         scaler.scale(loss).backward()
 
@@ -183,7 +170,6 @@ def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epo
 
     return avg_loss, avg_acc
 
-
 @torch.no_grad()
 def validate(model, loader, criterion, device, writer, epoch, rank=0):
     model.eval()
@@ -195,79 +181,9 @@ def validate(model, loader, criterion, device, writer, epoch, rank=0):
         inputs, labels = inputs.to(device), labels.to(device)
         labels = labels.unsqueeze(1)
 
-        with autocast(device_type='cuda', dtype=torch.bfloat16):
-            outputs, _ = model(inputs)  # در validation نیازی به features نداریم
+        with autocast(device_type='cuda', dtype=torch.float16):
+            outputs, _ = model(inputs)
             loss = criterion(outputs, labels)
-
-        running_loss += loss.item()
-        preds = (torch.sigmoid(outputs) > 0.5).float()
-        correct += (preds == labels).sum().item()
-        total += labels.size(0)
-
-    avg_loss = torch.tensor(running_loss / len(loader)).to(device)
-    avg_acc = torch.tensor(100. * correct / total).to(device)
-    dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
-    dist.all_reduce(avg_acc, op=dist.ReduceOp.SUM)
-    avg_loss = avg_loss.item() / dist.get_world_size()
-    avg_acc = avg_acc.item() / dist.get_world_size()
-
-    if rank == 0 and writer is not None:
-        writer.add_scalar("val/loss", avg_loss, epoch)
-        writer.add_scalar("val/acc", avg_acc, epoch)
-
-    return avg_loss, avg_acc
-
-
-@torch.no_grad()
-def validate(model, loader, criterion, device, writer, epoch, rank=0):
-    model.eval()
-    running_loss = 0.0
-    correct = 0
-    total = 0
-
-    for inputs, labels in tqdm(loader, desc="Validation", disable=rank != 0):
-        inputs, labels = inputs.to(device), labels.to(device)
-        labels = labels.unsqueeze(1)
-
-        with autocast(device_type='cuda', dtype=torch.bfloat16):
-            outputs, features = model(inputs)  # ✅ استفاده از features
-            loss = criterion(outputs, labels)  # ✅ حذف تقسیم بر accum_steps
-            # در validation نیازی به aux_loss نیست چون gradient نداریم
-
-        running_loss += loss.item()
-        preds = (torch.sigmoid(outputs) > 0.5).float()
-        correct += (preds == labels).sum().item()
-        total += labels.size(0)
-
-    avg_loss = torch.tensor(running_loss / len(loader)).to(device)
-    avg_acc = torch.tensor(100. * correct / total).to(device)
-    dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
-    dist.all_reduce(avg_acc, op=dist.ReduceOp.SUM)
-    avg_loss = avg_loss.item() / dist.get_world_size()
-    avg_acc = avg_acc.item() / dist.get_world_size()
-
-    if rank == 0 and writer is not None:
-        writer.add_scalar("val/loss", avg_loss, epoch)
-        writer.add_scalar("val/acc", avg_acc, epoch)
-
-    return avg_loss, avg_acc
-
-@torch.no_grad()
-def validate(model, loader, criterion, device, writer, epoch, rank=0):
-    model.eval()
-    running_loss = 0.0
-    correct = 0
-    total = 0
-
-    for inputs, labels in tqdm(loader, desc="Validation", disable=rank != 0):
-        inputs, labels = inputs.to(device), labels.to(device)
-        labels = labels.unsqueeze(1)
-
-        with autocast(device_type='cuda', dtype=torch.bfloat16):
-            outputs, features = model(inputs)
-            loss = criterion(outputs, labels) / accum_steps
-            aux_loss = features.mean() * 0  # وزن صفر برای عدم تأثیر
-            loss = loss + aux_loss
 
         running_loss += loss.item()
         preds = (torch.sigmoid(outputs) > 0.5).float()
@@ -317,9 +233,8 @@ def main(args):
     BATCH_SIZE_PER_GPU = args.batch_size
     BATCH_SIZE = BATCH_SIZE_PER_GPU * world_size
     NUM_EPOCHS = args.num_epochs
-    
-    BASE_LR = args.learning_rate 
-    WEIGHT_DECAY = args.weight_decay 
+    BASE_LR = args.learning_rate
+    WEIGHT_DECAY = args.weight_decay
     ACCUM_STEPS = args.accum_steps
 
     result_dir = f'/kaggle/working/runs_ddp_rank_{global_rank}'
@@ -327,8 +242,7 @@ def main(args):
 
     if global_rank == 0:
         print("=" * 70)
-        print("     Starting IMPROVED fine-tuning of Pruned ResNet50")
-        print("    Layer3 + Layer4 + FC ")
+        print("    Starting fine-tuning of Pruned ResNet50 — Layer3 + Layer4 + FC (BCE Loss)")
         print(f"   Number of GPUs: {world_size}")
         print(f"   Total Batch Size: {BATCH_SIZE}")
         print(f"   Gradient Accumulation Steps: {ACCUM_STEPS}")
@@ -337,12 +251,11 @@ def main(args):
         print(f"   Learning Rate: {BASE_LR}")
         print(f"   Weight Decay: {WEIGHT_DECAY}")
         print(f"   Dataset: {args.dataset}")
-        print(f"   Mixed Precision: bfloat16")
-        print(f"   Input Size: 256×256 (with augmentation from 288×288)")
+        print(f"   Input Size: 256×256 (compatible with the pretrained model)")
         print("=" * 70)
 
     if args.dataset == "wild":
-        base_path = "/kaggle/input/wild-deepfake"
+        base_path = "/kaggle/input/20k-wild-deepfake-dataset"
         train_real = os.path.join(base_path, "train/real")
         train_fake = os.path.join(base_path, "train/fake")
         val_real = os.path.join(base_path, "valid/real")
@@ -368,11 +281,13 @@ def main(args):
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(DEVICE)
 
+    #  Freeze all layers
     for param in model.parameters():
         param.requires_grad = False
 
-    for param in model.layer3.parameters():
-        param.requires_grad = True
+    # Enable the desired layers for fine-tuning
+    # for param in model.layer3.parameters():  # commented out based on previous code
+    #     param.requires_grad = True
     for param in model.layer4.parameters():
         param.requires_grad = True
     for param in model.fc.parameters():
@@ -384,14 +299,13 @@ def main(args):
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     if global_rank == 0:
-        print(f"Model loaded and configured")
+        print(f" Model loaded and configured")
         print(f"   - Total parameters: {total_params:,}")
         print(f"   - Trainable parameters: {trainable_params:,}")
-        print(f"   - Trainable layers: layer3, layer4, fc")
-        print(f"   - Dropout enabled in model architecture")
+        print(f"   - Trainable layers: layer4, fc")
 
     if global_rank == 0:
-        print("\n📊 Preparing DataLoaders with ENHANCED augmentation...")
+        print("\nPreparing DataLoaders...")
 
     train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler = create_dataloaders(
         train_real_path=train_real,
@@ -402,15 +316,15 @@ def main(args):
         test_fake_path=test_fake,
         dataset_name=args.dataset,
         batch_size=BATCH_SIZE_PER_GPU,
-        num_workers=4
+        num_workers=2
     )
 
     criterion = nn.BCEWithLogitsLoss()
 
     optimizer = optim.AdamW([
-        {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.3, 'weight_decay': WEIGHT_DECAY * 2.0},
-        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 0.6, 'weight_decay': WEIGHT_DECAY * 2.0},
-        {'params': model.module.fc.parameters(),     'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY * 3.0}
+        #{'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.3, 'weight_decay': WEIGHT_DECAY * 1.5},
+        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 0.6, 'weight_decay': WEIGHT_DECAY * 1.5},
+        {'params': model.module.fc.parameters(),     'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY * 2.5}
     ])
 
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -419,7 +333,7 @@ def main(args):
     scaler = GradScaler(enabled=True)
 
     best_val_acc = 0.0
-    best_model_path = '/kaggle/working/best_pruned_finetuned_improved.pt'
+    best_model_path = '/kaggle/working/best_pruned_finetuned.pt'
 
     try:
         for epoch in range(NUM_EPOCHS):
@@ -427,10 +341,10 @@ def main(args):
             val_sampler.set_epoch(epoch)
 
             if global_rank == 0:
-                print(f"\n📍 Epoch {epoch+1}/{NUM_EPOCHS}")
-                print(f"   LR (layer3): {optimizer.param_groups[0]['lr']:.7f}")
-                print(f"   LR (layer4): {optimizer.param_groups[1]['lr']:.7f}")
-                print(f"   LR (fc):     {optimizer.param_groups[2]['lr']:.7f}")
+                print(f"\n Epoch {epoch+1}/{NUM_EPOCHS}")
+                #print(f"   LR (layer3): {optimizer.param_groups[0]['lr']:.7f}")
+                print(f"   LR (layer4): {optimizer.param_groups[0]['lr']:.7f}")
+                print(f"   LR (fc):    {optimizer.param_groups[1]['lr']:.7f}")
                 print("-" * 70)
 
             train_loss, train_acc = train_epoch(
@@ -446,11 +360,10 @@ def main(args):
                 if val_acc > best_val_acc:
                     best_val_acc = val_acc
                     torch.save(model.module.state_dict(), best_model_path)
-                    print(f"*** Best model saved with Val Acc: {val_acc:.2f}% ***")
+                    print(f"*** Best model saved with Val Acc: {val_acc:.2f}%***")
 
             scheduler.step()
 
-        # 🔍 Final testing
         if global_rank == 0:
             if os.path.exists(best_model_path):
                 model.module.load_state_dict(torch.load(best_model_path))
@@ -461,7 +374,7 @@ def main(args):
 
         if global_rank == 0:
             print("\n" + "=" * 70)
-            print("🎯 Final test and saving inference-ready model")
+            print("Final test and saving inference-ready model")
             print("=" * 70)
             print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.2f}%")
 
@@ -475,7 +388,7 @@ def main(args):
                 'model_state_dict': model_inference.state_dict(),
                 'total_params': total_params_inf,
                 'masks': checkpoint['masks'],
-                'model_architecture': 'ResNet_50_pruned_hardfakevsreal (Layer3+4+FC BCE + Dropout)',
+                'model_architecture': 'ResNet_50_pruned_hardfakevsreal (Layer3+4+FC BCE)',
                 'best_val_acc': best_val_acc,
                 'test_acc': test_acc,
                 'training_config': {
@@ -486,16 +399,14 @@ def main(args):
                     'epochs': NUM_EPOCHS,
                     'loss': 'BCEWithLogitsLoss',
                     'dataset': args.dataset,
-                    'input_size': [256, 256],
-                    'augmentation': 'enhanced',
-                    'mixed_precision': 'bfloat16'
+                    'input_size': [256, 256]
                 }
             }
 
-            inference_save_path = '/kaggle/working/final_pruned_finetuned_inference_ready_improved.pt'
+            inference_save_path = '/kaggle/working/final_pruned_finetuned_inference_ready.pt'
             torch.save(checkpoint_inference, inference_save_path)
 
-            print(" Improved pruned model successfully saved!")
+            print("*** Pruned model successfully saved!***")
             print(f"Total parameters: {total_params_inf:,}")
             print(f"Best Val Acc: {best_val_acc:.2f}%")
             print(f"Test Acc: {test_acc:.2f}%")
@@ -509,14 +420,13 @@ def main(args):
     finally:
         cleanup_ddp()
 
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Improved Fine-tune Pruned ResNet50 for Deepfake Detection")
-    parser.add_argument('--num_epochs', type=int, default=20, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=128, help='Batch size per GPU (reduced for stability)')
-    parser.add_argument('--learning_rate', type=float, default=0.00003, help='Base learning rate (3e-5)')
-    parser.add_argument('--weight_decay', type=float, default=0.005, help='Weight decay for optimizer (increased)')
-    parser.add_argument('--accum_steps', type=int, default=2, help='Gradient accumulation steps')
+    parser = argparse.ArgumentParser(description="Fine-tune Pruned ResNet50 for Deepfake Detection")
+    parser.add_argument('--num_epochs', type=int, default=15, help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, default=256, help='Batch size per GPU')
+    parser.add_argument('--learning_rate', type=float, default=0.0001, help='Base learning rate')
+    parser.add_argument('--weight_decay', type=float, default=0.00005, help='Weight decay for optimizer')
+    parser.add_argument('--accum_steps', type=int, default=1, help='Gradient accumulation steps')
     parser.add_argument('--dataset', type=str, default='wild', choices=['wild', 'realvsfake'],
                         help="Choose dataset: 'wild' or 'realvsfake'")
     args = parser.parse_args()
