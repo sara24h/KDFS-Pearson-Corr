@@ -101,7 +101,7 @@ def create_dataloaders(
     test_fake_path,
     dataset_name,
     batch_size=256,
-    num_workers=8
+    num_workers=4
 ):
     train_transform = get_transforms(dataset_name, is_train=True)
     val_transform   = get_transforms(dataset_name, is_train=False)
