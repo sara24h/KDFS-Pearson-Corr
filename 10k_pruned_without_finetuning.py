@@ -198,10 +198,9 @@ def main(args):
 
     if global_rank == 0:
         print("=" * 80)
-        print("        🧪 GENERALIZATION TEST - CROSS-DATASET EVALUATION")
+        print("        🧪 MODEL EVALUATION - CROSS-DATASET TESTING")
         print("=" * 80)
-        print(f"   📌 Source Dataset (Training): {args.source_dataset}")
-        print(f"   🎯 Target Dataset (Testing):  {args.target_dataset}")
+        print(f"   🎯 Test Dataset: {args.test_dataset}")
         print(f"   🔧 Model Path: {args.model_path}")
         print(f"   💻 Number of GPUs: {world_size}")
         print(f"   📦 Batch Size per GPU: {BATCH_SIZE_PER_GPU}")
@@ -308,13 +307,13 @@ def main(args):
                 print(acc_drop)
             
             if metrics['accuracy'] >= 85:
-                print("    EXCELLENT generalization!")
+                print("   ✅ EXCELLENT generalization!")
             elif metrics['accuracy'] >= 75:
                 print("   ✔️  GOOD generalization")
             elif metrics['accuracy'] >= 65:
-                print("     MODERATE generalization")
+                print("   ⚠️  MODERATE generalization")
             else:
-                print("    POOR generalization - model may be overfitted to source dataset")
+                print("   ❌ POOR generalization - model may be overfitted to source dataset")
             
             print("=" * 80)
 
@@ -326,18 +325,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test Generalization: Cross-Dataset Evaluation")
     parser.add_argument('--model_path', type=str, required=True,
                         help='Path to the trained model checkpoint (.pt file)')
-    parser.add_argument('--source_dataset', type=str, required=True, 
+    parser.add_argument('--test_dataset', type=str, required=True, 
                         choices=['wild', 'realvsfake'],
-                        help="Dataset the model was trained on")
-    parser.add_argument('--target_dataset', type=str, required=True, 
-                        choices=['wild', 'realvsfake'],
-                        help="Dataset to test generalization on")
+                        help="Dataset to test the model on")
     parser.add_argument('--batch_size', type=int, default=128, 
                         help='Batch size per GPU')
     args = parser.parse_args()
     
     if args.source_dataset == args.target_dataset:
-        print("  WARNING: Source and target datasets are the same!")
+        print("⚠️  WARNING: Source and target datasets are the same!")
         print("   This is NOT a generalization test, just a normal evaluation.")
     
     main(args)
