@@ -286,10 +286,10 @@ def main(args):
         param.requires_grad = False
 
     # Enable the desired layers for fine-tuning
-    for param in model.layer3.parameters():  # commented out based on previous code
-        param.requires_grad = True
-    for param in model.layer4.parameters():
-        param.requires_grad = True
+    #for param in model.layer3.parameters():  # commented out based on previous code
+        #param.requires_grad = True
+    #for param in model.layer4.parameters():
+        #param.requires_grad = True
     for param in model.fc.parameters():
         param.requires_grad = True
 
@@ -322,8 +322,8 @@ def main(args):
     criterion = nn.BCEWithLogitsLoss()
 
     optimizer = optim.AdamW([
-        {'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.3, 'weight_decay': WEIGHT_DECAY * 1.5},
-        {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 0.6, 'weight_decay': WEIGHT_DECAY * 1.5},
+        #{'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.3, 'weight_decay': WEIGHT_DECAY * 1.5},
+        #{'params': model.module.layer4.parameters(), 'lr': BASE_LR * 0.6, 'weight_decay': WEIGHT_DECAY * 1.5},
         {'params': model.module.fc.parameters(),     'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY * 2.5}
     ])
 
