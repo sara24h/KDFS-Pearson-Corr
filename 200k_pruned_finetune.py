@@ -36,10 +36,10 @@ def get_transforms(dataset_name, is_train=True):
         return transforms.Compose([
             transforms.Resize((256, 256)),
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomRotation(20),  # اضافه
-            transforms.RandomAffine(degrees=0, translate=(0.15, 0.15)),  # اضافه
+            #transforms.RandomRotation(20),  # اضافه
+            #transforms.RandomAffine(degrees=0, translate=(0.15, 0.15)),  # اضافه
             transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.2),  # افزایش
-            transforms.RandomPerspective(distortion_scale=0.2, p=0.3),  # اضافه
+            #transforms.RandomPerspective(distortion_scale=0.2, p=0.3),  # اضافه
             transforms.ToTensor(),
             transforms.Normalize(mean=mean, std=std),
             transforms.RandomErasing(p=0.4, scale=(0.02, 0.25))  # افزایش
