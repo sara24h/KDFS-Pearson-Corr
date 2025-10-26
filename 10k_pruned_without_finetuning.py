@@ -15,7 +15,7 @@ from PIL import Image
 from tqdm import tqdm
 from torch.amp import autocast
 import argparse
-from model.pruned_model.Resnet_test import ResNet_50_pruned_hardfakevsreal
+from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
 
 WILD_MEAN = [0.4415, 0.3450, 0.3161]
 WILD_STD  = [0.2400, 0.2104, 0.2132]
