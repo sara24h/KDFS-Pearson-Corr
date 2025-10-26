@@ -286,10 +286,10 @@ def main(args):
         param.requires_grad = False
 
     # Enable the desired layers for fine-tuning
-    #for param in model.layer3.parameters():  # commented out based on previous code
-        #param.requires_grad = True
-    #for param in model.layer4.parameters():
-        #param.requires_grad = True
+    for param in model.layer3.parameters():  # commented out based on previous code
+        param.requires_grad = True
+    for param in model.layer4.parameters():
+        param.requires_grad = True
     for param in model.fc.parameters():
         param.requires_grad = True
 
@@ -342,7 +342,7 @@ def main(args):
                 print(f"\n Epoch {epoch+1}/{NUM_EPOCHS}")
                 print(f"   LR (layer3): {optimizer.param_groups[0]['lr']:.7f}")
                 print(f"   LR (layer4): {optimizer.param_groups[1]['lr']:.7f}")
-                print(f"   LR (fc):    {optimizer.param_groups[0]['lr']:.7f}")
+                print(f"   LR (fc):    {optimizer.param_groups[2]['lr']:.7f}")
                 print("-" * 70)
 
             train_loss, train_acc = train_epoch(
