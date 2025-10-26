@@ -115,11 +115,11 @@ def create_dataloaders(
     test_sampler  = DistributedSampler(test_dataset, shuffle=False)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler,
-                              num_workers=num_workers, pin_memory=True, drop_last=False)
+                              num_workers=num_workers,prefetch_factor=2, pin_memory=True, drop_last=False)
     val_loader   = DataLoader(val_dataset,   batch_size=batch_size, sampler=val_sampler,
-                              num_workers=num_workers, pin_memory=True, drop_last=False)
+                              num_workers=num_workers,prefetch_factor=2, pin_memory=True, drop_last=False)
     test_loader  = DataLoader(test_dataset,  batch_size=batch_size, sampler=test_sampler,
-                              num_workers=num_workers, pin_memory=True, drop_last=False)
+                              num_workers=num_workers,prefetch_factor=2, pin_memory=True, drop_last=False)
 
     return train_loader, val_loader, test_loader, train_sampler, val_sampler, test_sampler
 
