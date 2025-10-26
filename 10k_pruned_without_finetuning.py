@@ -227,27 +227,27 @@ def main(args):
         print(f"✅ Model loaded successfully")
         print(f"   Total parameters: {total_params:,}")
         if 'best_val_acc' in checkpoint:
-            print(f"   Source dataset Val Acc: {checkpoint['best_val_acc']:.2f}%")
+            print(f"   Model's best validation accuracy: {checkpoint['best_val_acc']:.2f}%")
 
-    # Setup target dataset paths
-    if args.target_dataset == "wild":
+    # Setup test dataset paths
+    if args.test_dataset == "wild":
         base_path = "/kaggle/input/wild-deepfake"
         test_real = os.path.join(base_path, "test/real")
         test_fake = os.path.join(base_path, "test/fake")
-    elif args.target_dataset == "realvsfake":
+    elif args.test_dataset == "realvsfake":
         base_path = "/kaggle/input/realvsfake/whole"
         test_real = os.path.join(base_path, "test/test_real")
         test_fake = os.path.join(base_path, "test/test_fake")
     else:
-        raise ValueError("Target dataset must be either 'wild' or 'realvsfake'.")
+        raise ValueError("Test dataset must be either 'wild' or 'realvsfake'.")
 
     if global_rank == 0:
-        print(f"\n📊 Loading target dataset: {args.target_dataset}")
+        print(f"\n📊 Loading test dataset: {args.test_dataset}")
     
     test_loader, test_sampler = create_dataloader(
         real_path=test_real,
         fake_path=test_fake,
-        dataset_name=args.target_dataset,
+        dataset_name=args.test_dataset,
         batch_size=BATCH_SIZE_PER_GPU,
         num_workers=4
     )
@@ -256,7 +256,7 @@ def main(args):
 
     try:
         if global_rank == 0:
-            print("\n🚀 Starting evaluation on target dataset...")
+            print("\n🚀 Starting evaluation...")
             print("-" * 80)
         
         test_sampler.set_epoch(0)
@@ -264,10 +264,10 @@ def main(args):
 
         if global_rank == 0:
             print("\n" + "=" * 80)
-            print("📊 GENERALIZATION TEST RESULTS")
+            print("📊 EVALUATION RESULTS")
             print("=" * 80)
-            print(f"Source Dataset (trained on): {args.source_dataset}")
-            print(f"Target Dataset (tested on):  {args.target_dataset}")
+            print(f"Test Dataset: {args.test_dataset}")
+            print(f"Model: {args.model_path}")
             print("-" * 80)
             print(f"🎯 Accuracy:    {metrics['accuracy']:.2f}%")
             print(f"📉 Loss:        {metrics['loss']:.4f}")
@@ -284,36 +284,29 @@ def main(args):
 
             # Save results
             results = {
-                'source_dataset': args.source_dataset,
-                'target_dataset': args.target_dataset,
+                'test_dataset': args.test_dataset,
                 'model_path': args.model_path,
                 'test_metrics': metrics,
                 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             
-            result_filename = f'/kaggle/working/generalization_test_{args.source_dataset}_to_{args.target_dataset}.json'
+            result_filename = f'/kaggle/working/test_results_{args.test_dataset}.json'
             with open(result_filename, 'w') as f:
                 json.dump(results, f, indent=4)
             
             print(f"\n💾 Results saved to: {result_filename}")
             
             # Performance interpretation
-            print("\n📈 GENERALIZATION ANALYSIS:")
-            acc_drop = ""
-            if 'best_val_acc' in checkpoint:
-                source_acc = checkpoint['best_val_acc']
-                drop = source_acc - metrics['accuracy']
-                acc_drop = f"   Accuracy drop from source: {drop:.2f}%"
-                print(acc_drop)
+            print("\n📈 PERFORMANCE ANALYSIS:")
             
-            if metrics['accuracy'] >= 85:
-                print("   ✅ EXCELLENT generalization!")
-            elif metrics['accuracy'] >= 75:
-                print("   ✔️  GOOD generalization")
-            elif metrics['accuracy'] >= 65:
-                print("   ⚠️  MODERATE generalization")
+            if metrics['accuracy'] >= 90:
+                print("   ✅ EXCELLENT performance!")
+            elif metrics['accuracy'] >= 80:
+                print("   ✔️  GOOD performance")
+            elif metrics['accuracy'] >= 70:
+                print("   ⚠️  MODERATE performance")
             else:
-                print("   ❌ POOR generalization - model may be overfitted to source dataset")
+                print("   ❌ POOR performance")
             
             print("=" * 80)
 
@@ -322,7 +315,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Test Generalization: Cross-Dataset Evaluation")
+    parser = argparse.ArgumentParser(description="Test Model on Dataset")
     parser.add_argument('--model_path', type=str, required=True,
                         help='Path to the trained model checkpoint (.pt file)')
     parser.add_argument('--test_dataset', type=str, required=True, 
@@ -331,9 +324,5 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=128, 
                         help='Batch size per GPU')
     args = parser.parse_args()
-    
-    if args.source_dataset == args.target_dataset:
-        print("⚠️  WARNING: Source and target datasets are the same!")
-        print("   This is NOT a generalization test, just a normal evaluation.")
     
     main(args)
