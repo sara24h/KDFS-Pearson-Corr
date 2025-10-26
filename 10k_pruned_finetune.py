@@ -41,9 +41,9 @@ def get_transforms(dataset_name, is_train=True):
             transforms.Resize((288, 288)),  # بزرگتر از سایز نهایی
             transforms.RandomCrop((256, 256)),  # Random crop برای تنوع بیشتر
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomRotation(15),  # چرخش تصادفی
-            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3,hue=0.15),
-            transforms.RandomGrayscale(p=0.1),  # تبدیل تصادفی به grayscale
+            #transforms.RandomRotation(15),  # چرخش تصادفی
+            #transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3,hue=0.15),
+            #transforms.RandomGrayscale(p=0.1),  # تبدیل تصادفی به grayscale
             transforms.ToTensor(),
             transforms.Normalize(mean=mean, std=std),
             transforms.RandomErasing(p=0.3, scale=(0.02, 0.2))  # افزایش یافته
