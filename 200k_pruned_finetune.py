@@ -368,7 +368,7 @@ def main(args):
                     torch.save(model.module.state_dict(), best_model_path)
                     print(f"*** Best model saved with Val Acc: {val_acc:.2f}%***")
 
-            scheduler.step()
+            scheduler.step(val_acc)
 
         if global_rank == 0:
             if os.path.exists(best_model_path):
