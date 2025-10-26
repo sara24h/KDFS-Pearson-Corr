@@ -255,7 +255,7 @@ def main(args):
         print("=" * 70)
 
     if args.dataset == "wild":
-        base_path = "/kaggle/input/20k-wild-deepfake-dataset"
+        base_path = "/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k"
         train_real = os.path.join(base_path, "train/real")
         train_fake = os.path.join(base_path, "train/fake")
         val_real = os.path.join(base_path, "valid/real")
