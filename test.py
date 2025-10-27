@@ -119,7 +119,7 @@ class Test:
                     eval_batch_size=self.test_batch_size,
                     num_workers=self.num_workers,
                     pin_memory=self.pin_memory,
-                    ddp=False
+                    ddp=True
                 )
             elif self.dataset_mode == '330k':
                 dataset = Dataset_selector(
