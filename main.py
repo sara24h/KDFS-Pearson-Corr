@@ -51,12 +51,12 @@ def parse_args():
         choices=("hardfake", "rvf10k", "140k", "200k", "190k", "330k"),
         help="Dataset to use: hardfake, rvf10k, 140k, 200k, 190k, or 330k",
     )
-    parser.add_argument(
-        "--new_dataset_dir",
-        type=str,
-        default="/kaggle/input/140k-real-and-fake-faces",
-        help="The dataset path (used for hardfake, rvf10k, 140k, 200k)",
-    )
+    #parser.add_argument(
+     #   "--new_dataset_dir",
+      #  type=str,
+       # default="/kaggle/input/140k-real-and-fake-faces",
+        #help="The dataset path (used for hardfake, rvf10k, 140k, 200k)",
+    #)
  
  
     parser.add_argument(
