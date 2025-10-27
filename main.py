@@ -19,14 +19,12 @@ matplotlib.use('Agg')
 
 from data.dataset import FaceDataset, Dataset_selector
 from model.teacher.ResNet import ResNet_50_hardfakevsreal
-from model.teacher.Mobilenetv2 import MobileNetV2_deepfake
-from model.teacher.GoogleNet import GoogLeNet_deepfake
+from model.teacher.MobilenetV2 import MobileNetV2_deepfake
 from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal, ResNet_50_sparse_rvf10k
 from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
-from model.student.GoogleNet_sparse import GoogLeNet_sparse_deepfake
 from utils import utils, loss, meter, scheduler
 from train import Train
-from test_140k import Test
+from test import Test
 from finetune import Finetune
 from train_ddp import TrainDDP
 from finetune_ddp import FinetuneDDP
@@ -51,14 +49,30 @@ def parse_args():
         choices=("hardfake", "rvf10k", "140k", "200k", "190k", "330k"),
         help="Dataset to use: hardfake, rvf10k, 140k, 200k, 190k, or 330k",
     )
-    #parser.add_argument(
-     #   "--new_dataset_dir",
-      #  type=str,
-       # default="/kaggle/input/140k-real-and-fake-faces",
-        #help="The dataset path (used for hardfake, rvf10k, 140k, 200k)",
-    #)
- 
- 
+    parser.add_argument(
+        "--compress_rate",
+        type=float,
+        default=0.3,
+        help="Compress rate of the student model",
+    )
+    parser.add_argument(
+        "--dataset_dir",
+        type=str,
+        default="/kaggle/input/hardfakevsrealfaces",
+        help="The dataset path (used for hardfake, rvf10k, 140k, 200k)",
+    )
+    parser.add_argument(
+        "--hardfake_csv_file",
+        type=str,
+        default="/kaggle/input/hardfakevsrealfaces/data.csv",
+        help="The path to the hardfake CSV file (for hardfake mode)",
+    )
+    parser.add_argument(
+        "--compress_rate",
+        type=float,
+        default=None,
+        help="Compress rate of the student model",
+    )
     parser.add_argument(
         "--rvf10k_train_csv",
         type=str,
@@ -158,7 +172,7 @@ def parse_args():
             "resnet_56",
             "resnet_110",
             "DenseNet_40",
-            "googlenet",
+            "GoogLeNet",
             "MobileNetV2",
         ),
         help="The architecture to prune",
@@ -379,18 +393,18 @@ def parse_args():
         default=0.0001,
         help=" weight decay for fine-tuning",
     )
-    parser.add_argument(
-        "--new_dataset_dir",
-        type=str,
-        default=None,
-        help="Optional new dataset directory for additional testing",
-    )
+    
 
     return parser.parse_args()
 
 def validate_args(args):
-
-    if args.dataset_mode == "rvf10k":
+    """Check if required files and directories exist"""
+    if args.dataset_mode == "hardfake":
+        if not os.path.exists(args.hardfake_csv_file):
+            raise FileNotFoundError(f"Hardfake CSV file not found: {args.hardfake_csv_file}")
+        if not os.path.exists(args.dataset_dir):
+            raise FileNotFoundError(f"Dataset directory not found: {args.dataset_dir}")
+    elif args.dataset_mode == "rvf10k":
         if not os.path.exists(args.rvf10k_train_csv):
             raise FileNotFoundError(f"RVF10k train CSV file not found: {args.rvf10k_train_csv}")
         if not os.path.exists(args.rvf10k_valid_csv):
@@ -430,8 +444,6 @@ def validate_args(args):
             raise ValueError(f"Teacher checkpoint path ({args.teacher_ckpt_path}) is not compatible with MobileNetV2 architecture")
         elif args.arch == "ResNet_50" and "mobilenet" in args.teacher_ckpt_path.lower():
             raise ValueError(f"Teacher checkpoint path ({args.teacher_ckpt_path}) is not compatible with ResNet_50 architecture")
-        #elif args.arch == "googlenet" and "googlenet" in args.teacher_ckpt_path.lower():
-         #   raise ValueError(f"Teacher checkpoint path ({args.teacher_ckpt_path}) is not compatible with googlenet architecture")
 
     if args.phase == "finetune" and args.finetune_student_ckpt_path and not os.path.exists(args.finetune_student_ckpt_path):
         raise FileNotFoundError(f"Finetune student checkpoint not found: {args.finetune_student_ckpt_path}")
@@ -439,8 +451,8 @@ def validate_args(args):
     if args.phase == "test" and args.sparsed_student_ckpt_path and not os.path.exists(args.sparsed_student_ckpt_path):
         raise FileNotFoundError(f"Sparsed student checkpoint not found: {args.sparsed_student_ckpt_path}")
 
-    if args.new_dataset_dir and not os.path.exists(args.new_dataset_dir):
-        raise FileNotFoundError(f"New dataset directory not found: {args.new_dataset_dir}")
+    #if args.new_dataset_dir and not os.path.exists(args.new_dataset_dir):
+      #  raise FileNotFoundError(f"New dataset directory not found: {args.new_dataset_dir}")
 
 def main():
     args = parse_args()
@@ -493,8 +505,6 @@ def main():
         elif args.phase == "test":
             test = Test(args=args)
             test.main()
-   
-
 
 if __name__ == "__main__":
     main()
