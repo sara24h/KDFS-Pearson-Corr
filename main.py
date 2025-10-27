@@ -48,12 +48,6 @@ def parse_args():
         help="Dataset to use: hardfake, rvf10k, 140k, 200k, 190k, or 330k",
     )
     parser.add_argument(
-        "--compress_rate",
-        type=float,
-        default=0.3,
-        help="Compress rate of the student model",
-    )
-    parser.add_argument(
         "--dataset_dir",
         type=str,
         default="/kaggle/input/hardfakevsrealfaces",
