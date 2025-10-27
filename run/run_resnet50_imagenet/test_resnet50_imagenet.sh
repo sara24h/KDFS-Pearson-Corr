@@ -11,7 +11,7 @@ CUDA_VISIBLE_DEVICES=$device python main.py \
   --phase test \
   --dataset_dir $dataset_dir \
   --dataset_mode $dataset_mode \
-  --num_workers 8 \
+  --num_workers 4 \
   --pin_memory \
   --device cuda \
   --arch $arch \
