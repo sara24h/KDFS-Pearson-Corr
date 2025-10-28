@@ -2,9 +2,11 @@ import torch
 import torch.nn as nn
 import sys
 sys.path.append('/kaggle/working')
+sys.path.append('/kaggle/input/KDFS-Pearson-Corr/model/pruned_model')
+sys.path.append('/kaggle/input/KDFS-Pearson-Corr/model/student')
+from ResNet_pruned import ResNet_50_pruned_hardfakevsreal
+from ResNet_sparse import ResNet_50_sparse_hardfakevsreal
 
-from KDFS-Pearson-Corr.model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
-from KDFS-Pearson-Corr.model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal
 
 checkpoint_path = '/kaggle/input/kdfs-10k-pearson-19-shahrivar-314-epochs/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt'
 
