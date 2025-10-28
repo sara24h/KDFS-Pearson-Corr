@@ -1,12 +1,19 @@
 import torch
 import torch.nn as nn
 import sys
+import os  # For checking file existence
 sys.path.append('/kaggle/working')
 
 from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
 from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal
 
-checkpoint_path = '/kaggle/input/330k-08-finetune-30-mordad/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt'
+checkpoint_path_input = input("Please enter the path to the checkpoint file: ").strip()
+
+if not os.path.isfile(checkpoint_path_input):
+    print(f"Error: Checkpoint file not found at '{checkpoint_path_input}'.")
+    sys.exit(1)
+
+checkpoint_path = checkpoint_path_input
 
 print("="*70)
 print("Step 1: Load Student Sparse model")
@@ -290,7 +297,18 @@ print("Step 7: Save the Pruned model")
 print("="*70)
 
 try:
-    save_path = '/kaggle/working/resnet50_base_pruned_model_learnable_masks.pt'
+    # Get save directory from user
+    save_dir_input = input("Please enter the directory to save the pruned model (default: /kaggle/working): ").strip()
+    if not save_dir_input:
+        save_dir_input = '/kaggle/working'
+    
+    # Ensure the path is a directory
+    if not os.path.isdir(save_dir_input):
+        print(f"Warning: Path '{save_dir_input}' is not a directory. Using default path.")
+        save_dir_input = '/kaggle/working'
+
+    save_path_full = os.path.join(save_dir_input, 'resnet50_base_pruned_model_learnable_masks.pt')
+    save_path_weights_only = os.path.join(save_dir_input, 'resnet50_base_pruned_weights_learnable_masks.pt')
     
     checkpoint_to_save = {
         'model_state_dict': model_pruned.state_dict(),
@@ -302,17 +320,15 @@ try:
         'best_prec1': checkpoint.get('best_prec1_after_finetune', None)
     }
     
-    torch.save(checkpoint_to_save, save_path)
-    print(f"Full model saved at: {save_path}")
+    torch.save(checkpoint_to_save, save_path_full)
+    print(f"Full model saved at: {save_path_full}")
     
-    import os
-    file_size_mb = os.path.getsize(save_path) / (1024 * 1024)
-    print(f"File size: {file_size_mb:.2f} MB")
+    torch.save(model_pruned.state_dict(), save_path_weights_only)
+    print(f"Weights only saved at: {save_path_weights_only}")
     
-    save_path_weights = '/kaggle/working/resnet50_base_pruned_weights_learnable_masks.pt'
-    torch.save(model_pruned.state_dict(), save_path_weights)
-    file_size_weights_mb = os.path.getsize(save_path_weights) / (1024 * 1024)
-    print(f"Weights only saved at: {save_path_weights}")
+    file_size_full_mb = os.path.getsize(save_path_full) / (1024 * 1024)
+    file_size_weights_mb = os.path.getsize(save_path_weights_only) / (1024 * 1024)
+    print(f"File size (full): {file_size_full_mb:.2f} MB")
     print(f"File size (weights only): {file_size_weights_mb:.2f} MB")
     
     print("\nSaved information:")
