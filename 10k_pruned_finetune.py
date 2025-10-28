@@ -25,6 +25,8 @@ WILD_STD  = [0.2397, 0.2104, 0.2130]
 REALVSFAKE_MEAN = [0.5256, 0.4289, 0.3770]
 REALVSFAKE_STD  = [0.2414, 0.2127, 0.2079]
 
+RVF10K_MEAN = [0.4868, 0.3972, 0.3624] 
+RVF10K_STD  = [0.2296, 0.2066, 0.2009]
 
 def get_transforms(dataset_name, is_train=True):
     """Return the appropriate transforms based on dataset and train/eval mode."""
@@ -32,8 +34,10 @@ def get_transforms(dataset_name, is_train=True):
         mean, std = WILD_MEAN, WILD_STD
     elif dataset_name == "realvsfake":
         mean, std = REALVSFAKE_MEAN, REALVSFAKE_STD
+    elif dataset_name == "rvf10k":
+        mean, std = RVF10K_MEAN, RVF10K_STD
     else:
-        raise ValueError(f"Dataset '{dataset_name}' is not supported. Valid options: 'wild', 'realvsfake'")
+        raise ValueError(f"Dataset '{dataset_name}' is not supported. Valid options: 'wild', 'realvsfake', 'rvf10k'")
 
     if is_train:
         return transforms.Compose([
@@ -88,6 +92,7 @@ class WildDeepfakeDataset(Dataset):
         except Exception as e:
             print(f"Error loading {img_path}: {e}")
             return torch.zeros(3, 256, 256), torch.tensor(label, dtype=torch.float32)
+
 
 def create_dataloaders(
     train_real_path,
@@ -170,6 +175,7 @@ def train_epoch(model, loader, criterion, optimizer, device, scaler, writer, epo
 
     return avg_loss, avg_acc
 
+
 @torch.no_grad()
 def validate(model, loader, criterion, device, writer, epoch, rank=0):
     model.eval()
@@ -218,6 +224,7 @@ def setup_ddp(seed):
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.enabled = True
     return local_rank
+
 
 def cleanup_ddp():
     if dist.is_initialized():
@@ -270,10 +277,19 @@ def main(args):
         val_fake = os.path.join(base_path, "val/valid_fake")
         test_real = os.path.join(base_path, "test/test_real")
         test_fake = os.path.join(base_path, "test/test_fake")
-    else:
-        raise ValueError("Dataset must be either 'wild' or 'realvsfake'.")
+    elif args.dataset == "rvf10k":
 
-    input_model_path = '/kaggle/input/10k-pruned-model/pytorch/default/1/10k_final (1).pt'
+        base_path = "/kaggle/input/10k-cleaned-for-test-200k-model/rvf10k_seen_train_unseen_val_test_20251028_182153"
+        train_real = os.path.join(base_path, "train", "real")
+        train_fake = os.path.join(base_path, "train", "fake")
+        val_real = os.path.join(base_path, "validation", "real")
+        val_fake = os.path.join(base_path, "validation", "fake")
+        test_real = os.path.join(base_path, "test", "real")
+        test_fake = os.path.join(base_path, "test", "fake")
+    else:
+        raise ValueError("Dataset must be 'wild', 'realvsfake', or 'rvf10k'.")
+
+    input_model_path = '/kaggle/input/200k-pearson-pruned/pytorch/default/1/200k_kdfs_pruned.pt'
     checkpoint = torch.load(input_model_path, map_location=DEVICE)
     masks_detached = [m.detach().clone() if m is not None else None for m in checkpoint['masks']]
 
@@ -281,13 +297,11 @@ def main(args):
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(DEVICE)
 
-    #  Freeze all layers
+    # Freeze all layers
     for param in model.parameters():
         param.requires_grad = False
 
-    # Enable the desired layers for fine-tuning
-    # for param in model.layer3.parameters():  # commented out based on previous code
-    #     param.requires_grad = True
+    # Unfreeze layer4 and fc for fine-tuning
     for param in model.layer4.parameters():
         param.requires_grad = True
     for param in model.fc.parameters():
@@ -322,7 +336,6 @@ def main(args):
     criterion = nn.BCEWithLogitsLoss()
 
     optimizer = optim.AdamW([
-        #{'params': model.module.layer3.parameters(), 'lr': BASE_LR * 0.3, 'weight_decay': WEIGHT_DECAY * 1.5},
         {'params': model.module.layer4.parameters(), 'lr': BASE_LR * 0.6, 'weight_decay': WEIGHT_DECAY * 1.5},
         {'params': model.module.fc.parameters(),     'lr': BASE_LR * 1.0, 'weight_decay': WEIGHT_DECAY * 2.5}
     ])
@@ -342,7 +355,6 @@ def main(args):
 
             if global_rank == 0:
                 print(f"\n Epoch {epoch+1}/{NUM_EPOCHS}")
-                #print(f"   LR (layer3): {optimizer.param_groups[0]['lr']:.7f}")
                 print(f"   LR (layer4): {optimizer.param_groups[0]['lr']:.7f}")
                 print(f"   LR (fc):    {optimizer.param_groups[1]['lr']:.7f}")
                 print("-" * 70)
@@ -388,7 +400,7 @@ def main(args):
                 'model_state_dict': model_inference.state_dict(),
                 'total_params': total_params_inf,
                 'masks': checkpoint['masks'],
-                'model_architecture': 'ResNet_50_pruned_hardfakevsreal (Layer3+4+FC BCE)',
+                'model_architecture': 'ResNet_50_pruned_hardfakevsreal (Layer4+FC BCE)',
                 'best_val_acc': best_val_acc,
                 'test_acc': test_acc,
                 'training_config': {
@@ -399,7 +411,9 @@ def main(args):
                     'epochs': NUM_EPOCHS,
                     'loss': 'BCEWithLogitsLoss',
                     'dataset': args.dataset,
-                    'input_size': [256, 256]
+                    'input_size': [256, 256],
+                    'normalization_mean': RVF10K_MEAN if args.dataset == 'rvf10k' else None,
+                    'normalization_std': RVF10K_STD if args.dataset == 'rvf10k' else None,
                 }
             }
 
@@ -420,6 +434,7 @@ def main(args):
     finally:
         cleanup_ddp()
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fine-tune Pruned ResNet50 for Deepfake Detection")
     parser.add_argument('--num_epochs', type=int, default=15, help='Number of training epochs')
@@ -427,7 +442,8 @@ if __name__ == "__main__":
     parser.add_argument('--learning_rate', type=float, default=0.0001, help='Base learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.00005, help='Weight decay for optimizer')
     parser.add_argument('--accum_steps', type=int, default=1, help='Gradient accumulation steps')
-    parser.add_argument('--dataset', type=str, default='wild', choices=['wild', 'realvsfake'],
-                        help="Choose dataset: 'wild' or 'realvsfake'")
+    parser.add_argument('--dataset', type=str, default='wild',
+                        choices=['wild', 'realvsfake', 'rvf10k'],  
+                        help="Choose dataset: 'wild', 'realvsfake', or 'rvf10k'")
     args = parser.parse_args()
     main(args)
