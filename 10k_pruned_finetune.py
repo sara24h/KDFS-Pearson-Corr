@@ -19,11 +19,9 @@ from torch.amp import autocast, GradScaler
 import argparse
 from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
 
-WILD_MEAN = [0.4416, 0.3445, 0.3151]
-WILD_STD  = [0.2397, 0.2104, 0.2130]
+WILD_MEAN = [0.4868, 0.3972, 0.3624]
+WILD_STD  = [0.2296, 0.2066, 0.2009]
 
-REALVSFAKE_MEAN = [0.5256, 0.4289, 0.3770]
-REALVSFAKE_STD  = [0.2414, 0.2127, 0.2079]
 
 RVF10K_MEAN = [0.4868, 0.3972, 0.3624] 
 RVF10K_STD  = [0.2296, 0.2066, 0.2009]
@@ -262,21 +260,14 @@ def main(args):
         print("=" * 70)
 
     if args.dataset == "wild":
-        base_path = "/kaggle/input/20k-wild-deepfake-dataset"
+        base_path = "/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k"
         train_real = os.path.join(base_path, "train/real")
         train_fake = os.path.join(base_path, "train/fake")
         val_real = os.path.join(base_path, "valid/real")
         val_fake = os.path.join(base_path, "valid/fake")
         test_real = os.path.join(base_path, "test/real")
         test_fake = os.path.join(base_path, "test/fake")
-    elif args.dataset == "realvsfake":
-        base_path = "/kaggle/input/realvsfake/whole"
-        train_real = os.path.join(base_path, "train/real")
-        train_fake = os.path.join(base_path, "train/fake")
-        val_real = os.path.join(base_path, "val/valid_real")
-        val_fake = os.path.join(base_path, "val/valid_fake")
-        test_real = os.path.join(base_path, "test/test_real")
-        test_fake = os.path.join(base_path, "test/test_fake")
+ 
     elif args.dataset == "rvf10k":
 
         base_path = "/kaggle/input/10k-cleaned-for-test-200k-model/rvf10k_seen_train_unseen_val_test_20251028_194502"
@@ -443,7 +434,7 @@ if __name__ == "__main__":
     parser.add_argument('--weight_decay', type=float, default=0.00005, help='Weight decay for optimizer')
     parser.add_argument('--accum_steps', type=int, default=1, help='Gradient accumulation steps')
     parser.add_argument('--dataset', type=str, default='wild',
-                        choices=['wild', 'realvsfake', 'rvf10k'],  
-                        help="Choose dataset: 'wild', 'realvsfake', or 'rvf10k'")
+                        choices=['wild', 'rvf10k'],  
+                        help="Choose dataset: 'wild', or 'rvf10k'")
     args = parser.parse_args()
     main(args)
