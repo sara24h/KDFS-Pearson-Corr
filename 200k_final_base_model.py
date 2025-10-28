@@ -6,7 +6,7 @@ sys.path.append('/kaggle/working')
 from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
 from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal
 
-checkpoint_path = '/kaggle/input/kdfs-200k-r-0-7-resume/results/run_resnet50_imagenet_prune1/student_model/ResNet_50_sparse_best.pt'
+checkpoint_path = '/kaggle/working/200k_final_base.pt'
 
 print("="*70)
 print("Step 1: Load Student Sparse model")
