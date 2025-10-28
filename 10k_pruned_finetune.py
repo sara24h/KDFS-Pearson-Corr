@@ -279,7 +279,7 @@ def main(args):
         test_fake = os.path.join(base_path, "test/test_fake")
     elif args.dataset == "rvf10k":
 
-        base_path = "/kaggle/input/10k-cleaned-for-test-200k-model/rvf10k_seen_train_unseen_val_test_20251028_182153"
+        base_path = "/kaggle/input/10k-cleaned-for-test-200k-model/rvf10k_seen_train_unseen_val_test_20251028_194502"
         train_real = os.path.join(base_path, "train", "real")
         train_fake = os.path.join(base_path, "train", "fake")
         val_real = os.path.join(base_path, "validation", "real")
