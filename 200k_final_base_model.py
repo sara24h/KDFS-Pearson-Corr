@@ -8,17 +8,13 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 output_save_path = '/kaggle/working/200k_base_final.pt'
 
 try:
-    # A) Load the full input checkpoint
     checkpoint_loaded = torch.load(input_save_path, map_location=device)
 
-    # B) Extract key information
     model_state_dict = checkpoint_loaded['model_state_dict']
     masks = checkpoint_loaded['masks']
-    
-    # C) Build the pruned model using the extracted masks
+
     model_pruned = ResNet_50_pruned_hardfakevsreal(masks=masks)
     
-    # D) Load the pruned weights
     model_pruned.load_state_dict(model_state_dict)
     
     model_pruned = model_pruned.to(device)
@@ -34,14 +30,13 @@ try:
 
     checkpoint_to_save = {
         'model_state_dict': model_pruned.state_dict(),
-        'masks': masks,  # Save masks for easier future reconstruction
+        'masks': masks,  
         'total_params': total_params,
         'model_architecture': 'ResNet_50_pruned_hardfakevsreal'
     }
     
     torch.save(checkpoint_to_save, output_save_path)
-    
-    # Print information about the saved file
+
     file_size_mb = os.path.getsize(output_save_path) / (1024 * 1024)
     print(f"The model was successfully saved at {output_save_path}.")
     print(f"Saved file size: {file_size_mb:.2f} MB")
