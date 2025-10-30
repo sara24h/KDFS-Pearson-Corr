@@ -304,7 +304,7 @@ def main(args):
     ])
 
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=args.NUM_EPOCHS, T_mult=2, eta_min=1e-6
+        optimizer, T_0=args.num_epochs, T_mult=1, eta_min=1e-6
     )
     scaler = GradScaler(enabled=True)
 
