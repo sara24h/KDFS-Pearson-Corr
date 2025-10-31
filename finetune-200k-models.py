@@ -299,7 +299,7 @@ def main(args):
     criterion = nn.BCEWithLogitsLoss()
 
     optimizer = optim.AdamW([
-        {'params': model.module.layer4.parameters(), 'lr': BASE_LR , 'weight_decay': WEIGHT_DECAY },
+        {'params': model.module.layer4.parameters(), 'lr': BASE_LR *0.1, 'weight_decay': WEIGHT_DECAY },
         {'params': model.module.fc.parameters(), 'lr': BASE_LR , 'weight_decay': WEIGHT_DECAY }
     ])
 
