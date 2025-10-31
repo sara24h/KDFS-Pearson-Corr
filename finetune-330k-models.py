@@ -40,7 +40,6 @@ def get_transforms(is_train=True):
             transforms.Normalize(mean=MEAN, std=STD)
         ])
 
-
 class WildDeepfakeDataset(Dataset):
     def __init__(self, real_path, fake_path, transform=None):
         self.transform = transform
@@ -266,8 +265,8 @@ def main(args):
         param.requires_grad = False
 
     # Unfreeze layer4 and fc for fine-tuning
-    #for param in model.layer4.parameters():
-        #param.requires_grad = True
+    for param in model.layer4.parameters():
+        param.requires_grad = True
     for param in model.fc.parameters():
         param.requires_grad = True
 
@@ -299,7 +298,7 @@ def main(args):
     criterion = nn.BCEWithLogitsLoss()
 
     optimizer = optim.AdamW([
-        #{'params': model.module.layer4.parameters(), 'lr': BASE_LR*0.1, 'weight_decay': WEIGHT_DECAY },
+        {'params': model.module.layer4.parameters(), 'lr': BASE_LR*0.1, 'weight_decay': WEIGHT_DECAY },
         {'params': model.module.fc.parameters(), 'lr': BASE_LR , 'weight_decay': WEIGHT_DECAY }
     ])
 
@@ -318,8 +317,8 @@ def main(args):
 
             if global_rank == 0:
                 print(f"\nEpoch {epoch+1}/{NUM_EPOCHS}")
-                #print(f"   LR (layer4): {optimizer.param_groups[0]['lr']:.7f}")
-                #print(f"   LR (fc):     {optimizer.param_groups[1]['lr']:.7f}")
+                print(f"   LR (layer4): {optimizer.param_groups[0]['lr']:.7f}")
+                print(f"   LR (fc):     {optimizer.param_groups[1]['lr']:.7f}")
                 print("-" * 70)
 
             train_loss, train_acc = train_epoch(
