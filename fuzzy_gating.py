@@ -351,10 +351,11 @@ def evaluate_ensemble_detailed(model: nn.Module, loader: DataLoader, device: tor
 # =============================================================================
 
 def main_worker(rank: int, world_size: int, args):
-    # تنظیم DDP
+    # تنظیم DDP — اصلاح برای Kaggle
     if world_size > 1:
-        os.environ['MASTER_ADDR'] = 'localhost'
-        os.environ['MASTER_PORT'] = '12355'
+        # استفاده از 127.0.0.1 و پورت ثابت
+        os.environ['MASTER_ADDR'] = '127.0.0.1'
+        os.environ['MASTER_PORT'] = '29500'  # پورت آزاد در Kaggle
         dist.init_process_group("nccl", rank=rank, world_size=world_size)
         torch.cuda.set_device(rank)
 
