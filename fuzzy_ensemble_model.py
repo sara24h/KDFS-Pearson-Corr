@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from pruned_model.Resnet_final  import ResNet_50_pruned_hardfakevsreal
+from model.pruned_model.Resnet_final  import ResNet_50_pruned_hardfakevsreal
 
 
 class FuzzyGatingNetwork(nn.Module):
