@@ -7,8 +7,8 @@ import os
 from tqdm import tqdm
 import numpy as np
 
-class FuzzyGatingNetwork(nn.Module):
 
+class FuzzyGatingNetwork(nn.Module):
     def __init__(self, num_models=5, input_size=256):
         super(FuzzyGatingNetwork, self).__init__()
         
@@ -87,24 +87,25 @@ class FuzzyEnsembleModel(nn.Module):
         
     def forward(self, x, return_individual=False):
         fuzzy_weights = self.gating_network(x)
-    
+        
         model_outputs = []
         for i, model in enumerate(self.models):
             x_normalized = self.normalizations(x, i)
             with torch.no_grad():
                 output = model(x_normalized)
-            
-            # --- این قسمت حیاتیه ---
+                
+                # اگر خروجی tuple بود (مثلاً (logits, features))
                 if isinstance(output, (tuple, list)):
-                    output = output[0]  # فقط logits (اولین خروجی)
-            # ------------------------
-            
-            model_outputs.append(output)
-    
-        model_outputs = torch.stack(model_outputs, dim=1)
-        weights_expanded = fuzzy_weights.unsqueeze(-1)
-        final_output = (model_outputs * weights_expanded).sum(dim=1)
-    
+                    output = output[0]
+                    
+                # اگر (B, 1) بود، به (B, 1) نگه دار (برای BCE)
+                # نیازی به تبدیل به (B, 2) نیست
+                model_outputs.append(output)
+        
+        model_outputs = torch.stack(model_outputs, dim=1)  # (B, num_models, 1)
+        weights_expanded = fuzzy_weights.unsqueeze(-1)     # (B, num_models, 1)
+        final_output = (model_outputs * weights_expanded).sum(dim=1)  # (B, 1)
+        
         if return_individual:
             return final_output, fuzzy_weights, model_outputs
         return final_output, fuzzy_weights
@@ -144,9 +145,8 @@ def create_data_loaders_kaggle(
     batch_size=32,
     num_workers=2
 ):
-   
     print("="*70)
-    print("📂 آماده‌سازی DataLoaders...")
+    print("آماده‌سازی DataLoaders...")
     print("="*70)
     print(f"Base directory: {base_dir}\n")
     
@@ -171,8 +171,8 @@ def create_data_loaders_kaggle(
     
     for path, name in [(train_path, 'train'), (valid_path, 'valid'), (test_path, 'test')]:
         if not os.path.exists(path):
-            raise FileNotFoundError(f"❌ پوشه {name} پیدا نشد: {path}")
-        print(f"✅ {name}: {path}")
+            raise FileNotFoundError(f"پوشه {name} پیدا نشد: {path}")
+        print(f"{name}: {path}")
     
     print()
     
@@ -182,15 +182,15 @@ def create_data_loaders_kaggle(
         val_dataset = datasets.ImageFolder(valid_path, transform=val_test_transform)
         test_dataset = datasets.ImageFolder(test_path, transform=val_test_transform)
     except Exception as e:
-        print(f"❌ خطا: {e}")
-        print("\n💡 ساختار باید دقیقاً اینجوری باشه:")
+        print(f"خطا: {e}")
+        print("\nساختار باید دقیقاً اینجوری باشه:")
         print("   train/fake/  و  train/real/")
         print("   valid/fake/  و  valid/real/")
         print("   test/fake/   و  test/real/")
         raise
     
     # آمار
-    print("📊 آمار دیتاست:")
+    print("آمار دیتاست:")
     print(f"   Train:      {len(train_dataset):,} samples")
     print(f"   Validation: {len(val_dataset):,} samples")
     print(f"   Test:       {len(test_dataset):,} samples")
@@ -224,7 +224,7 @@ def create_data_loaders_kaggle(
         pin_memory=True
     )
     
-    print(f"✅ DataLoaders created!")
+    print(f"DataLoaders created!")
     print(f"   Batch size: {batch_size}")
     print(f"   Train batches: {len(train_loader)}")
     print(f"   Val batches: {len(val_loader)}")
@@ -233,10 +233,11 @@ def create_data_loaders_kaggle(
     
     return train_loader, val_loader, test_loader
 
+
 def train_fuzzy_gating(ensemble_model, train_loader, val_loader, 
                        num_epochs=10, lr=1e-3, device='cuda', 
                        save_dir='/kaggle/working/checkpoints'):
-    """آموزش فقط Gating Network"""
+    """آموزش فقط Gating Network با BCE"""
     os.makedirs(save_dir, exist_ok=True)
     
     trainable_params = list(ensemble_model.gating_network.parameters())
@@ -245,12 +246,13 @@ def train_fuzzy_gating(ensemble_model, train_loader, val_loader,
         optimizer, T_max=num_epochs, eta_min=lr * 0.01
     )
     
-    criterion = nn.CrossEntropyLoss()
+    # تغییر به BCEWithLogitsLoss
+    criterion = nn.BCEWithLogitsLoss()
     best_val_acc = 0.0
     history = {'train_loss': [], 'train_acc': [], 'val_acc': []}
     
     print("="*70)
-    print("🚀 شروع آموزش Fuzzy Gating Network")
+    print("شروع آموزش Fuzzy Gating Network (با BCE)")
     print("="*70)
     print(f"Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
     print(f"Learning rate: {lr}")
@@ -266,18 +268,18 @@ def train_fuzzy_gating(ensemble_model, train_loader, val_loader,
         
         train_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
         for images, labels in train_bar:
-            images, labels = images.to(device), labels.to(device)
+            images, labels = images.to(device), labels.to(device).float()  # labels به float
             
             optimizer.zero_grad()
-            outputs, fuzzy_weights = ensemble_model(images)
-            loss = criterion(outputs, labels)
+            outputs, fuzzy_weights = ensemble_model(images)  # (B, 1)
+            loss = criterion(outputs.squeeze(1), labels)
             loss.backward()
             optimizer.step()
             
             train_loss += loss.item() * images.size(0)
-            _, predicted = outputs.max(1)
+            predicted = (outputs.squeeze(1) > 0).long()
             train_total += labels.size(0)
-            train_correct += predicted.eq(labels).sum().item()
+            train_correct += predicted.eq(labels.long()).sum().item()
             
             train_bar.set_postfix({
                 'loss': f'{loss.item():.4f}',
@@ -294,11 +296,11 @@ def train_fuzzy_gating(ensemble_model, train_loader, val_loader,
         
         with torch.no_grad():
             for images, labels in tqdm(val_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Val]  '):
-                images, labels = images.to(device), labels.to(device)
+                images, labels = images.to(device), labels.to(device).float()
                 outputs, _ = ensemble_model(images)
-                _, predicted = outputs.max(1)
+                predicted = (outputs.squeeze(1) > 0).long()
                 val_total += labels.size(0)
-                val_correct += predicted.eq(labels).sum().item()
+                val_correct += predicted.eq(labels.long()).sum().item()
         
         val_acc = 100. * val_correct / val_total
         
@@ -309,7 +311,7 @@ def train_fuzzy_gating(ensemble_model, train_loader, val_loader,
         history['train_acc'].append(train_acc)
         history['val_acc'].append(val_acc)
         
-        print(f"\n📊 Epoch [{epoch+1}/{num_epochs}] Summary:")
+        print(f"\nEpoch [{epoch+1}/{num_epochs}] Summary:")
         print(f"   Train Loss: {avg_train_loss:.4f} | Train Acc: {train_acc:.2f}%")
         print(f"   Val Acc: {val_acc:.2f}% | LR: {current_lr:.6f}")
         
@@ -325,19 +327,19 @@ def train_fuzzy_gating(ensemble_model, train_loader, val_loader,
             }
             save_path = os.path.join(save_dir, 'best_fuzzy_gating.pt')
             torch.save(checkpoint, save_path)
-            print(f"   ✅ Best model saved! (Val Acc: {best_val_acc:.2f}%)")
+            print(f"   Best model saved! (Val Acc: {best_val_acc:.2f}%)")
         
         print("-"*70 + "\n")
     
     print("="*70)
-    print(f"🎉 آموزش تمام شد! Best Val Acc: {best_val_acc:.2f}%")
+    print(f"آموزش تمام شد! Best Val Acc: {best_val_acc:.2f}%")
     print("="*70)
     
     return best_val_acc, history
 
 
 def evaluate_ensemble(ensemble_model, test_loader, device='cuda', dataset_name='Test'):
-    """ارزیابی کامل و تحلیل وزن‌های فازی"""
+    """ارزیابی کامل و تحلیل وزن‌های فازی با BCE"""
     ensemble_model.eval()
     
     all_predictions = []
@@ -347,14 +349,15 @@ def evaluate_ensemble(ensemble_model, test_loader, device='cuda', dataset_name='
     with torch.no_grad():
         for images, labels in tqdm(test_loader, desc=f'Evaluating {dataset_name}'):
             images = images.to(device)
+            labels = labels.to(device)
             
             outputs, fuzzy_weights, individual_outputs = ensemble_model(
                 images, return_individual=True
             )
             
-            _, predicted = outputs.max(1)
+            predicted = (outputs.squeeze(1) > 0).long()
             all_predictions.extend(predicted.cpu().numpy())
-            all_labels.extend(labels.numpy())
+            all_labels.extend(labels.cpu().numpy())
             all_fuzzy_weights.append(fuzzy_weights.cpu().numpy())
     
     all_predictions = np.array(all_predictions)
@@ -365,7 +368,7 @@ def evaluate_ensemble(ensemble_model, test_loader, device='cuda', dataset_name='
     avg_weights = all_fuzzy_weights.mean(axis=0)
     
     print("\n" + "="*70)
-    print(f"📈 {dataset_name} Results:")
+    print(f"{dataset_name} Results:")
     print("="*70)
     print(f"Accuracy: {accuracy:.2f}%")
     print(f"\nمیانگین وزن‌های فازی:")
@@ -382,23 +385,23 @@ def evaluate_ensemble(ensemble_model, test_loader, device='cuda', dataset_name='
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🔥 Using device: {device}\n")
+    print(f"Using device: {device}\n")
     
     # ===== تنظیمات =====
     model_paths = [
         '/kaggle/input/10k-pearson-pruned/pytorch/default/1/10k_pearson_pruned.pt',
         '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt',
         '/kaggle/input/190k-pearson-pruned/pytorch/default/1/190k_pearson_pruned.pt',
-        '/kaggle/input/200k-pearson-pruned/pytorch/default/1/200k_kdfs_pruned.pt',
+        '/kaggle/input/200k-kdfs-pruned/pytorch/default/1/200k_kdfs_pruned.pt',
         '/kaggle/input/330k-base-pruned/pytorch/default/1/330k_base_pruned.pt'
     ]
     
     means = [
-        (0.5212, 0.4260, 0.3811),  # 10k
-        (0.5207, 0.4258, 0.3806),  # 140k
-        (0.4868, 0.3972, 0.3624),  # 200k
-        (0.4668, 0.3816, 0.3414),  # 190k
-        (0.4923, 0.4042, 0.3624)   # 330k
+        (0.5212, 0.4260, 0.3811),
+        (0.5207, 0.4258, 0.3806),
+        (0.4868, 0.3972, 0.3624),
+        (0.4668, 0.3816, 0.3414),
+        (0.4923, 0.4042, 0.3624)
     ]
     
     stds = [
@@ -417,13 +420,13 @@ if __name__ == "__main__":
     
     # ===== لود مدل‌ها =====
     print("="*70)
-    print("📦 لود مدل‌های هرس‌شده...")
+    print("لود مدل‌های هرس‌شده...")
     print("="*70)
     models = load_pruned_models(model_paths, device)
     
     # ===== ساخت Ensemble =====
     print("="*70)
-    print("🔧 ساخت Fuzzy Ensemble Model...")
+    print("ساخت Fuzzy Ensemble Model...")
     print("="*70)
     ensemble_model = FuzzyEnsembleModel(
         models=models,
@@ -458,27 +461,27 @@ if __name__ == "__main__":
     
     # ===== ارزیابی روی Validation =====
     print("\n" + "="*70)
-    print("🔍 ارزیابی روی Validation Set...")
+    print("ارزیابی روی Validation Set...")
     print("="*70)
     
-    best_checkpoint = torch.load('/kaggle/working/checkpoints/best_fuzzy_gating.pt')
+    best_checkpoint = torch.load('/kaggle/working/checkpoints/best_fuzzy_gating.pt', map_location=device)
     ensemble_model.gating_network.load_state_dict(best_checkpoint['gating_state_dict'])
     
     val_acc, val_weights = evaluate_ensemble(ensemble_model, val_loader, device, 'Validation')
     
     # ===== ارزیابی نهایی روی Test =====
     print("\n" + "="*70)
-    print("🏆 ارزیابی نهایی روی Test Set...")
+    print("ارزیابی نهایی روی Test Set...")
     print("="*70)
     
     test_acc, test_weights = evaluate_ensemble(ensemble_model, test_loader, device, 'Test')
     
     # ===== خلاصه نهایی =====
     print("\n" + "="*70)
-    print("📊 نتایج نهایی")
+    print("نتایج نهایی")
     print("="*70)
-    print(f"✅ Best Validation Accuracy: {best_acc:.2f}%")
-    print(f"✅ Final Test Accuracy: {test_acc:.2f}%")
+    print(f"Best Validation Accuracy: {best_acc:.2f}%")
+    print(f"Final Test Accuracy: {test_acc:.2f}%")
     print("="*70)
     
     # ذخیره مدل نهایی
@@ -491,4 +494,4 @@ if __name__ == "__main__":
         'test_weights': test_weights,
         'history': history
     }, final_save_path)
-    print(f"\n💾 مدل نهایی ذخیره شد: {final_save_path}")
+    print(f"\nمدل نهایی ذخیره شد: {final_save_path}")
