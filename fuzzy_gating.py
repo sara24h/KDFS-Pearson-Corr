@@ -105,12 +105,11 @@ def load_pruned_models(model_paths: List[str], device: torch.device) -> List[nn.
     print(f"Loading {len(model_paths)} pruned models...")
     for i, path in enumerate(model_paths):
         print(f"  [{i+1}/{len(model_paths)}] Loading: {os.path.basename(path)}")
-        ckpt = torch.load(path, map_location='cpu')  # اول CPU
+        ckpt = torch.load(path, map_location='cpu')
         model = ResNet_50_pruned_hardfakevsreal(masks=ckpt['masks'])
         model.load_state_dict(ckpt['model_state_dict'])
         model = model.to(device).eval()
 
-        # Validate masks
         if hasattr(model, 'masks'):
             for j, mask in enumerate(model.masks):
                 mask = mask.to(device)
@@ -162,7 +161,7 @@ def create_dataloaders(base_dir: str, batch_size: int, num_workers: int = 4) -> 
     loaders = {}
     for split, ds in datasets_dict.items():
         shuffle = (split == 'train')
-        drop_last = (split != 'test')  # drop_last برای train و val، نه test
+        drop_last = (split != 'test')
         loaders[split] = DataLoader(
             ds, batch_size=batch_size, shuffle=shuffle,
             num_workers=num_workers, pin_memory=True, drop_last=drop_last
@@ -176,7 +175,7 @@ def create_dataloaders(base_dir: str, batch_size: int, num_workers: int = 4) -> 
 
 
 # =============================================================================
-# ارزیابی دقت
+# ارزیابی دقت (برای training)
 # =============================================================================
 
 @torch.no_grad()
@@ -278,33 +277,65 @@ def train_gating_network(
 
 
 # =============================================================================
-# ارزیابی نهایی
+# ارزیابی دقیق با دقت هر مدل + وزن + مقایسه
 # =============================================================================
 
-def evaluate_ensemble_final(model: nn.Module, loader: DataLoader, device: torch.device, name: str):
+@torch.no_grad()
+def evaluate_ensemble_detailed(model: nn.Module, loader: DataLoader, device: torch.device, name: str):
     model.eval()
-    all_preds, all_labels, all_weights = [], [], []
+    
+    individual_preds = [[] for _ in range(model.num_models)]
+    ensemble_preds = []
+    all_labels = []
+    all_weights = []
 
-    with torch.no_grad():
-        for images, labels in tqdm(loader, desc=f'Evaluating {name}'):
-            images, labels = images.to(device), labels.to(device)
-            outputs, weights, _ = model(images, return_individual=True)
-            pred = (outputs.squeeze(1) > 0).long()
+    print(f"\nEvaluating {name} with detailed per-model analysis...")
+    
+    for images, labels in tqdm(loader, desc=f'{name} Batch'):
+        images, labels = images.to(device), labels.to(device)
+        
+        final_output, weights, individual_outputs = model(images, return_individual=True)
+        
+        ensemble_pred = (final_output.squeeze(1) > 0).long()
+        ensemble_preds.extend(ensemble_pred.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+        all_weights.append(weights.cpu().numpy())
 
-            all_preds.extend(pred.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-            all_weights.append(weights.cpu().numpy())
+        for i in range(model.num_models):
+            pred_i = (individual_outputs[:, i].squeeze(1) > 0).long()
+            individual_preds[i].extend(pred_i.cpu().numpy())
 
-    acc = 100. * np.mean(np.array(all_preds) == np.array(all_labels))
+    all_labels = np.array(all_labels)
+    ensemble_preds = np.array(ensemble_preds)
+    individual_preds = [np.array(preds) for preds in individual_preds]
     avg_weights = np.concatenate(all_weights).mean(axis=0)
 
-    print("\n" + "="*70)
-    print(f"{name} Results → Accuracy: {acc:.2f}%")
-    print("Average Fuzzy Weights:")
-    for i, w in enumerate(avg_weights):
-        print(f"   Model {i+1}: {w:.4f} ({w*100:.2f}%)")
-    print("="*70)
-    return acc, avg_weights
+    ensemble_acc = 100. * np.mean(ensemble_preds == all_labels)
+    
+    print("\n" + "="*80)
+    print(f"{name.upper()} RESULTS")
+    print("="*80)
+    
+    print(f"{'Model':<15} {'Accuracy':<10} {'Weight':<10} {'Status'}")
+    print("-" * 80)
+    
+    individual_accs = []
+    for i in range(model.num_models):
+        acc_i = 100. * np.mean(individual_preds[i] == all_labels)
+        individual_accs.append(acc_i)
+        status = "STRONG" if avg_weights[i] > 0.2 else "WEAK" if avg_weights[i] < 0.1 else "MEDIUM"
+        print(f"Model {i+1:<11} {acc_i:6.2f}%    {avg_weights[i]*100:6.2f}%    {status}")
+    
+    print("-" * 80)
+    print(f"{'ENSEMBLE':<15} {ensemble_acc:6.2f}%    {'100.00%':<10}  FINAL")
+    print("="*80)
+
+    best_single = max(individual_accs)
+    improvement = ensemble_acc - best_single
+    print(f"Best single model: {best_single:.2f}%")
+    print(f"Ensemble improvement: +{improvement:.2f}%")
+    
+    return ensemble_acc, individual_accs, avg_weights
 
 
 # =============================================================================
@@ -356,7 +387,7 @@ def main():
     # لود مدل‌ها
     base_models = load_pruned_models(MODEL_PATHS, device)
 
-    # ساخت ensemble (بدون DataParallel)
+    # ساخت ensemble
     ensemble = FuzzyEnsembleModel(base_models, MEANS, STDS, freeze_models=True).to(device)
 
     # آمار پارامترها
@@ -378,20 +409,22 @@ def main():
     get_gating_network(ensemble).load_state_dict(best_ckpt['gating_state_dict'])
     print("Best gating network loaded.\n")
 
-    # ارزیابی
+    # ارزیابی دقیق
     print("="*70)
-    val_acc, val_weights = evaluate_ensemble_final(ensemble, val_loader, device, "Validation")
+    val_acc, ind_accs_val, weights_val = evaluate_ensemble_detailed(ensemble, val_loader, device, "Validation")
     print("="*70)
-    test_acc, test_weights = evaluate_ensemble_final(ensemble, test_loader, device, "Test")
+    test_acc, ind_accs_test, weights_test = evaluate_ensemble_detailed(ensemble, test_loader, device, "Test")
 
     # ذخیره نهایی
     final_path = '/kaggle/working/fuzzy_ensemble_final.pt'
     torch.save({
         'gating_state_dict': get_gating_network(ensemble).state_dict(),
-        'val_acc': best_val_acc,
+        'val_acc': val_acc,
         'test_acc': test_acc,
-        'val_weights': val_weights.tolist(),
-        'test_weights': test_weights.tolist(),
+        'individual_accs_val': ind_accs_val,
+        'individual_accs_test': ind_accs_test,
+        'weights_val': weights_val.tolist(),
+        'weights_test': weights_test.tolist(),
         'history': history
     }, final_path)
     print(f"\nFinal model saved: {final_path}")
