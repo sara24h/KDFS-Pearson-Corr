@@ -443,15 +443,15 @@ if __name__ == "__main__":
     
     # --- استفاده از 2 GPU با DataParallel ---
     if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel!")
         ensemble_model = nn.DataParallel(ensemble_model)
-        print(f"Model wrapped with DataParallel across {torch.cuda.device_count()} GPUs")
     
-    trainable_params = sum(p.numel() for p in ensemble_model.module.gating_network.parameters() 
-                          if not torch.cuda.device_count() > 1 else 
-                          p.numel() for p in ensemble_model.gating_network.parameters())
-    total_params = sum(p.numel() for p in ensemble_model.module.parameters() 
-                      if not torch.cuda.device_count() > 1 else 
-                      p.numel() for p in ensemble_model.parameters())
+    if torch.cuda.device_count() > 1:
+        trainable_params = sum(p.numel() for p in ensemble_model.module.gating_network.parameters())
+        total_params = sum(p.numel() for p in ensemble_model.module.parameters())
+    else:
+        trainable_params = sum(p.numel() for p in ensemble_model.gating_network.parameters())
+        total_params = sum(p.numel() for p in ensemble_model.parameters())
     
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable (Gating only): {trainable_params:,}")
