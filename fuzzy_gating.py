@@ -1,3 +1,4 @@
+# fuzzy_gating.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -71,7 +72,7 @@ class FuzzyEnsembleModel(nn.Module):
             with torch.no_grad():
                 out = model(x_n)
                 if isinstance(out, (tuple, list)):
-                    out = out[0]  # در صورت بازگشت tuple (logits, ...)
+                    out = out[0]
             outputs.append(out)
 
         outputs = torch.stack(outputs, dim=1)  # (B, N, C)
@@ -80,6 +81,17 @@ class FuzzyEnsembleModel(nn.Module):
         if return_individual:
             return final_output, weights, outputs
         return final_output, weights
+
+
+# =============================================================================
+# تابع کمکی: دسترسی ایمن به gating_network
+# =============================================================================
+
+def get_gating_network(model: nn.Module) -> nn.Module:
+    """Return gating_network whether model is DataParallel or not."""
+    if isinstance(model, nn.DataParallel):
+        return model.module.gating_network
+    return model.gating_network
 
 
 # =============================================================================
@@ -157,7 +169,7 @@ def create_dataloaders(base_dir: str, batch_size: int, num_workers: int = 4) -> 
 
 
 # =============================================================================
-# آموزش Gating Network
+# ارزیابی دقت
 # =============================================================================
 
 @torch.no_grad()
@@ -173,6 +185,10 @@ def evaluate_accuracy(model: nn.Module, loader: DataLoader, device: torch.device
     return 100. * correct / total
 
 
+# =============================================================================
+# آموزش Gating Network
+# =============================================================================
+
 def train_gating_network(
     ensemble_model: nn.Module,
     train_loader: DataLoader,
@@ -184,7 +200,7 @@ def train_gating_network(
 ) -> Tuple[float, Dict[str, Any]]:
 
     os.makedirs(save_dir, exist_ok=True)
-    gating_net = ensemble_model.module.gating_network if isinstance(ensemble_model, nn.DataParallel) else ensemble_model.gating_network
+    gating_net = get_gating_network(ensemble_model)
     optimizer = torch.optim.AdamW(gating_net.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=lr * 0.01)
     criterion = nn.BCEWithLogitsLoss()
@@ -290,8 +306,8 @@ def main():
         '/kaggle/input/10k-pearson-pruned/pytorch/default/1/10k_pearson_pruned.pt',
         '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt',
         '/kaggle/input/190k-pearson-pruned/pytorch/default/1/190k_pearson_pruned.pt',
-        '/kaggle/input/200k-pearson-pruned/pytorch/default/1/200k_kdfs_pruned.pt',
-        '/kaggle/input/330k-pearson-pruned/pytorch/default/1/330k_pearson_pruned.pt'
+        '/kaggle/input/200k-base-pruned/pytorch/default/1/200k_kdfs_pruned.pt',
+        '/kaggle/input/330k-base-pruned/pytorch/default/1/330k_base_pruned.pt'
     ]
 
     MEANS = [(0.5212,0.4260,0.3811), (0.5207,0.4258,0.3806), (0.4868,0.3972,0.3624),
@@ -309,11 +325,13 @@ def main():
     gpu_count = torch.cuda.device_count()
     print(f"Device: {device} | GPUs: {gpu_count}\n")
 
-    # تنظیم seed
+    # Reproducibility
     torch.manual_seed(42)
     np.random.seed(42)
     if device.type == 'cuda':
         torch.cuda.manual_seed_all(42)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
     # لود مدل‌ها
     base_models = load_pruned_models(MODEL_PATHS, device)
@@ -321,18 +339,15 @@ def main():
     # ساخت ensemble
     ensemble = FuzzyEnsembleModel(base_models, MEANS, STDS, freeze_models=True).to(device)
 
-    # چند GPU
+    # چند GPU با DataParallel
     if gpu_count > 1:
         print(f"Using nn.DataParallel on {gpu_count} GPUs")
         ensemble = nn.DataParallel(ensemble)
-        try:
-            ensemble = torch.compile(ensemble, mode='max-autotune')  # PyTorch 2.0+
-            print("Model compiled with torch.compile!")
-        except Exception as e:
-            print(f"torch.compile skipped: {e}")
+
+    # دسترسی ایمن به gating
+    gating = get_gating_network(ensemble)
 
     # آمار پارامترها
-    gating = ensemble.module.gating_network if isinstance(ensemble, nn.DataParallel) else ensemble.gating_network
     total_params = sum(p.numel() for p in ensemble.parameters())
     trainable = sum(p.numel() for p in gating.parameters())
     print(f"Total params: {total_params:,} | Trainable: {trainable:,} | Frozen: {total_params - trainable:,}\n")
