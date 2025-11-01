@@ -316,6 +316,20 @@ def evaluate_ensemble_final(model: nn.Module, loader: DataLoader, device: torch.
 # =============================================================================
 
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Train Fuzzy Gating Network")
+    parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs (default: 10)')
+    parser.add_argument('--lr', type=float, default=1e-3, help='Initial learning rate (default: 1e-3)')
+    parser.add_argument('--batch_size_multiplier', type=int, default=32, 
+                        help='Base batch size per GPU (total = multiplier * num_gpus) (default: 32)')
+    parser.add_argument('--data_dir', type=str, default='/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k',
+                        help='Path to dataset (train/valid/test)')
+    parser.add_argument('--save_dir', type=str, default='/kaggle/working/checkpoints',
+                        help='Directory to save checkpoints')
+
+    args = parser.parse_args()
+
     # تنظیمات
     MODEL_PATHS = [
         '/kaggle/input/10k-pearson-pruned/pytorch/default/1/10k_pearson_pruned.pt',
@@ -330,10 +344,12 @@ def main():
     STDS = [(0.2486,0.2238,0.2211), (0.2490,0.2239,0.2212), (0.2296,0.2066,0.2009),
             (0.2410,0.2161,0.2081), (0.2446,0.2198,0.2141)]
 
-    DATA_DIR = '/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k'
-    NUM_EPOCHS = 10
-    LR = 1e-3
-    SAVE_DIR = '/kaggle/working/checkpoints'
+    # از آرگومان‌ها استفاده کن
+    NUM_EPOCHS = args.epochs
+    LR = args.lr
+    DATA_DIR = args.data_dir
+    SAVE_DIR = args.save_dir
+    BATCH_SIZE_BASE = args.batch_size_multiplier
 
     # دستگاه
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -368,7 +384,7 @@ def main():
     print(f"Total params: {total_params:,} | Trainable: {trainable:,} | Frozen: {total_params - trainable:,}\n")
 
     # دیتالودر
-    BATCH_SIZE = 32 * max(1, gpu_count)
+    BATCH_SIZE = BATCH_SIZE_BASE * max(1, gpu_count)
     train_loader, val_loader, test_loader = create_dataloaders(DATA_DIR, BATCH_SIZE, num_workers=4)
 
     # آموزش
