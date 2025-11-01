@@ -107,7 +107,7 @@ class FuzzyEnsembleModel(nn.Module):
     
         if return_individual:
             return final_output, fuzzy_weights, model_outputs
-    return final_output, fuzzy_weights
+        return final_output, fuzzy_weights
 
 
 # =============================================================================
