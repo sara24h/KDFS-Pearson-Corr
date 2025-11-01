@@ -216,11 +216,15 @@ def train_gating_network(
 
     for epoch in range(num_epochs):
         ensemble_model.train()
-        train_loss = train_correct = train_total = 0.0
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
 
         progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
+
         for images, labels in progress_bar:
             images, labels = images.to(device), labels.to(device).float()
+
             optimizer.zero_grad()
             outputs, _ = ensemble_model(images)
             loss = criterion(outputs.squeeze(1), labels)
@@ -229,12 +233,23 @@ def train_gating_network(
 
             batch_size = images.size(0)
             train_loss += loss.item() * batch_size
+
+            # محاسبه پیش‌بینی
             pred = (outputs.squeeze(1) > 0).long()
             train_correct += pred.eq(labels.long()).sum().item()
             train_total += batch_size
 
-            progress_bar.set_postfix({'loss': f'{loss.item():.4f}'})
+            # دقت تجمعی
+            current_acc = 100. * train_correct / train_total
+            avg_loss = train_loss / train_total
 
+            # نمایش loss و acc در tqdm
+            progress_bar.set_postfix({
+                'loss': f'{avg_loss:.4f}',
+                'acc': f'{current_acc:.2f}%'
+            })
+
+        # دقت و لاس کل اپیک
         train_acc = 100. * train_correct / train_total
         train_loss /= train_total
         val_acc = evaluate_accuracy(ensemble_model, val_loader, device)
