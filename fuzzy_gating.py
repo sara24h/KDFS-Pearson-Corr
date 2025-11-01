@@ -87,21 +87,27 @@ class FuzzyEnsembleModel(nn.Module):
         
     def forward(self, x, return_individual=False):
         fuzzy_weights = self.gating_network(x)
-        
+    
         model_outputs = []
         for i, model in enumerate(self.models):
             x_normalized = self.normalizations(x, i)
             with torch.no_grad():
                 output = model(x_normalized)
+            
+            # --- این قسمت حیاتیه ---
+                if isinstance(output, (tuple, list)):
+                    output = output[0]  # فقط logits (اولین خروجی)
+            # ------------------------
+            
             model_outputs.append(output)
-        
+    
         model_outputs = torch.stack(model_outputs, dim=1)
         weights_expanded = fuzzy_weights.unsqueeze(-1)
         final_output = (model_outputs * weights_expanded).sum(dim=1)
-        
+    
         if return_individual:
             return final_output, fuzzy_weights, model_outputs
-        return final_output, fuzzy_weights
+    return final_output, fuzzy_weights
 
 
 # =============================================================================
