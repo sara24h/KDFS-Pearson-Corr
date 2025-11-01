@@ -380,10 +380,16 @@ def evaluate_ensemble(ensemble_model, test_loader, device='cuda', dataset_name='
 
 
 # =============================================================================
-# Main Script - آماده برای Kaggle
+# Main Script - آماده برای Kaggle + 2 GPU موازی
 # =============================================================================
 
 if __name__ == "__main__":
+    # تشخیص دستگاه
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel!")
+    else:
+        print("Only 1 GPU available. Using single GPU.")
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}\n")
     
@@ -413,7 +419,7 @@ if __name__ == "__main__":
     ]
     
     # Hyperparameters
-    BATCH_SIZE = 32
+    BATCH_SIZE = 32 * torch.cuda.device_count()  # 32 × 2 = 64
     NUM_EPOCHS = 10
     LEARNING_RATE = 1e-3
     DATA_DIR = '/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k'
@@ -435,8 +441,18 @@ if __name__ == "__main__":
         freeze_models=True
     ).to(device)
     
-    trainable_params = sum(p.numel() for p in ensemble_model.gating_network.parameters())
-    total_params = sum(p.numel() for p in ensemble_model.parameters())
+    # --- استفاده از 2 GPU با DataParallel ---
+    if torch.cuda.device_count() > 1:
+        ensemble_model = nn.DataParallel(ensemble_model)
+        print(f"Model wrapped with DataParallel across {torch.cuda.device_count()} GPUs")
+    
+    trainable_params = sum(p.numel() for p in ensemble_model.module.gating_network.parameters() 
+                          if not torch.cuda.device_count() > 1 else 
+                          p.numel() for p in ensemble_model.gating_network.parameters())
+    total_params = sum(p.numel() for p in ensemble_model.module.parameters() 
+                      if not torch.cuda.device_count() > 1 else 
+                      p.numel() for p in ensemble_model.parameters())
+    
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable (Gating only): {trainable_params:,}")
     print(f"Frozen: {total_params - trainable_params:,}\n")
@@ -444,8 +460,8 @@ if __name__ == "__main__":
     # ===== آماده‌سازی داده =====
     train_loader, val_loader, test_loader = create_data_loaders_kaggle(
         base_dir=DATA_DIR,
-        batch_size=BATCH_SIZE,
-        num_workers=2
+        batch_size=BATCH_SIZE,  # حالا 64
+        num_workers=4  # می‌تونی بیشتر کنی
     )
     
     # ===== آموزش =====
@@ -459,17 +475,22 @@ if __name__ == "__main__":
         save_dir='/kaggle/working/checkpoints'
     )
     
-    # ===== ارزیابی روی Validation =====
+    # ===== بارگذاری بهترین مدل (بعد از DataParallel) =====
     print("\n" + "="*70)
     print("ارزیابی روی Validation Set...")
     print("="*70)
     
-    best_checkpoint = torch.load('/kaggle/working/checkpoints/best_fuzzy_gating.pt', map_location=device)
-    ensemble_model.gating_network.load_state_dict(best_checkpoint['gating_state_dict'])
+    # اگر از DataParallel استفاده کردی، باید .module دسترسی بدی
+    if torch.cuda.device_count() > 1:
+        gating_state_dict = best_checkpoint['gating_state_dict']
+        ensemble_model.module.gating_network.load_state_dict(gating_state_dict)
+    else:
+        best_checkpoint = torch.load('/kaggle/working/checkpoints/best_fuzzy_gating.pt', map_location=device)
+        ensemble_model.gating_network.load_state_dict(best_checkpoint['gating_state_dict'])
     
+    # ارزیابی
     val_acc, val_weights = evaluate_ensemble(ensemble_model, val_loader, device, 'Validation')
     
-    # ===== ارزیابی نهایی روی Test =====
     print("\n" + "="*70)
     print("ارزیابی نهایی روی Test Set...")
     print("="*70)
@@ -484,14 +505,19 @@ if __name__ == "__main__":
     print(f"Final Test Accuracy: {test_acc:.2f}%")
     print("="*70)
     
-    # ذخیره مدل نهایی
+    # ذخیره نهایی (فقط gating network)
     final_save_path = '/kaggle/working/fuzzy_ensemble_final.pt'
-    torch.save({
-        'gating_state_dict': ensemble_model.gating_network.state_dict(),
+    save_dict = {
         'val_acc': best_acc,
         'test_acc': test_acc,
         'val_weights': val_weights,
         'test_weights': test_weights,
         'history': history
-    }, final_save_path)
+    }
+    if torch.cuda.device_count() > 1:
+        save_dict['gating_state_dict'] = ensemble_model.module.gating_network.state_dict()
+    else:
+        save_dict['gating_state_dict'] = ensemble_model.gating_network.state_dict()
+    
+    torch.save(save_dict, final_save_path)
     print(f"\nمدل نهایی ذخیره شد: {final_save_path}")
