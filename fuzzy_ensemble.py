@@ -1,603 +1,418 @@
-import numpy as np
+"""
+FUZZY GATING ENSEMBLE - با دیتاست از قبل Split شده
+=========================================================
+این نسخه برای دیتاست‌هایی که از قبل به train/valid/test تقسیم شدن
+"""
+
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, roc_auc_score, f1_score, confusion_matrix
-from itertools import combinations
-import matplotlib.pyplot as plt
-from tqdm import tqdm
-import os
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from torchvision import transforms
-from PIL import Image
-# Import معماری مدل pruned شما
-from model.pruned_model.Resnet_final import ResNet_50_pruned_hardfakevsreal
+import sys
+import os
+from pathlib import Path
+import glob
 
-class DeepfakeDataset(Dataset):
-    """Dataset برای بارگذاری تصاویر"""
-    def __init__(self, image_paths, labels, transform=None):
-        self.image_paths = image_paths
-        self.labels = labels
-        self.transform = transform
-        
-    def __len__(self):
-        return len(self.image_paths)
-    
-    def __getitem__(self, idx):
-        image = Image.open(self.image_paths[idx]).convert('RGB')
-        label = self.labels[idx]
-        
-        if self.transform:
-            image = self.transform(image)
-            
-        return image, label
+# ==================== CONFIGURATION ====================
+class Config:
 
-def get_transforms(model_name='default'):
-    
-    transforms_dict = {
-        'model1': transforms.Compose([
-            transforms.Resize((256, 256)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5212, 0.4260, 0.3811], std=[0.2486, 0.2238, 0.2211])
-        ]),
-        'model2': transforms.Compose([
-            transforms.Resize((256, 256)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5207, 0.4258, 0.3806], std=[0.2490, 0.2239, 0.2212])
-        ]),
-        'model3': transforms.Compose([
-            transforms.Resize((256, 256)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.4868, 0.3972, 0.3624], std=[0.2296, 0.2066, 0.2009])
-        ]),
-        'model4': transforms.Compose([
-            transforms.Resize((256, 256)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.4668, 0.3816, 0.3414], std=[0.2410, 0.2161, 0.2081])
-        ]),
-        'model5': transforms.Compose([
-            transforms.Resize((256, 256)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.4923, 0.4042, 0.3624], std=[0.2446, 0.2198, 0.2141])
-        ])
-    }
-    
-    return transforms_dict.get(model_name, transforms_dict['default'])
-
-# ==================== بخش 2: استخراج Predictions از مدل‌ها ====================
-class ModelPredictor:
-    
-    def __init__(self, model_configs, device='cuda'):
-        
-        self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
-        self.models = []
-        self.model_names = []
-        
-        print(f"🔧 Device: {self.device}")
-        print(f"📦 بارگذاری {len(model_configs)} مدل ResNet-50 Pruned...")
-        
-        for i, config in enumerate(model_configs):
-            model_path = config['model_path']
-            mask_path = config.get('mask_path', None)
-            name = config.get('name', f'Model_{i+1}')
-            
-            print(f"\n [{i+1}/{len(model_configs)}] {name}")
-            print(f" مدل: {os.path.basename(model_path)}")
-            if mask_path:
-                print(f" Mask: {os.path.basename(mask_path)}")
-            else:
-                print(f" Mask: None (بدون ماسک)")
-            
-            model = self.load_pruned_model(model_path, mask_path)
-            model.eval()
-            
-            self.models.append(model)
-            self.model_names.append(name)
-            
-            print(f" ✓ بارگذاری موفق")
-        
-        print(f"\n✅ همه مدل‌ها با موفقیت بارگذاری شدند!")
-    
-    def load_pruned_model(self, model_path, mask_path=None):
-        
-        if mask_path:
-            mask_checkpoint = torch.load(mask_path, map_location='cpu')
-        
-            if isinstance(mask_checkpoint, dict):
-                if 'mask' in mask_checkpoint:
-                    masks = mask_checkpoint['mask']
-                elif 'masks' in mask_checkpoint:
-                    masks = mask_checkpoint['masks']
-                else:
-                    # شاید خود checkpoint همان masks باشد
-                    masks = mask_checkpoint
-            else:
-                masks = mask_checkpoint
-        else:
-            masks = None
-        
-        # ساخت مدل با masks (اگر masks None باشد، فرض بر این است که مدل بدون ماسک کار می‌کند)
-        model = ResNet_50_pruned_hardfakevsreal(masks=masks)
-        
-        # بارگذاری وزن‌ها
-        model_checkpoint = torch.load(model_path, map_location=self.device)
-        
-        # استخراج state_dict
-        if isinstance(model_checkpoint, dict):
-            if 'model_state_dict' in model_checkpoint:
-                state_dict = model_checkpoint['model_state_dict']
-            elif 'state_dict' in model_checkpoint:
-                state_dict = model_checkpoint['state_dict']
-            elif 'model' in model_checkpoint:
-                state_dict = model_checkpoint['model']
-            else:
-                state_dict = model_checkpoint
-        else:
-            state_dict = model_checkpoint
-        
-        # بارگذاری وزن‌ها
-        model.load_state_dict(state_dict, strict=False)
-        model = model.to(self.device)
-        
-        return model
-    
-    def get_predictions(self, image_paths, labels, batch_size=32, show_progress=True):
-        
-        n_samples = len(image_paths)
-        n_models = len(self.models)
-        all_predictions = np.zeros((n_samples, n_models))
-        
-        print(f"\n🔍 استخراج پیش‌بینی‌ها از {n_models} مدل...")
-        print(f" تعداد نمونه‌ها: {n_samples}")
-        print(f" Batch size: {batch_size}")
-        
-        for model_idx, (model, model_name) in enumerate(zip(self.models, self.model_names)):
-            print(f"\n 📊 مدل {model_idx+1}/{n_models}: {model_name}")
-            
-            # ایجاد dataset با transform مخصوص این مدل
-            transform = get_transforms(model_name)
-            dataset = DeepfakeDataset(image_paths, labels, transform)
-            dataloader = DataLoader(
-                dataset,
-                batch_size=batch_size,
-                shuffle=False,
-                num_workers=4,
-                pin_memory=True if self.device.type == 'cuda' else False
-            )
-            
-            # استخراج predictions
-            predictions = []
-            with torch.no_grad():
-                iterator = tqdm(dataloader, desc=f" Processing") if show_progress else dataloader
-                for images, _ in iterator:
-                    images = images.to(self.device)
-                    outputs, _ = model(images) # model returns (output, feature_list)
-                    probs = torch.sigmoid(outputs).cpu().numpy().flatten()
-                    predictions.extend(probs)
-            
-            predictions = np.array(predictions)
-            all_predictions[:, model_idx] = predictions
-            
-            # نمایش آماره‌ها
-            print(f" 📈 میانگین: {np.mean(predictions):.4f}")
-            print(f" 📉 انحراف معیار: {np.std(predictions):.4f}")
-            print(f" 📏 دامنه: [{np.min(predictions):.4f}, {np.max(predictions):.4f}]")
-        
-        print("\n✅ استخراج پیش‌بینی‌ها تکمیل شد!")
-        return all_predictions, np.array(labels)
-
-# ==================== بخش 3: Choquet Integral ====================
-class SimplifiedChoquetIntegral(nn.Module):
-    
-    def __init__(self, n_models=5):
-        super(SimplifiedChoquetIntegral, self).__init__()
-        self.n_models = n_models
-        
-        # وزن‌های مستقل برای هر مدل
-        self.individual_weights = nn.Parameter(torch.ones(n_models))
-        
-        # وزن‌های تعامل زوجی (synergy)
-        n_pairs = n_models * (n_models - 1) // 2
-        self.interaction_weights = nn.Parameter(torch.zeros(n_pairs))
-        
-    def forward(self, predictions):
-        """
-        ترکیب فازی پیش‌بینی‌های مدل‌ها
-        
-        Args:
-            predictions: (batch_size, n_models) - احتمالات پیش‌بینی شده
-        """
-        batch_size = predictions.shape[0]
-        
-        # نرمال‌سازی وزن‌های مستقل
-        weights = torch.softmax(self.individual_weights, dim=0)
-        
-        # ترکیب خطی وزن‌دار
-        result = torch.sum(predictions * weights.unsqueeze(0), dim=1)
-        
-        # اضافه کردن تعاملات زوجی
-        pair_idx = 0
-        for i in range(self.n_models):
-            for j in range(i+1, self.n_models):
-                interaction = self.interaction_weights[pair_idx]
-                result += interaction * predictions[:, i] * predictions[:, j]
-                pair_idx += 1
-        
-        # محدود کردن خروجی به [0, 1]
-        result = torch.sigmoid(result)
-        
-        return result
-
-class EnsembleTrainer:
-    """کلاس آموزش و ارزیابی Ensemble با Choquet Integral"""
-    
-    def __init__(self, model_predictions, true_labels, model_names=None):
-        """
-        Args:
-            model_predictions: آرایه numpy (n_samples, n_models)
-            true_labels: آرایه numpy (n_samples,)
-            model_names: لیست نام مدل‌ها (اختیاری)
-        """
-        self.n_models = model_predictions.shape[1]
-        self.model_names = model_names or [f'Model {i+1}' for i in range(self.n_models)]
-        
-        # تبدیل به tensor
-        self.X = torch.FloatTensor(model_predictions)
-        self.y = torch.FloatTensor(true_labels)
-        
-        # تقسیم به train/validation
-        X_train, X_val, y_train, y_val = train_test_split(
-            self.X.numpy(), self.y.numpy(),
-            test_size=0.2, random_state=42, stratify=true_labels
-        )
-        
-        self.X_train = torch.FloatTensor(X_train)
-        self.y_train = torch.FloatTensor(y_train)
-        self.X_val = torch.FloatTensor(X_val)
-        self.y_val = torch.FloatTensor(y_val)
-        
-        # ساخت مدل Choquet
-        self.model = SimplifiedChoquetIntegral(self.n_models)
-        self.history = {'train_loss': [], 'val_loss': [], 'val_auc': []}
-        
-    def train(self, epochs=100, lr=0.01, batch_size=256, patience=20):
-        """آموزش مدل Choquet Integral"""
-        criterion = nn.BCELoss()
-        optimizer = optim.Adam(self.model.parameters(), lr=lr, weight_decay=1e-5)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=10, verbose=False
-        )
-        
-        n_batches = len(self.X_train) // batch_size + 1
-        best_val_loss = float('inf')
-        patience_counter = 0
-        
-        print("\n" + "="*70)
-        print("🎓 شروع آموزش Choquet Integral")
-        print("="*70)
-        print(f"نمونه‌های آموزشی: {len(self.X_train):,}")
-        print(f"نمونه‌های اعتبارسنجی: {len(self.X_val):,}")
-        print(f"تعداد مدل‌ها: {self.n_models}")
-        print(f"Epochs: {epochs}")
-        print(f"Batch size: {batch_size}")
-        print(f"Learning rate: {lr}")
-        print(f"Patience: {patience}\n")
-        
-        for epoch in range(epochs):
-            # Training
-            self.model.train()
-            train_loss = 0.0
-            indices = torch.randperm(len(self.X_train))
-            
-            for i in range(n_batches):
-                start_idx = i * batch_size
-                end_idx = min((i + 1) * batch_size, len(self.X_train))
-                if start_idx >= end_idx:
-                    break
-                
-                batch_indices = indices[start_idx:end_idx]
-                batch_X = self.X_train[batch_indices]
-                batch_y = self.y_train[batch_indices]
-                
-                optimizer.zero_grad()
-                outputs = self.model(batch_X)
-                loss = criterion(outputs, batch_y)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                optimizer.step()
-                
-                train_loss += loss.item()
-            
-            # Validation
-            self.model.eval()
-            with torch.no_grad():
-                val_outputs = self.model(self.X_val)
-                val_loss = criterion(val_outputs, self.y_val).item()
-                val_auc = roc_auc_score(self.y_val.numpy(), val_outputs.numpy())
-            
-            avg_train_loss = train_loss / n_batches
-            self.history['train_loss'].append(avg_train_loss)
-            self.history['val_loss'].append(val_loss)
-            self.history['val_auc'].append(val_auc)
-            
-            scheduler.step(val_loss)
-            
-            # نمایش پیشرفت
-            if (epoch + 1) % 10 == 0:
-                print(f"Epoch {epoch+1:3d}/{epochs} | "
-                      f"Train Loss: {avg_train_loss:.4f} | "
-                      f"Val Loss: {val_loss:.4f} | "
-                      f"Val AUC: {val_auc:.4f}")
-            
-            # Early stopping
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                patience_counter = 0
-                self.best_model_state = self.model.state_dict().copy()
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    print(f"\n⚠️ Early stopping در epoch {epoch+1}")
-                    break
-        
-        # بارگذاری بهترین مدل
-        self.model.load_state_dict(self.best_model_state)
-        print("\n✅ آموزش با موفقیت تکمیل شد!")
-        print(f" بهترین Val Loss: {best_val_loss:.4f}")
-        
-    def evaluate(self, X_test, y_test):
-        """ارزیابی جامع مدل ensemble"""
-        self.model.eval()
-        X_test_tensor = torch.FloatTensor(X_test)
-        
-        with torch.no_grad():
-            ensemble_probs = self.model(X_test_tensor).numpy()
-        
-        ensemble_preds = (ensemble_probs >= 0.5).astype(int)
-        
-        # متریک‌های ensemble
-        ensemble_acc = accuracy_score(y_test, ensemble_preds)
-        ensemble_auc = roc_auc_score(y_test, ensemble_probs)
-        ensemble_f1 = f1_score(y_test, ensemble_preds)
-        
-        # ارزیابی مدل‌های تکی
-        individual_results = []
-        for i in range(X_test.shape[1]):
-            preds = (X_test[:, i] >= 0.5).astype(int)
-            acc = accuracy_score(y_test, preds)
-            auc = roc_auc_score(y_test, X_test[:, i])
-            f1 = f1_score(y_test, preds)
-            individual_results.append({
-                'model': self.model_names[i],
-                'accuracy': acc,
-                'auc': auc,
-                'f1': f1
-            })
-        
-        best_single = max(individual_results, key=lambda x: x['auc'])
-        
-        # نمایش نتایج
-        print("\n" + "="*70)
-        print("📊 نتایج ارزیابی نهایی")
-        print("="*70)
-        
-        print("\n🔍 عملکرد مدل‌های تکی:")
-        print("-" * 70)
-        for result in individual_results:
-            print(f"{result['model']:20s} | "
-                  f"Acc: {result['accuracy']:.4f} | "
-                  f"AUC: {result['auc']:.4f} | "
-                  f"F1: {result['f1']:.4f}")
-        
-        print("\n" + "-" * 70)
-        print(f"🏆 بهترین مدل تکی: {best_single['model']}")
-        print(f" AUC: {best_single['auc']:.4f}")
-        
-        print("\n🎯 عملکرد Ensemble (Choquet Integral):")
-        print("-" * 70)
-        print(f"Accuracy: {ensemble_acc:.4f}")
-        print(f"AUC: {ensemble_auc:.4f}")
-        print(f"F1-Score: {ensemble_f1:.4f}")
-        
-        print("\n📈 بهبود نسبت به بهترین مدل تکی:")
-        print("-" * 70)
-        improvement_auc = ((ensemble_auc - best_single['auc']) / best_single['auc']) * 100
-        improvement_acc = ((ensemble_acc - best_single['accuracy']) / best_single['accuracy']) * 100
-        improvement_f1 = ((ensemble_f1 - best_single['f1']) / best_single['f1']) * 100
-        
-        print(f"AUC: {improvement_auc:+.2f}%")
-        print(f"Accuracy: {improvement_acc:+.2f}%")
-        print(f"F1-Score: {improvement_f1:+.2f}%")
-        
-        # Confusion Matrix
-        cm = confusion_matrix(y_test, ensemble_preds)
-        print("\n📋 Confusion Matrix:")
-        print(f" True Negative: {cm[0,0]:,}")
-        print(f" False Positive: {cm[0,1]:,}")
-        print(f" False Negative: {cm[1,0]:,}")
-        print(f" True Positive: {cm[1,1]:,}")
-        print("="*70)
-        
-        return {
-            'ensemble': {'accuracy': ensemble_acc, 'auc': ensemble_auc, 'f1': ensemble_f1},
-            'best_single': best_single,
-            'individual': individual_results,
-            'improvement': {
-                'auc': improvement_auc,
-                'accuracy': improvement_acc,
-                'f1': improvement_f1
-            }
-        }
-    
-    def get_learned_weights(self):
-        """نمایش وزن‌های یادگیری‌شده"""
-        print("\n" + "="*70)
-        print("⚖️ وزن‌های یادگیری‌شده")
-        print("="*70)
-        
-        weights = torch.softmax(self.model.individual_weights, dim=0).detach().numpy()
-        print("\n📊 وزن‌های مستقل مدل‌ها:")
-        for i, (name, w) in enumerate(zip(self.model_names, weights)):
-            bar = '█' * int(w * 50)
-            print(f" {name:20s}: {w:.4f} ({w*100:5.1f}%) {bar}")
-        
-        print("\n🔗 وزن‌های تعامل زوجی:")
-        interactions = self.model.interaction_weights.detach().numpy()
-        idx = 0
-        for i in range(self.n_models):
-            for j in range(i+1, self.n_models):
-                sign = "+" if interactions[idx] >= 0 else ""
-                color = "🟢" if interactions[idx] > 0.01 else "🔴" if interactions[idx] < -0.01 else "⚪"
-                print(f" {color} {self.model_names[i]} ↔ {self.model_names[j]}: {sign}{interactions[idx]:.4f}")
-                idx += 1
-        print("="*70)
-    
-    def plot_training_history(self, save_path='training_history.png'):
-        """رسم تاریخچه آموزش"""
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-        
-        axes[0].plot(self.history['train_loss'], label='Train Loss', linewidth=2, color='#1f77b4')
-        axes[0].plot(self.history['val_loss'], label='Validation Loss', linewidth=2, color='#ff7f0e')
-        axes[0].set_xlabel('Epoch', fontsize=12)
-        axes[0].set_ylabel('Loss', fontsize=12)
-        axes[0].set_title('Training History - Loss', fontsize=14, fontweight='bold')
-        axes[0].legend(fontsize=11)
-        axes[0].grid(True, alpha=0.3)
-        
-        axes[1].plot(self.history['val_auc'], label='Validation AUC', color='#2ca02c', linewidth=2)
-        axes[1].set_xlabel('Epoch', fontsize=12)
-        axes[1].set_ylabel('AUC', fontsize=12)
-        axes[1].set_title('Training History - AUC', fontsize=14, fontweight='bold')
-        axes[1].legend(fontsize=11)
-        axes[1].grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"\n📊 نمودار ذخیره شد: {save_path}")
-        plt.show()
-    
-    def save_model(self, save_path='choquet_ensemble.pth'):
-        """ذخیره مدل آموزش‌دیده"""
-        torch.save({
-            'model_state_dict': self.model.state_dict(),
-            'model_names': self.model_names,
-            'n_models': self.n_models,
-            'history': self.history
-        }, save_path)
-        print(f"💾 مدل ذخیره شد: {save_path}")
-    
-    def load_model(self, load_path='choquet_ensemble.pth'):
-        """بارگذاری مدل ذخیره‌شده"""
-        checkpoint = torch.load(load_path)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.model_names = checkpoint['model_names']
-        self.history = checkpoint.get('history', {'train_loss': [], 'val_loss': [], 'val_auc': []})
-        print(f"📂 مدل بارگذاری شد: {load_path}")
-
-# ==================== بخش 4: Pipeline اصلی ====================
-def main_pipeline(model_configs, image_paths, labels, test_size=0.15):
-    """
-    Pipeline کامل: از بارگذاری مدل‌ها تا ارزیابی نهایی
-    
-    Args:
-        model_configs: لیست دیکشنری‌های تنظیمات مدل‌ها
-        image_paths: لیست مسیرهای تصاویر
-        labels: آرایه numpy برچسب‌ها
-        test_size: نسبت داده‌های تست
-    
-    Returns:
-        trainer: شیء EnsembleTrainer
-        results: نتایج ارزیابی
-    """
-    
-    print("\n" + "="*70)
-    print("🚀 سیستم تشخیص Deepfake با Choquet Integral")
-    print(" استفاده از مدل‌های ResNet-50 Pruned")
-    print("="*70)
-    
-    # گام 1: بارگذاری مدل‌ها
-    print("\n📥 گام 1: بارگذاری مدل‌های ResNet-50 Pruned")
-    predictor = ModelPredictor(model_configs, device='cuda')
-    
-    # گام 2: استخراج predictions
-    print("\n🔍 گام 2: استخراج پیش‌بینی‌های مدل‌ها")
-    all_predictions, all_labels = predictor.get_predictions(
-        image_paths, labels, batch_size=32, show_progress=True
-    )
-    
-    # گام 3: تقسیم داده
-    print("\n✂️ گام 3: تقسیم داده به Train/Test")
-    X_train, X_test, y_train, y_test = train_test_split(
-        all_predictions, all_labels,
-        test_size=test_size, random_state=42, stratify=all_labels
-    )
-    print(f" آموزش: {len(X_train):,} نمونه ({(1-test_size)*100:.0f}%)")
-    print(f" تست: {len(X_test):,} نمونه ({test_size*100:.0f}%)")
-    
-    # گام 4: آموزش Ensemble
-    print("\n🎓 گام 4: آموزش مدل Ensemble")
-    trainer = EnsembleTrainer(X_train, y_train, predictor.model_names)
-    trainer.train(epochs=100, lr=0.01, batch_size=256, patience=20)
-    
-    # گام 5: ارزیابی
-    print("\n📊 گام 5: ارزیابی و نمایش نتایج")
-    trainer.get_learned_weights()
-    results = trainer.evaluate(X_test, y_test)
-    trainer.plot_training_history()
-    
-    # گام 6: ذخیره مدل
-    print("\n💾 گام 6: ذخیره مدل نهایی")
-    trainer.save_model('choquet_ensemble_final.pth')
-    
-    print("\n" + "="*70)
-    print("✅ فرآیند با موفقیت کامل شد!")
-    print("="*70)
-    
-    return trainer, results
-
-# ==================== بخش 5: نحوه استفاده ====================
-if __name__ == "__main__":
-    import glob  # برای جمع‌آوری مسیر تصاویر
-    
-    # تعریف مدل‌ها (مسیرها را با مسیرهای واقعی خود جایگزین کنید)
-    model_configs = [
-        {
-            'name': 'model1',
-            'model_path': '/kaggle/input/10k-pearson-pruned/pytorch/default/1/10k_pearson_pruned.pt',
-        },
-        {
-            'name': 'model2',
-            'model_path': '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt',
-        },
-        {
-            'name': 'model3',
-            'model_path': '/kaggle/input/200k-pearson-pruned/pytorch/default/1/200k_kdfs_pruned.pt',
-        },
-        {
-            'name': 'model4',
-            'model_path': '/kaggle/input/190k-pearson-pruned/pytorch/default/1/190k_pearson_pruned.pt',
-        },
-        {
-            'name': 'model5',
-            'model_path': '/kaggle/input/330k-base-pruned/pytorch/default/1/330k_base_pruned.pt',
-        }
+    MODEL_PATHS = [
+        '/kaggle/input/10k-pearson-pruned/pytorch/default/1/10k_pearson_pruned.pt',
+        '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt',
+        '/kaggle/input/190k-pearson-pruned/pytorch/default/1/190k_pearson_pruned.pt',
+        '/kaggle/input/200k-pearson-pruned/pytorch/default/1/200k_kdfs_pruned.pt',
+        '/kaggle/input/330k-base-pruned/pytorch/default/1/330k_base_pruned.pt',
     ]
     
-    # تعریف دیتاست (مسیرها را با مسیرهای واقعی خود جایگزین کنید)
-    real_images = glob.glob('//kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k/valid/real/*.png')  # یا هر فرمت
-    fake_images = glob.glob('//kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k/valid/fake/*.png')
+    MASKS_PATHS = None
     
-    image_paths = real_images + fake_images
-    labels = np.array([0] * len(real_images) + [1] * len(fake_images))  # ۰ برای واقعی، ۱ برای فیک
+    DATA_DIR = '/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k'
     
-    # اجرای pipeline
-    trainer, results = main_pipeline(
-        model_configs=model_configs,
-        image_paths=image_paths,
-        labels=labels,
-        test_size=0.15  # می‌توانید تغییر دهید
+    # مسیر خروجی
+    OUTPUT_DIR = 'kaggle/working/fuzzy_ensemble_output'
+    
+    # Hyperparameters
+    BATCH_SIZE = 32
+    NUM_EPOCHS = 20
+    LEARNING_RATE = 1e-4
+    
+    # Device
+    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    # Image size
+    IMAGE_SIZE = 224
+    
+    # Random seed
+    RANDOM_SEED = 42
+
+
+# ==================== DATA LOADING ====================
+def load_presplit_dataset(base_dir, image_size=224):
+
+    
+    # Define transforms
+    train_transform = transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(10),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2),
+        transforms.ToTensor(),
+    ])
+    
+    val_transform = transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        transforms.ToTensor(),
+    ])
+    
+    # Helper function to load paths and labels
+    def load_split(split_dir):
+        paths = []
+        labels = []
+        
+        # Real images (label = 0)
+        real_dir = Path(split_dir) / 'real'
+        if real_dir.exists():
+            real_images = glob.glob(str(real_dir / '*.jpg')) + \
+                          glob.glob(str(real_dir / '*.png')) + \
+                          glob.glob(str(real_dir / '*.jpeg')) + \
+                          glob.glob(str(real_dir / '*.JPG')) + \
+                          glob.glob(str(real_dir / '*.PNG'))
+            paths.extend(real_images)
+            labels.extend([0] * len(real_images))
+        else:
+            print(f"  ⚠ Warning: {real_dir} not found")
+            real_images = []
+        
+        # Fake images (label = 1)
+        fake_dir = Path(split_dir) / 'fake'
+        if fake_dir.exists():
+            fake_images = glob.glob(str(fake_dir / '*.jpg')) + \
+                          glob.glob(str(fake_dir / '*.png')) + \
+                          glob.glob(str(fake_dir / '*.jpeg')) + \
+                          glob.glob(str(fake_dir / '*.JPG')) + \
+                          glob.glob(str(fake_dir / '*.PNG'))
+            paths.extend(fake_images)
+            labels.extend([1] * len(fake_images))
+        else:
+            print(f"  ⚠ Warning: {fake_dir} not found")
+            fake_images = []
+        
+        split_name = Path(split_dir).name
+        print(f"  {split_name:>5}: {len(real_images):>5} real + {len(fake_images):>5} fake = {len(paths):>6} total")
+        
+        return paths, labels
+    
+    print("\n📂 Loading pre-split dataset from:")
+    print(f"   {base_dir}")
+    print()
+    
+    base_path = Path(base_dir)
+    
+    # Load each split
+    train_paths, train_labels = load_split(base_path / 'train')
+    val_paths, val_labels = load_split(base_path / 'valid')
+    test_paths, test_labels = load_split(base_path / 'test')
+    
+    if len(train_paths) == 0:
+        raise ValueError("❌ No training data found! Check your DATA_DIR path.")
+    if len(val_paths) == 0:
+        raise ValueError("❌ No validation data found! Check your DATA_DIR path.")
+    
+    return (train_paths, train_labels, train_transform), \
+           (val_paths, val_labels, val_transform), \
+           (test_paths, test_labels, val_transform)
+
+
+# ==================== MAIN PIPELINE ====================
+def main():
+    """پایپلاین اصلی"""
+    
+    print("\n" + "="*70)
+    print("FUZZY GATING ENSEMBLE - COMPLETE PIPELINE")
+    print("="*70)
+    
+    config = Config()
+    
+    # تنظیم seed برای reproducibility
+    torch.manual_seed(config.RANDOM_SEED)
+    import numpy as np
+    np.random.seed(config.RANDOM_SEED)
+    
+    # ==================== STEP 1: DATA PREPARATION ====================
+    print("\n" + "="*70)
+    print("STEP 1: DATA PREPARATION")
+    print("="*70)
+    
+    # Load pre-split dataset
+    train_data, val_data, test_data = load_presplit_dataset(
+        base_dir=config.DATA_DIR,
+        image_size=config.IMAGE_SIZE
     )
     
-    # اگر می‌خواهید مدل ذخیره‌شده را بعداً بارگذاری کنید:
-    # trainer.load_model('choquet_ensemble_final.pth')
+    train_paths, train_labels, train_transform = train_data
+    val_paths, val_labels, val_transform = val_data
+    test_paths, test_labels, test_transform = test_data
+    
+    # Load ensemble configuration for masks
+    print("\n📦 Loading model masks and configurations...")
+    from data_preparation import setup_ensemble_training, CustomDataset
+    
+    ensemble_config, masks_list, _, _ = setup_ensemble_training(
+        model_paths=config.MODEL_PATHS,
+        masks_paths=config.MASKS_PATHS,
+        data_dir=None,  # We're not using this for data
+        csv_path=None,
+        output_dir=config.OUTPUT_DIR
+    )
+    
+    # Create datasets
+    train_dataset = CustomDataset(train_paths, train_labels, train_transform)
+    val_dataset = CustomDataset(val_paths, val_labels, val_transform)
+    test_dataset = CustomDataset(test_paths, test_labels, test_transform)
+    
+    # Create dataloaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config.BATCH_SIZE,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config.BATCH_SIZE,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True
+    )
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=config.BATCH_SIZE,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True
+    )
+    
+    print(f"\n✓ Data preparation complete!")
+    print(f"  Train: {len(train_dataset):>6} images ({len(train_loader):>4} batches)")
+    print(f"  Val:   {len(val_dataset):>6} images ({len(val_loader):>4} batches)")
+    print(f"  Test:  {len(test_dataset):>6} images ({len(test_loader):>4} batches)")
+    
+    # Class distribution check
+    from collections import Counter
+    print(f"\n  Train distribution: Real={Counter(train_labels)[0]}, Fake={Counter(train_labels)[1]}")
+    print(f"  Val distribution:   Real={Counter(val_labels)[0]}, Fake={Counter(val_labels)[1]}")
+    print(f"  Test distribution:  Real={Counter(test_labels)[0]}, Fake={Counter(test_labels)[1]}")
+    
+    # ==================== STEP 2: CREATE ENSEMBLE MODEL ====================
+    print("\n" + "="*70)
+    print("STEP 2: CREATE ENSEMBLE MODEL")
+    print("="*70)
+    
+    from fuzzy_ensemble import PrunedResNetEnsemble
+    
+    ensemble_model = PrunedResNetEnsemble(
+        model_paths=config.MODEL_PATHS,
+        masks_list=masks_list,
+        means_stds=ensemble_config['means_stds'],
+        num_features=2048
+    )
+    
+    total_params = sum(p.numel() for p in ensemble_model.parameters())
+    trainable_params = sum(p.numel() for p in ensemble_model.parameters() if p.requires_grad)
+    
+    print(f"\n✓ Ensemble model created!")
+    print(f"  Total parameters: {total_params:,}")
+    print(f"  Trainable parameters: {trainable_params:,}")
+    print(f"  Frozen parameters: {total_params - trainable_params:,}")
+    print(f"  Trainable ratio: {100 * trainable_params / total_params:.2f}%")
+    
+    # ==================== STEP 3: TRAINING ====================
+    print("\n" + "="*70)
+    print("STEP 3: TRAINING FUZZY GATING")
+    print("="*70)
+    
+    from fuzzy_ensemble import train_fuzzy_ensemble
+    
+    history = train_fuzzy_ensemble(
+        ensemble_model=ensemble_model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        num_epochs=config.NUM_EPOCHS,
+        learning_rate=config.LEARNING_RATE,
+        device=config.DEVICE
+    )
+    
+    print(f"\n✓ Training complete!")
+    
+    # Plot training history
+    import matplotlib.pyplot as plt
+    
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+    
+    # Loss
+    axes[0].plot(history['train_loss'], label='Train Loss', marker='o')
+    axes[0].plot(history['val_loss'], label='Val Loss', marker='s')
+    axes[0].set_xlabel('Epoch')
+    axes[0].set_ylabel('Loss')
+    axes[0].set_title('Training History - Loss')
+    axes[0].legend()
+    axes[0].grid(alpha=0.3)
+    
+    # Accuracy
+    axes[1].plot(history['val_acc'], label='Val Accuracy', color='green', marker='o')
+    axes[1].set_xlabel('Epoch')
+    axes[1].set_ylabel('Accuracy')
+    axes[1].set_title('Training History - Accuracy')
+    axes[1].legend()
+    axes[1].grid(alpha=0.3)
+    
+    plt.tight_layout()
+    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+    plt.savefig(f'{config.OUTPUT_DIR}/training_history.png', dpi=300, bbox_inches='tight')
+    print(f"  Training history saved to {config.OUTPUT_DIR}/training_history.png")
+    plt.close()
+    
+    # ==================== STEP 4: LOAD BEST MODEL ====================
+    print("\n" + "="*70)
+    print("STEP 4: LOAD BEST MODEL")
+    print("="*70)
+    
+    checkpoint = torch.load('best_fuzzy_ensemble.pt', map_location=config.DEVICE)
+    ensemble_model.load_state_dict(checkpoint['model_state_dict'])
+    print(f"✓ Best model loaded (Val Acc: {checkpoint['val_acc']:.4f})")
+    
+    # ==================== STEP 5: ANALYZE GATING WEIGHTS ====================
+    print("\n" + "="*70)
+    print("STEP 5: ANALYZE GATING WEIGHTS")
+    print("="*70)
+    
+    from fuzzy_ensemble import analyze_gating_weights
+    
+    weights, memberships = analyze_gating_weights(
+        ensemble_model,
+        val_loader,
+        config.DEVICE,
+        num_samples=1000
+    )
+    
+    # ==================== STEP 6: LOAD SINGLE MODELS ====================
+    print("\n" + "="*70)
+    print("STEP 6: LOAD SINGLE MODELS FOR COMPARISON")
+    print("="*70)
+    
+    from pruned_resnet import ResNet_50_pruned_hardfakevsreal
+    
+    single_models = []
+    for i, (model_path, masks) in enumerate(zip(config.MODEL_PATHS, masks_list)):
+        print(f"Loading Model {i+1}...")
+        model = ResNet_50_pruned_hardfakevsreal(masks)
+        checkpoint = torch.load(model_path, map_location=config.DEVICE)
+        model.load_state_dict(checkpoint)
+        model.eval()
+        single_models.append(model)
+    
+    print(f"✓ Loaded {len(single_models)} single models")
+    
+    # ==================== STEP 7: COMPREHENSIVE EVALUATION ====================
+    print("\n" + "="*70)
+    print("STEP 7: COMPREHENSIVE EVALUATION ON TEST SET")
+    print("="*70)
+    
+    from evaluation_comparison import run_complete_evaluation
+    
+    results, comparison_df, improvement = run_complete_evaluation(
+        ensemble_model=ensemble_model,
+        single_models=single_models,
+        means_stds=ensemble_config['means_stds'],
+        test_loader=test_loader,  # ⭐ استفاده از test set
+        device=config.DEVICE,
+        save_dir=f'{config.OUTPUT_DIR}/evaluation'
+    )
+    
+    # ==================== STEP 8: FINAL SUMMARY ====================
+    print("\n" + "="*70)
+    print("FINAL SUMMARY")
+    print("="*70)
+    
+    best_single_idx = comparison_df[comparison_df['Model'] != 'Ensemble']['Accuracy'].idxmax()
+    best_single_acc = comparison_df[comparison_df['Model'] != 'Ensemble']['Accuracy'].max()
+    ensemble_acc = comparison_df[comparison_df['Model'] == 'Ensemble']['Accuracy'].values[0]
+    
+    print(f"\n📊 Results on Test Set:")
+    print(f"  Best Single Model: {comparison_df.loc[best_single_idx, 'Model']}")
+    print(f"  Best Single Accuracy: {best_single_acc:.4f}")
+    print(f"  Ensemble Accuracy: {ensemble_acc:.4f}")
+    print(f"  Improvement: {improvement:+.2f}%")
+    
+    if improvement > 0:
+        print(f"\n✅ SUCCESS! Ensemble outperforms best single model by {improvement:.2f}%")
+    else:
+        print(f"\n⚠ Ensemble underperforms by {abs(improvement):.2f}%")
+        print("  Consider:")
+        print("  - Increasing training epochs")
+        print("  - Adjusting learning rate")
+        print("  - Modifying fuzzy membership functions")
+        print("  - Adding more regularization")
+    
+    print("\n" + "="*70)
+    print("PIPELINE COMPLETE!")
+    print("="*70)
+    print(f"\nAll results saved to: {config.OUTPUT_DIR}")
+    print("\nDataset used:")
+    print(f"  Train: {len(train_dataset)} images")
+    print(f"  Val:   {len(val_dataset)} images")
+    print(f"  Test:  {len(test_dataset)} images")
+    print("\nFiles generated:")
+    print("  - config.json")
+    print("  - masks_model_*.pt")
+    print("  - best_fuzzy_ensemble.pt")
+    print("  - training_history.png")
+    print("  - evaluation/")
+    print("    ├── comparison_table.csv")
+    print("    ├── metrics_comparison.png")
+    print("    ├── roc_curves.png")
+    print("    ├── confusion_matrices.png")
+    print("    ├── gating_weights.png")
+    print("    └── detailed_results.pkl")
+    print("\n" + "="*70 + "\n")
+    
+    return ensemble_model, results, comparison_df
+
+
+# ==================== ENTRY POINT ====================
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Fuzzy Gating Ensemble Pipeline (Pre-split Dataset)')
+    parser.add_argument('--mode', type=str, default='train',
+                       choices=['train', 'eval', 'infer'],
+                       help='Operation mode')
+    parser.add_argument('--model', type=str, default='best_fuzzy_ensemble.pt',
+                       help='Path to model checkpoint (for eval/infer)')
+    parser.add_argument('--image', type=str, default=None,
+                       help='Path to image (for infer mode)')
+    
+    args = parser.parse_args()
+    
+    if args.mode == 'train':
+        print("Starting training pipeline...")
+        ensemble_model, results, comparison_df = main()
+        
+    elif args.mode == 'eval':
+        print("Evaluation mode not fully implemented in this version.")
+        print("Use 'train' mode which includes evaluation on test set.")
+        
+    elif args.mode == 'infer':
+        if args.image is None:
+            print("Error: --image required for inference mode")
+            sys.exit(1)
+        
+        print("Inference mode not fully implemented in this version.")
+        print("You can use the inference_on_new_image function from the original pipeline.")
+    
+    else:
+        print("Usage:")
+        print("  python main_pipeline_presplit.py --mode train")
