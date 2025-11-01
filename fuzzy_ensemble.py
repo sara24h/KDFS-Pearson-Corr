@@ -1,21 +1,23 @@
 """
-FUZZY GATING ENSEMBLE - با دیتاست از قبل Split شده
+FUZZY GATING ENSEMBLE - با دیتاست از قبل Split شده (اصلاح شده)
 =========================================================
 این نسخه برای دیتاست‌هایی که از قبل به train/valid/test تقسیم شدن
 """
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
+from PIL import Image
 import sys
 import os
 from pathlib import Path
 import glob
+from collections import Counter
+import numpy as np
 
 # ==================== CONFIGURATION ====================
 class Config:
-
     MODEL_PATHS = [
         '/kaggle/input/10k-pearson-pruned/pytorch/default/1/10k_pearson_pruned.pt',
         '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt',
@@ -24,12 +26,12 @@ class Config:
         '/kaggle/input/330k-base-pruned/pytorch/default/1/330k_base_pruned.pt',
     ]
     
-    MASKS_PATHS = None
+    MASKS_PATHS = None  # اگر فایل‌های mask دارید، مسیرها را اینجا قرار دهید
     
     DATA_DIR = '/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k'
     
     # مسیر خروجی
-    OUTPUT_DIR = 'kaggle/working/fuzzy_ensemble_output'
+    OUTPUT_DIR = '/kaggle/working/fuzzy_ensemble_output'
     
     # Hyperparameters
     BATCH_SIZE = 32
@@ -46,9 +48,37 @@ class Config:
     RANDOM_SEED = 42
 
 
+# ==================== CUSTOM DATASET ====================
+class CustomDataset(Dataset):
+    """Dataset کاستوم برای بارگذاری تصاویر"""
+    def __init__(self, image_paths, labels, transform=None):
+        self.image_paths = image_paths
+        self.labels = labels
+        self.transform = transform
+    
+    def __len__(self):
+        return len(self.image_paths)
+    
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        try:
+            image = Image.open(img_path).convert('RGB')
+        except Exception as e:
+            print(f"Error loading image {img_path}: {e}")
+            # بارگذاری یک تصویر خالی در صورت خطا
+            image = Image.new('RGB', (224, 224), color='black')
+        
+        label = self.labels[idx]
+        
+        if self.transform:
+            image = self.transform(image)
+        
+        return image, label
+
+
 # ==================== DATA LOADING ====================
 def load_presplit_dataset(base_dir, image_size=224):
-
+    """بارگذاری دیتاست از قبل تقسیم شده"""
     
     # Define transforms
     train_transform = transforms.Compose([
@@ -57,11 +87,13 @@ def load_presplit_dataset(base_dir, image_size=224):
         transforms.RandomRotation(10),
         transforms.ColorJitter(brightness=0.2, contrast=0.2),
         transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
     
     val_transform = transforms.Compose([
         transforms.Resize((image_size, image_size)),
         transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
     
     # Helper function to load paths and labels
@@ -135,7 +167,6 @@ def main():
     
     # تنظیم seed برای reproducibility
     torch.manual_seed(config.RANDOM_SEED)
-    import numpy as np
     np.random.seed(config.RANDOM_SEED)
     
     # ==================== STEP 1: DATA PREPARATION ====================
@@ -153,17 +184,32 @@ def main():
     val_paths, val_labels, val_transform = val_data
     test_paths, test_labels, test_transform = test_data
     
-    # Load ensemble configuration for masks
+    # بارگذاری masks
     print("\n📦 Loading model masks and configurations...")
-    from data_preparation import setup_ensemble_training, CustomDataset
     
-    ensemble_config, masks_list, _, _ = setup_ensemble_training(
-        model_paths=config.MODEL_PATHS,
-        masks_paths=config.MASKS_PATHS,
-        data_dir=None,  # We're not using this for data
-        csv_path=None,
-        output_dir=config.OUTPUT_DIR
-    )
+    if config.MASKS_PATHS:
+        print("  Loading masks from files...")
+        masks_list = []
+        for i, mask_path in enumerate(config.MASKS_PATHS):
+            try:
+                mask = torch.load(mask_path, map_location='cpu')
+                masks_list.append(mask)
+                print(f"    ✓ Mask {i+1} loaded from {mask_path}")
+            except Exception as e:
+                print(f"    ✗ Error loading mask {i+1}: {e}")
+                masks_list.append(None)
+    else:
+        print("  No mask paths provided, using None for all models")
+        masks_list = [None] * len(config.MODEL_PATHS)
+    
+    # تنظیم means/stds برای نرمال‌سازی
+    means_stds = [([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])] * len(config.MODEL_PATHS)
+    
+    ensemble_config = {
+        'means_stds': means_stds
+    }
+    
+    print(f"  ✓ Loaded configuration for {len(config.MODEL_PATHS)} models")
     
     # Create datasets
     train_dataset = CustomDataset(train_paths, train_labels, train_transform)
@@ -201,7 +247,6 @@ def main():
     print(f"  Test:  {len(test_dataset):>6} images ({len(test_loader):>4} batches)")
     
     # Class distribution check
-    from collections import Counter
     print(f"\n  Train distribution: Real={Counter(train_labels)[0]}, Fake={Counter(train_labels)[1]}")
     print(f"  Val distribution:   Real={Counter(val_labels)[0]}, Fake={Counter(val_labels)[1]}")
     print(f"  Test distribution:  Real={Counter(test_labels)[0]}, Fake={Counter(test_labels)[1]}")
@@ -327,7 +372,7 @@ def main():
         ensemble_model=ensemble_model,
         single_models=single_models,
         means_stds=ensemble_config['means_stds'],
-        test_loader=test_loader,  # ⭐ استفاده از test set
+        test_loader=test_loader,
         device=config.DEVICE,
         save_dir=f'{config.OUTPUT_DIR}/evaluation'
     )
@@ -366,8 +411,6 @@ def main():
     print(f"  Val:   {len(val_dataset)} images")
     print(f"  Test:  {len(test_dataset)} images")
     print("\nFiles generated:")
-    print("  - config.json")
-    print("  - masks_model_*.pt")
     print("  - best_fuzzy_ensemble.pt")
     print("  - training_history.png")
     print("  - evaluation/")
@@ -415,4 +458,4 @@ if __name__ == "__main__":
     
     else:
         print("Usage:")
-        print("  python main_pipeline_presplit.py --mode train")
+        print("  python fuzzy_ensemble_presplit_fixed.py --mode train")
