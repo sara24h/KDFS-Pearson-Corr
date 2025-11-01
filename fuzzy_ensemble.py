@@ -1,9 +1,3 @@
-"""
-FUZZY GATING ENSEMBLE - با دیتاست از قبل Split شده (اصلاح شده)
-=========================================================
-این نسخه برای دیتاست‌هایی که از قبل به train/valid/test تقسیم شدن
-"""
-
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
@@ -34,15 +28,15 @@ class Config:
     OUTPUT_DIR = '/kaggle/working/fuzzy_ensemble_output'
     
     # Hyperparameters
-    BATCH_SIZE = 32
-    NUM_EPOCHS = 20
+    BATCH_SIZE = 128
+    NUM_EPOCHS = 10
     LEARNING_RATE = 1e-4
     
     # Device
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # Image size
-    IMAGE_SIZE = 224
+    IMAGE_SIZE = 256
     
     # Random seed
     RANDOM_SEED = 42
@@ -50,7 +44,6 @@ class Config:
 
 # ==================== CUSTOM DATASET ====================
 class CustomDataset(Dataset):
-    """Dataset کاستوم برای بارگذاری تصاویر"""
     def __init__(self, image_paths, labels, transform=None):
         self.image_paths = image_paths
         self.labels = labels
@@ -66,7 +59,7 @@ class CustomDataset(Dataset):
         except Exception as e:
             print(f"Error loading image {img_path}: {e}")
             # بارگذاری یک تصویر خالی در صورت خطا
-            image = Image.new('RGB', (224, 224), color='black')
+            image = Image.new('RGB', (256, 256), color='black')
         
         label = self.labels[idx]
         
@@ -78,9 +71,7 @@ class CustomDataset(Dataset):
 
 # ==================== DATA LOADING ====================
 def load_presplit_dataset(base_dir, image_size=224):
-    """بارگذاری دیتاست از قبل تقسیم شده"""
-    
-    # Define transforms
+
     train_transform = transforms.Compose([
         transforms.Resize((image_size, image_size)),
         transforms.RandomHorizontalFlip(),
