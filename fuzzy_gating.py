@@ -1,11 +1,8 @@
-# fuzzy_gating_ddp.py
+# fuzzy_gating_fixed.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributed as dist
-import torch.multiprocessing as mp
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader
 from torchvision import transforms, datasets
 import os
 from tqdm import tqdm
@@ -68,7 +65,7 @@ class FuzzyEnsembleModel(nn.Module):
                     p.requires_grad = False
 
     def forward(self, x: torch.Tensor, return_individual: bool = False):
-        weights = self.gating_network(x)
+        weights = self.gating_network(x)  # (B, N)
         outputs = []
 
         for i, model in enumerate(self.models):
@@ -79,7 +76,7 @@ class FuzzyEnsembleModel(nn.Module):
                     out = out[0]
             outputs.append(out)
 
-        outputs = torch.stack(outputs, dim=1)
+        outputs = torch.stack(outputs, dim=1)  # (B, N, C)
         final_output = (outputs * weights.unsqueeze(-1)).sum(dim=1)
 
         if return_individual:
@@ -88,51 +85,52 @@ class FuzzyEnsembleModel(nn.Module):
 
 
 # =============================================================================
-# تابع کمکی
+# تابع کمکی: دسترسی ایمن به gating_network
 # =============================================================================
 
 def get_gating_network(model: nn.Module) -> nn.Module:
-    if isinstance(model, DDP):
+    if hasattr(model, 'module'):
         return model.module.gating_network
     return model.gating_network
 
 
 # =============================================================================
-# لود مدل‌ها
+# لود مدل‌ها (با validate masks)
 # =============================================================================
 
 def load_pruned_models(model_paths: List[str], device: torch.device) -> List[nn.Module]:
     from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
 
     models = []
-    print(f"Rank {dist.get_rank() if dist.is_initialized() else 0} | Loading {len(model_paths)} pruned models...")
+    print(f"Loading {len(model_paths)} pruned models...")
     for i, path in enumerate(model_paths):
-        if dist.get_rank() == 0:
-            print(f"  [{i+1}/{len(model_paths)}] Loading: {os.path.basename(path)}")
-        ckpt = torch.load(path, map_location='cpu')
+        print(f"  [{i+1}/{len(model_paths)}] Loading: {os.path.basename(path)}")
+        ckpt = torch.load(path, map_location='cpu')  # اول CPU
         model = ResNet_50_pruned_hardfakevsreal(masks=ckpt['masks'])
         model.load_state_dict(ckpt['model_state_dict'])
         model = model.to(device).eval()
 
+        # Validate masks
         if hasattr(model, 'masks'):
             for j, mask in enumerate(model.masks):
                 mask = mask.to(device)
-
+                assert mask.dtype in [torch.bool, torch.uint8], f"Mask {j} dtype error"
+        
         param_count = sum(p.numel() for p in model.parameters())
-        if dist.get_rank() == 0:
-            print(f"     → Parameters: {param_count:,}")
+        print(f"     → Parameters: {param_count:,}")
         models.append(model)
-    if dist.get_rank() == 0:
-        print(f"All {len(models)} models loaded successfully!\n")
+    print(f"All {len(models)} models loaded successfully!\n")
     return models
 
 
 # =============================================================================
-# دیتالودرها با DistributedSampler
+# دیتالودرها
 # =============================================================================
 
-def create_dataloaders(base_dir: str, batch_size: int, world_size: int, rank: int, num_workers: int = 4):
-    print(f"Rank {rank} | Creating DataLoaders...")
+def create_dataloaders(base_dir: str, batch_size: int, num_workers: int = 4) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    print("="*70)
+    print("Creating DataLoaders...")
+    print("="*70)
 
     train_transform = transforms.Compose([
         transforms.Resize((256, 256)),
@@ -152,35 +150,29 @@ def create_dataloaders(base_dir: str, batch_size: int, world_size: int, rank: in
         path = os.path.join(base_dir, split)
         if not os.path.exists(path):
             raise FileNotFoundError(f"Folder not found: {path}")
-        if rank == 0:
-            print(f"  {split.capitalize():5}: {path}")
+        print(f"{split.capitalize():5}: {path}")
         transform = train_transform if split == 'train' else val_test_transform
         datasets_dict[split] = datasets.ImageFolder(path, transform=transform)
 
-    if rank == 0:
-        print(f"\nDataset Stats:")
-        for split, ds in datasets_dict.items():
-            print(f"  {split.capitalize():5}: {len(ds):,} images | Classes: {ds.classes}")
-        print(f"  Class → Index: {datasets_dict['train'].class_to_idx}\n")
+    print(f"\nDataset Stats:")
+    for split, ds in datasets_dict.items():
+        print(f"  {split.capitalize():5}: {len(ds):,} images | Classes: {ds.classes}")
+    print(f"  Class → Index: {datasets_dict['train'].class_to_idx}\n")
 
     loaders = {}
     for split, ds in datasets_dict.items():
-        sampler = DistributedSampler(ds, num_replicas=world_size, rank=rank) if world_size > 1 else None
-        shuffle = (split == 'train') and (sampler is None)
-        drop_last = (split == 'train')
-
+        shuffle = (split == 'train')
+        drop_last = (split != 'test')  # drop_last برای train و val، نه test
         loaders[split] = DataLoader(
             ds, batch_size=batch_size, shuffle=shuffle,
-            sampler=sampler, num_workers=num_workers,
-            pin_memory=True, drop_last=drop_last
+            num_workers=num_workers, pin_memory=True, drop_last=drop_last
         )
 
-    if rank == 0:
-        print(f"DataLoaders ready! Per-GPU batch size: {batch_size} | World size: {world_size}")
-        print(f"  Batches per GPU → Train: {len(loaders['train'])}, Val: {len(loaders['valid'])}, Test: {len(loaders['test'])}")
-        print("="*70 + "\n")
-
-    return loaders['train'], loaders['valid'], loaders['test']
+    train_loader, val_loader, test_loader = loaders['train'], loaders['valid'], loaders['test']
+    print(f"DataLoaders ready! Batch size: {batch_size}")
+    print(f"  Batches → Train: {len(train_loader)}, Val: {len(val_loader)}, Test: {len(test_loader)}")
+    print("="*70 + "\n")
+    return train_loader, val_loader, test_loader
 
 
 # =============================================================================
@@ -208,14 +200,13 @@ def train_gating_network(
     ensemble_model: nn.Module,
     train_loader: DataLoader,
     val_loader: DataLoader,
-    num_epochs: int,
-    lr: float,
-    device: torch.device,
-    save_dir: str,
-    rank: int
+    num_epochs: int = 10,
+    lr: float = 1e-3,
+    device: torch.device = torch.device('cuda'),
+    save_dir: str = '/kaggle/working/checkpoints'
 ) -> Tuple[float, Dict[str, Any]]:
 
-    os.makedirs(save_dir, exist_ok=True) if rank == 0 else None
+    os.makedirs(save_dir, exist_ok=True)
     gating_net = get_gating_network(ensemble_model)
     optimizer = torch.optim.AdamW(gating_net.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=lr * 0.01)
@@ -224,22 +215,21 @@ def train_gating_network(
     best_val_acc = 0.0
     history = {'train_loss': [], 'train_acc': [], 'val_acc': []}
 
-    if rank == 0:
-        print("="*70)
-        print("Training Fuzzy Gating Network (DDP)")
-        print("="*70)
-        print(f"Trainable params: {sum(p.numel() for p in gating_net.parameters()):,}")
-        print(f"Epochs: {num_epochs} | Initial LR: {lr} | Device: {device}\n")
+    print("="*70)
+    print("Training Fuzzy Gating Network (BCEWithLogitsLoss)")
+    print("="*70)
+    print(f"Trainable params: {sum(p.numel() for p in gating_net.parameters()):,}")
+    print(f"Epochs: {num_epochs} | Initial LR: {lr} | Device: {device}\n")
 
     for epoch in range(num_epochs):
         ensemble_model.train()
-        train_loader.sampler.set_epoch(epoch) if hasattr(train_loader, 'sampler') and train_loader.sampler else None
-
         train_loss = train_correct = train_total = 0.0
-        progress_bar = tqdm(train_loader, desc=f'Rank {rank} | Epoch {epoch+1}/{num_epochs} [Train]') if rank == 0 else train_loader
+
+        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
 
         for images, labels in progress_bar:
             images, labels = images.to(device), labels.to(device).float()
+
             optimizer.zero_grad()
             outputs, _ = ensemble_model(images)
             loss = criterion(outputs.squeeze(1), labels)
@@ -252,114 +242,84 @@ def train_gating_network(
             train_correct += pred.eq(labels.long()).sum().item()
             train_total += batch_size
 
-            if rank == 0:
-                current_acc = 100. * train_correct / train_total
-                avg_loss = train_loss / train_total
-                progress_bar.set_postfix({'loss': f'{avg_loss:.4f}', 'acc': f'{current_acc:.2f}%'})
+            current_acc = 100. * train_correct / train_total
+            avg_loss = train_loss / train_total
+            progress_bar.set_postfix({'loss': f'{avg_loss:.4f}', 'acc': f'{current_acc:.2f}%'})
 
-        # فقط rank 0 ارزیابی val
-        if rank == 0:
-            train_acc = 100. * train_correct / train_total
-            train_loss /= train_total
-            val_acc = evaluate_accuracy(ensemble_model, val_loader, device)
+        train_acc = 100. * train_correct / train_total
+        train_loss /= train_total
+        val_acc = evaluate_accuracy(ensemble_model, val_loader, device)
 
-            scheduler.step()
-            history['train_loss'].append(train_loss)
-            history['train_acc'].append(train_acc)
-            history['val_acc'].append(val_acc)
+        scheduler.step()
+        history['train_loss'].append(train_loss)
+        history['train_acc'].append(train_acc)
+        history['val_acc'].append(val_acc)
 
-            print(f"\nEpoch {epoch+1}:")
-            print(f"   Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
-            print(f"   Val Acc: {val_acc:.2f}% | LR: {optimizer.param_groups[0]['lr']:.6f}")
+        print(f"\nEpoch {epoch+1}:")
+        print(f"   Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
+        print(f"   Val Acc: {val_acc:.2f}% | LR: {optimizer.param_groups[0]['lr']:.6f}")
 
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                ckpt_path = os.path.join(save_dir, 'best_fuzzy_gating.pt')
-                torch.save({
-                    'epoch': epoch + 1,
-                    'gating_state_dict': gating_net.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'val_acc': val_acc,
-                    'history': history
-                }, ckpt_path)
-                print(f"   Best model saved → {val_acc:.2f}%")
-            print("-" * 70)
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            ckpt_path = os.path.join(save_dir, 'best_fuzzy_gating.pt')
+            torch.save({
+                'epoch': epoch + 1,
+                'gating_state_dict': gating_net.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_acc': val_acc,
+                'history': history
+            }, ckpt_path)
+            print(f"   Best model saved → {val_acc:.2f}%")
 
-    if rank == 0:
-        print(f"\nTraining completed! Best Val Acc: {best_val_acc:.2f}%")
-    return best_val_acc, history if rank == 0 else (0, {})
+        print("-" * 70)
+
+    print(f"\nTraining completed! Best Val Acc: {best_val_acc:.2f}%")
+    return best_val_acc, history
 
 
 # =============================================================================
-# ارزیابی دقیق
+# ارزیابی نهایی
 # =============================================================================
 
-@torch.no_grad()
-def evaluate_ensemble_detailed(model: nn.Module, loader: DataLoader, device: torch.device, name: str, rank: int):
-    if rank != 0:
-        return 0, [], []
-
+def evaluate_ensemble_final(model: nn.Module, loader: DataLoader, device: torch.device, name: str):
     model.eval()
-    individual_preds = [[] for _ in range(model.module.num_models)]
-    ensemble_preds = []
-    all_labels = []
-    all_weights = []
+    all_preds, all_labels, all_weights = [], [], []
 
-    print(f"\nEvaluating {name} with detailed per-model analysis...")
-    for images, labels in tqdm(loader, desc=f'{name} Batch'):
-        images, labels = images.to(device), labels.to(device)
-        final_output, weights, individual_outputs = model(images, return_individual=True)
-        ensemble_pred = (final_output.squeeze(1) > 0).long()
-        ensemble_preds.extend(ensemble_pred.cpu().numpy())
-        all_labels.extend(labels.cpu().numpy())
-        all_weights.append(weights.cpu().numpy())
+    with torch.no_grad():
+        for images, labels in tqdm(loader, desc=f'Evaluating {name}'):
+            images, labels = images.to(device), labels.to(device)
+            outputs, weights, _ = model(images, return_individual=True)
+            pred = (outputs.squeeze(1) > 0).long()
 
-        for i in range(model.module.num_models):
-            pred_i = (individual_outputs[:, i].squeeze(1) > 0).long()
-            individual_preds[i].extend(pred_i.cpu().numpy())
+            all_preds.extend(pred.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+            all_weights.append(weights.cpu().numpy())
 
-    all_labels = np.array(all_labels)
-    ensemble_preds = np.array(ensemble_preds)
-    individual_preds = [np.array(preds) for preds in individual_preds]
+    acc = 100. * np.mean(np.array(all_preds) == np.array(all_labels))
     avg_weights = np.concatenate(all_weights).mean(axis=0)
-    ensemble_acc = 100. * np.mean(ensemble_preds == all_labels)
 
-    print("\n" + "="*80)
-    print(f"{name.upper()} RESULTS")
-    print("="*80)
-    print(f"{'Model':<15} {'Accuracy':<10} {'Weight':<10} {'Status'}")
-    print("-" * 80)
-    individual_accs = []
-    for i in range(model.module.num_models):
-        acc_i = 100. * np.mean(individual_preds[i] == all_labels)
-        individual_accs.append(acc_i)
-        status = "STRONG" if avg_weights[i] > 0.2 else "WEAK" if avg_weights[i] < 0.1 else "MEDIUM"
-        print(f"Model {i+1:<11} {acc_i:6.2f}%    {avg_weights[i]*100:6.2f}%    {status}")
-    print("-" * 80)
-    print(f"{'ENSEMBLE':<15} {ensemble_acc:6.2f}%    {'100.00%':<10}  FINAL")
-    print("="*80)
-    best_single = max(individual_accs)
-    improvement = ensemble_acc - best_single
-    print(f"Best single model: {best_single:.2f}%")
-    print(f"Ensemble improvement: +{improvement:.2f}%")
-
-    return ensemble_acc, individual_accs, avg_weights
+    print("\n" + "="*70)
+    print(f"{name} Results → Accuracy: {acc:.2f}%")
+    print("Average Fuzzy Weights:")
+    for i, w in enumerate(avg_weights):
+        print(f"   Model {i+1}: {w:.4f} ({w*100:.2f}%)")
+    print("="*70)
+    return acc, avg_weights
 
 
 # =============================================================================
-# Main Worker
+# Main Execution
 # =============================================================================
 
-def main_worker(rank: int, world_size: int, args):
-    # تنظیم DDP — اصلاح برای Kaggle
-    if world_size > 1:
-        # استفاده از 127.0.0.1 و پورت ثابت
-        os.environ['MASTER_ADDR'] = '127.0.0.1'
-        os.environ['MASTER_PORT'] = '29500'  # پورت آزاد در Kaggle
-        dist.init_process_group("nccl", rank=rank, world_size=world_size)
-        torch.cuda.set_device(rank)
+def main():
+    parser = argparse.ArgumentParser(description="Train Fuzzy Gating Network")
+    parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs')
+    parser.add_argument('--lr', type=float, default=1e-3, help='Initial learning rate')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size (fixed, no GPU scaling)')
+    parser.add_argument('--data_dir', type=str, default='/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k')
+    parser.add_argument('--save_dir', type=str, default='/kaggle/working/checkpoints')
 
-    device = torch.device(f'cuda:{rank}' if torch.cuda.is_available() else 'cpu')
+    args = parser.parse_args()
 
     # تنظیمات
     MODEL_PATHS = [
@@ -375,86 +335,67 @@ def main_worker(rank: int, world_size: int, args):
     STDS = [(0.2486,0.2238,0.2211), (0.2490,0.2239,0.2212), (0.2296,0.2066,0.2009),
             (0.2410,0.2161,0.2081), (0.2446,0.2198,0.2141)]
 
+    NUM_EPOCHS = args.epochs
+    LR = args.lr
+    BATCH_SIZE = args.batch_size
+    DATA_DIR = args.data_dir
+    SAVE_DIR = args.save_dir
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    gpu_count = torch.cuda.device_count()
+    print(f"Device: {device} | GPUs: {gpu_count} | Using SINGLE GPU MODE (DataParallel disabled)")
+
     # Reproducibility
     torch.manual_seed(42)
     np.random.seed(42)
     if device.type == 'cuda':
         torch.cuda.manual_seed_all(42)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
     # لود مدل‌ها
     base_models = load_pruned_models(MODEL_PATHS, device)
 
-    # ساخت ensemble
+    # ساخت ensemble (بدون DataParallel)
     ensemble = FuzzyEnsembleModel(base_models, MEANS, STDS, freeze_models=True).to(device)
-    if world_size > 1:
-        ensemble = DDP(ensemble, device_ids=[rank])
+
+    # آمار پارامترها
+    total_params = sum(p.numel() for p in ensemble.parameters())
+    trainable = sum(p.numel() for p in get_gating_network(ensemble).parameters())
+    print(f"Total params: {total_params:,} | Trainable: {trainable:,} | Frozen: {total_params - trainable:,}\n")
 
     # دیتالودر
-    train_loader, val_loader, test_loader = create_dataloaders(
-        args.data_dir, args.batch_size, world_size, rank, num_workers=4)
-
-    # فقط rank 0 آمار چاپ می‌کنه
-    if rank == 0:
-        total_params = sum(p.numel() for p in ensemble.module.parameters())
-        trainable = sum(p.numel() for p in get_gating_network(ensemble.module).parameters())
-        print(f"Total params: {total_params:,} | Trainable: {trainable:,} | Frozen: {total_params - trainable:,}\n")
+    train_loader, val_loader, test_loader = create_dataloaders(DATA_DIR, BATCH_SIZE, num_workers=4)
 
     # آموزش
     best_val_acc, history = train_gating_network(
         ensemble, train_loader, val_loader,
-        num_epochs=args.epochs, lr=args.lr, device=device,
-        save_dir=args.save_dir, rank=rank
+        num_epochs=NUM_EPOCHS, lr=LR, device=device, save_dir=SAVE_DIR
     )
 
-    # فقط rank 0 ارزیابی نهایی
-    if rank == 0:
-        best_ckpt = torch.load(os.path.join(args.save_dir, 'best_fuzzy_gating.pt'), map_location=device)
-        get_gating_network(ensemble.module).load_state_dict(best_ckpt['gating_state_dict'])
-        print("Best gating network loaded.\n")
+    # بارگذاری بهترین مدل
+    best_ckpt = torch.load(os.path.join(SAVE_DIR, 'best_fuzzy_gating.pt'), map_location=device)
+    get_gating_network(ensemble).load_state_dict(best_ckpt['gating_state_dict'])
+    print("Best gating network loaded.\n")
 
-        print("="*70)
-        val_acc, ind_accs_val, weights_val = evaluate_ensemble_detailed(
-            ensemble.module, val_loader, device, "Validation", rank)
-        print("="*70)
-        test_acc, ind_accs_test, weights_test = evaluate_ensemble_detailed(
-            ensemble.module, test_loader, device, "Test", rank)
+    # ارزیابی
+    print("="*70)
+    val_acc, val_weights = evaluate_ensemble_final(ensemble, val_loader, device, "Validation")
+    print("="*70)
+    test_acc, test_weights = evaluate_ensemble_final(ensemble, test_loader, device, "Test")
 
-        final_path = '/kaggle/working/fuzzy_ensemble_final_ddp.pt'
-        torch.save({
-            'gating_state_dict': get_gating_network(ensemble.module).state_dict(),
-            'val_acc': val_acc,
-            'test_acc': test_acc,
-            'individual_accs_val': ind_accs_val,
-            'individual_accs_test': ind_accs_test,
-            'weights_val': weights_val.tolist(),
-            'weights_test': weights_test.tolist(),
-            'history': history
-        }, final_path)
-        print(f"\nFinal model saved: {final_path}")
-        print("All done!")
-
-    # پاکسازی
-    if world_size > 1:
-        dist.destroy_process_group()
-
-
-# =============================================================================
-# Main
-# =============================================================================
-
-def main():
-    parser = argparse.ArgumentParser(description="Train Fuzzy Gating Network with DDP")
-    parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs')
-    parser.add_argument('--lr', type=float, default=1e-3, help='Initial learning rate')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size PER GPU')
-    parser.add_argument('--data_dir', type=str, default='/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k')
-    parser.add_argument('--save_dir', type=str, default='/kaggle/working/checkpoints')
-    parser.add_argument('--world_size', type=int, default=2, help='Number of GPUs')
-
-    args = parser.parse_args()
-
-    world_size = args.world_size
-    mp.spawn(main_worker, args=(world_size, args), nprocs=world_size, join=True)
+    # ذخیره نهایی
+    final_path = '/kaggle/working/fuzzy_ensemble_final.pt'
+    torch.save({
+        'gating_state_dict': get_gating_network(ensemble).state_dict(),
+        'val_acc': best_val_acc,
+        'test_acc': test_acc,
+        'val_weights': val_weights.tolist(),
+        'test_weights': test_weights.tolist(),
+        'history': history
+    }, final_path)
+    print(f"\nFinal model saved: {final_path}")
+    print("All done!")
 
 
 if __name__ == "__main__":
