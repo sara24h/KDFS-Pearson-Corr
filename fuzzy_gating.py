@@ -129,7 +129,7 @@ def load_pruned_models(model_paths, device):
         
         models.append(model)
     
-    print(f"\n✅ All {len(models)} models loaded successfully!\n")
+    print(f"\nAll {len(models)} models loaded successfully!\n")
     return models
 
 
@@ -404,7 +404,7 @@ if __name__ == "__main__":
     ]
     
     # Hyperparameters
-    BATCH_SIZE = 128
+    BATCH_SIZE = 32
     NUM_EPOCHS = 10
     LEARNING_RATE = 1e-3
     DATA_DIR = '/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k'
