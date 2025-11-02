@@ -1,6 +1,3 @@
-# fuzzy_gating_final.py
-# Kaggle + 2 GPU + DataParallel + Safe Save + No torchrun
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,11 +13,6 @@ import tempfile
 import shutil
 
 warnings.filterwarnings("ignore")
-
-
-# =============================================================================
-# مدل‌ها
-# =============================================================================
 
 class FuzzyGatingNetwork(nn.Module):
     def __init__(self, num_models: int = 5, dropout: float = 0.3):
@@ -353,11 +345,17 @@ def main():
     ensemble = FuzzyEnsembleModel(base_models, MEANS[:len(base_models)], STDS[:len(base_models)], freeze_models=True).to(device)
 
     # DataParallel
+    # در main() — بعد از DataParallel
     if gpu_count > 1:
         ensemble = nn.DataParallel(ensemble)
 
-    # آمار
-    trainable = sum(p.numel() for p in ensemble.module.gating_network.parameters() if hasattr(ensemble, 'module') else ensemble.gating_network.parameters())
+# --- اصلاح این بخش ---
+    if isinstance(ensemble, nn.DataParallel):
+        gating_params = ensemble.module.gating_network.parameters()
+    else:
+        gating_params = ensemble.gating_network.parameters()
+
+    trainable = sum(p.numel() for p in gating_params)
     total_params = sum(p.numel() for p in ensemble.parameters())
     print(f"Total params: {total_params:,} | Trainable: {trainable:,} | Frozen: {total_params - trainable:,}\n")
 
