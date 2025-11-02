@@ -1,4 +1,6 @@
-# fuzzy_gating_dp.py
+# fuzzy_gating_final.py
+# Kaggle + 2 GPU + DataParallel + Safe Save + No torchrun
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -68,7 +70,7 @@ class FuzzyEnsembleModel(nn.Module):
                     p.requires_grad = False
 
     def forward(self, x: torch.Tensor, return_individual: bool = False):
-        weights = self.gating_network(x)
+        weights = self.gating_network(x)  # (B, N)
         outputs = []
 
         for i, model in enumerate(self.models):
@@ -79,7 +81,7 @@ class FuzzyEnsembleModel(nn.Module):
                     out = out[0]
             outputs.append(out)
 
-        outputs = torch.stack(outputs, dim=1)
+        outputs = torch.stack(outputs, dim=1)  # (B, N, C)
         final_output = (outputs * weights.unsqueeze(-1)).sum(dim=1)
 
         if return_individual:
@@ -88,7 +90,7 @@ class FuzzyEnsembleModel(nn.Module):
 
 
 # =============================================================================
-# لود مدل‌ها
+# لود مدل‌ها (با چک مسیر)
 # =============================================================================
 
 def load_pruned_models(model_paths: List[str], device: torch.device) -> List[nn.Module]:
@@ -97,15 +99,28 @@ def load_pruned_models(model_paths: List[str], device: torch.device) -> List[nn.
     models = []
     print(f"Loading {len(model_paths)} pruned models...")
     for i, path in enumerate(model_paths):
+        if not os.path.exists(path):
+            print(f"  [WARNING] File not found: {path}")
+            print(f"  → Skipping this model...")
+            continue
+
         print(f"  [{i+1}/{len(model_paths)}] Loading: {os.path.basename(path)}")
-        ckpt = torch.load(path, map_location='cpu')
-        model = ResNet_50_pruned_hardfakevsreal(masks=ckpt['masks'])
-        model.load_state_dict(ckpt['model_state_dict'])
-        model = model.to(device).eval()
-        param_count = sum(p.numel() for p in model.parameters())
-        print(f"     → Parameters: {param_count:,}")
-        models.append(model)
-    print(f"All {len(models)} models loaded successfully!\n")
+        try:
+            ckpt = torch.load(path, map_location='cpu')
+            model = ResNet_50_pruned_hardfakevsreal(masks=ckpt['masks'])
+            model.load_state_dict(ckpt['model_state_dict'])
+            model = model.to(device).eval()
+            param_count = sum(p.numel() for p in model.parameters())
+            print(f"     → Parameters: {param_count:,}")
+            models.append(model)
+        except Exception as e:
+            print(f"  [ERROR] Failed to load {path}: {e}")
+            continue
+
+    if len(models) == 0:
+        raise ValueError("No models were loaded! Check your paths.")
+    
+    print(f"All {len(models)} available models loaded successfully!\n")
     return models
 
 
@@ -154,10 +169,11 @@ def create_dataloaders(base_dir: str, batch_size: int, num_workers: int = 2):
             num_workers=num_workers, pin_memory=True, drop_last=drop_last
         )
 
+    train_loader, val_loader, test_loader = loaders['train'], loaders['valid'], loaders['test']
     print(f"DataLoaders ready! Batch size: {batch_size}")
-    print(f"  Batches → Train: {len(loaders['train'])}, Val: {len(loaders['valid'])}, Test: {len(loaders['test'])}")
+    print(f"  Batches → Train: {len(train_loader)}, Val: {len(val_loader)}, Test: {len(test_loader)}")
     print("="*70 + "\n")
-    return loaders['train'], loaders['valid'], loaders['test']
+    return train_loader, val_loader, test_loader
 
 
 # =============================================================================
@@ -178,7 +194,7 @@ def evaluate_accuracy(model: nn.Module, loader: DataLoader, device: torch.device
 
 
 # =============================================================================
-# آموزش با DataParallel
+# آموزش Gating Network (DataParallel Safe)
 # =============================================================================
 
 def train_gating_network(
@@ -191,7 +207,12 @@ def train_gating_network(
     save_dir: str
 ):
     os.makedirs(save_dir, exist_ok=True)
-    gating_net = ensemble_model.gating_network
+
+    # دسترسی امن به gating_network
+    if isinstance(ensemble_model, nn.DataParallel):
+        gating_net = ensemble_model.module.gating_network
+    else:
+        gating_net = ensemble_model.gating_network
 
     optimizer = torch.optim.AdamW(gating_net.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
@@ -299,10 +320,10 @@ def evaluate_ensemble_final(model, loader, device, name):
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--epochs', type=int, default=1)
-    parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--batch_size', type=int, default=64)  # total batch size
+    parser = argparse.ArgumentParser(description="Train Fuzzy Gating Network (DataParallel)")
+    parser.add_argument('--epochs', type=int, default=1, help='Number of training epochs')
+    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
+    parser.add_argument('--batch_size', type=int, default=64, help='Total batch size (split across GPUs)')
     parser.add_argument('--data_dir', type=str, default='/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k')
     parser.add_argument('--save_dir', type=str, default='/kaggle/working/checkpoints')
     args = parser.parse_args()
@@ -311,12 +332,12 @@ def main():
     gpu_count = torch.cuda.device_count()
     print(f"Device: {device} | GPUs: {gpu_count} | Using DataParallel")
 
-    # تنظیمات
+    # تنظیمات مدل‌ها
     MODEL_PATHS = [
         '/kaggle/input/10k-pearson-pruned/pytorch/default/1/10k_pearson_pruned.pt',
         '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt',
         '/kaggle/input/190k-pearson-pruned/pytorch/default/1/190k_pearson_pruned.pt',
-        '//kaggle/input/200k-pearson-pruned/pytorch/default/1/200k_kdfs_pruned.pt',
+        '/kaggle/input/200k-kdfs-pruned/pytorch/default/1/200k_kdfs_pruned.pt',
         '/kaggle/input/330k-pearson-pruned/pytorch/default/1/330k_pearson_pruned.pt'
     ]
 
@@ -328,15 +349,17 @@ def main():
     # لود مدل‌ها
     base_models = load_pruned_models(MODEL_PATHS, device)
 
-    # Ensemble + DataParallel
-    ensemble = FuzzyEnsembleModel(base_models, MEANS, STDS, freeze_models=True).to(device)
+    # ساخت ensemble
+    ensemble = FuzzyEnsembleModel(base_models, MEANS[:len(base_models)], STDS[:len(base_models)], freeze_models=True).to(device)
+
+    # DataParallel
     if gpu_count > 1:
         ensemble = nn.DataParallel(ensemble)
 
     # آمار
-    total_params = sum(p.numel() for p in ensemble.parameters() if p.requires_grad is False)
-    trainable = sum(p.numel() for p in ensemble.module.gating_network.parameters())
-    print(f"Total params: {total_params + trainable:,} | Trainable: {trainable:,}\n")
+    trainable = sum(p.numel() for p in ensemble.module.gating_network.parameters() if hasattr(ensemble, 'module') else ensemble.gating_network.parameters())
+    total_params = sum(p.numel() for p in ensemble.parameters())
+    print(f"Total params: {total_params:,} | Trainable: {trainable:,} | Frozen: {total_params - trainable:,}\n")
 
     # دیتالودر
     train_loader, val_loader, test_loader = create_dataloaders(args.data_dir, args.batch_size, num_workers=2)
@@ -351,7 +374,10 @@ def main():
     ckpt_path = os.path.join(args.save_dir, 'best_fuzzy_gating.pt')
     if os.path.exists(ckpt_path):
         ckpt = torch.load(ckpt_path, map_location=device)
-        ensemble.module.gating_network.load_state_dict(ckpt['gating_state_dict'])
+        if isinstance(ensemble, nn.DataParallel):
+            ensemble.module.gating_network.load_state_dict(ckpt['gating_state_dict'])
+        else:
+            ensemble.gating_network.load_state_dict(ckpt['gating_state_dict'])
         print("Best gating network loaded.\n")
 
     # ارزیابی
@@ -360,10 +386,13 @@ def main():
 
     # ذخیره نهایی
     final_path = '/kaggle/working/fuzzy_ensemble_final_dp.pt'
+    gating_state = ensemble.module.gating_network.state_dict() if isinstance(ensemble, nn.DataParallel) else ensemble.gating_network.state_dict()
     torch.save({
-        'gating_state_dict': ensemble.module.gating_network.state_dict(),
+        'gating_state_dict': gating_state,
         'val_acc': best_val_acc,
         'test_acc': test_acc,
+        'val_weights': val_weights.tolist(),
+        'test_weights': test_weights.tolist(),
         'history': history
     }, final_path)
     print(f"\nFinal model saved: {final_path}")
