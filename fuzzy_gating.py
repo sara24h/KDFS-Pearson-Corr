@@ -1,6 +1,4 @@
-# fuzzy_gating_full_eval.py
-# Kaggle + 2 GPU + DataParallel + Full Evaluation (Individual + Ensemble + Comparison)
-
+# fuzzy_gating_fixed.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -95,7 +93,10 @@ class FuzzyEnsembleModel(nn.Module):
 # =============================================================================
 
 def load_pruned_models(model_paths: List[str], device: torch.device) -> List[nn.Module]:
-    from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
+    try:
+        from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
+    except ImportError:
+        raise ImportError("Cannot import ResNet_50_pruned_hardfakevsreal. Ensure model.pruned_model.ResNet_pruned is available.")
 
     models = []
     print(f"Loading {len(model_paths)} pruned models...")
@@ -104,13 +105,17 @@ def load_pruned_models(model_paths: List[str], device: torch.device) -> List[nn.
             print(f"  [WARNING] File not found: {path}")
             continue
         print(f"  [{i+1}/{len(model_paths)}] Loading: {os.path.basename(path)}")
-        ckpt = torch.load(path, map_location='cpu')
-        model = ResNet_50_pruned_hardfakevsreal(masks=ckpt['masks'])
-        model.load_state_dict(ckpt['model_state_dict'])
-        model = model.to(device).eval()
-        param_count = sum(p.numel() for p in model.parameters())
-        print(f"     → Parameters: {param_count:,}")
-        models.append(model)
+        try:
+            ckpt = torch.load(path, map_location='cpu')
+            model = ResNet_50_pruned_hardfakevsreal(masks=ckpt['masks'])
+            model.load_state_dict(ckpt['model_state_dict'])
+            model = model.to(device).eval()
+            param_count = sum(p.numel() for p in model.parameters())
+            print(f"     → Parameters: {param_count:,}")
+            models.append(model)
+        except Exception as e:
+            print(f"  [ERROR] Failed to load {path}: {e}")
+            continue
     if len(models) == 0:
         raise ValueError("No models loaded!")
     print(f"All {len(models)} models loaded!\n")
@@ -176,7 +181,7 @@ def create_dataloaders(base_dir: str, batch_size: int, num_workers: int = 2):
 def evaluate_single_model(model: nn.Module, loader: DataLoader, device: torch.device, name: str) -> float:
     model.eval()
     correct = total = 0
-    for images, labels in loader:
+    for images, labels in tqdm(loader, desc=f"Evaluating {name}"):
         images, labels = images.to(device), labels.to(device).float()
         out = model(images)
         if isinstance(out, (tuple, list)):
@@ -205,13 +210,15 @@ def train_gating_network(ensemble_model, train_loader, val_loader, num_epochs, l
     history = {'train_loss': [], 'train_acc': [], 'val_acc': []}
 
     print("="*70)
-    print("Training Fuzzy Gating Network")
+    print("Training Fuzzy Gating Network (DataParallel + BCEWithLogitsLoss)")
     print("="*70)
+    print(f"Trainable params: {sum(p.numel() for p in gating_net.parameters()):,}")
+    print(f"Epochs: {num_epochs} | Initial LR: {lr} | Device: {device}\n")
 
     for epoch in range(num_epochs):
         ensemble_model.train()
         train_loss = train_correct = train_total = 0.0
-        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}')
+        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
 
         for images, labels in progress_bar:
             images, labels = images.to(device), labels.to(device).float()
@@ -227,6 +234,10 @@ def train_gating_network(ensemble_model, train_loader, val_loader, num_epochs, l
             train_correct += pred.eq(labels.long()).sum().item()
             train_total += batch_size
 
+            current_acc = 100. * train_correct / train_total
+            avg_loss = train_loss / train_total
+            progress_bar.set_postfix({'loss': f'{avg_loss:.4f}', 'acc': f'{current_acc:.2f}%'})
+
         train_acc = 100. * train_correct / train_total
         train_loss /= train_total
         val_acc = evaluate_accuracy(ensemble_model, val_loader, device)
@@ -236,20 +247,32 @@ def train_gating_network(ensemble_model, train_loader, val_loader, num_epochs, l
         history['train_acc'].append(train_acc)
         history['val_acc'].append(val_acc)
 
-        print(f"\nEpoch {epoch+1}: Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}%")
+        print(f"\nEpoch {epoch+1}:")
+        print(f"   Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
+        print(f"   Val Acc: {val_acc:.2f}% | LR: {optimizer.param_groups[0]['lr']:.6f}")
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             tmp_path = os.path.join(save_dir, 'best_tmp.pt')
             final_path = os.path.join(save_dir, 'best_fuzzy_gating.pt')
-            torch.save({
-                'gating_state_dict': gating_net.state_dict(),
-                'val_acc': val_acc,
-                'history': history
-            }, tmp_path)
-            shutil.move(tmp_path, final_path)
-            print(f"   Best model saved → {val_acc:.2f}%")
+            try:
+                torch.save({
+                    'epoch': epoch + 1,
+                    'gating_state_dict': gating_net.state_dict(),
+                    'val_acc': val_acc,
+                    'history': history
+                }, tmp_path)
+                if os.path.exists(tmp_path):  # تأیید فایل
+                    shutil.move(tmp_path, final_path)
+                    print(f"   Best model saved → {val_acc:.2f}%")
+                else:
+                    print(f"   [WARNING] Failed to save model: {tmp_path} not found")
+            except Exception as e:
+                print(f"   [ERROR] Failed to save model: {e}")
 
+        print("-" * 70)
+
+    print(f"\nTraining completed! Best Val Acc: {best_val_acc:.2f}%")
     return best_val_acc, history
 
 
@@ -258,7 +281,7 @@ def train_gating_network(ensemble_model, train_loader, val_loader, num_epochs, l
 # =============================================================================
 
 @torch.no_grad()
-def evaluate_ensemble_final(model, loader, device, name):
+def evaluate_ensemble_final(model, loader, device, name, model_names):
     model.eval()
     all_preds, all_labels, all_weights = [], [], []
 
@@ -276,8 +299,8 @@ def evaluate_ensemble_final(model, loader, device, name):
 
     print(f"\n{name} Results → Accuracy: {acc:.2f}%")
     print("Average Fuzzy Weights:")
-    for i, w in enumerate(avg_weights):
-        print(f"   Model {i+1}: {w:.4f} ({w*100:.2f}%)")
+    for i, (w, name) in enumerate(zip(avg_weights, model_names)):
+        print(f"   Model {i+1} ({name}): {w:.4f} ({w*100:.2f}%)")
     return acc, avg_weights.tolist()
 
 
@@ -299,7 +322,7 @@ def evaluate_accuracy(model, loader, device):
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Train Fuzzy Gating Network with Full Evaluation")
     parser.add_argument('--epochs', type=int, default=30)
     parser.add_argument('--lr', type=float, default=0.0001)
     parser.add_argument('--batch_size', type=int, default=64)
@@ -320,36 +343,36 @@ def main():
         '/kaggle/input/330k-pearson-pruned/pytorch/default/1/330k_pearson_pruned.pt'
     ]
     MODEL_NAMES = ["10k_pearson", "140k_pearson", "190k_pearson", "200k_kdfs", "330k_pearson"]
-
     MEANS = [(0.5212,0.4260,0.3811), (0.5207,0.4258,0.3806), (0.4868,0.3972,0.3624),
              (0.4668,0.3816,0.3414), (0.4923,0.4042,0.3624)]
     STDS = [(0.2486,0.2238,0.2211), (0.2490,0.2239,0.2212), (0.2296,0.2066,0.2009),
             (0.2410,0.2161,0.2081), (0.2446,0.2198,0.2141)]
 
-    # لود
+    # لود مدل‌ها
     base_models = load_pruned_models(MODEL_PATHS, device)
+    if len(base_models) != len(MODEL_PATHS):
+        print(f"[WARNING] Only {len(base_models)}/{len(MODEL_PATHS)} models loaded. Adjusting MEANS/STDS.")
+        MEANS = MEANS[:len(base_models)]
+        STDS = STDS[:len(base_models)]
+        MODEL_NAMES = MODEL_NAMES[:len(base_models)]
+
+    # ساخت ensemble
     ensemble = FuzzyEnsembleModel(base_models, MEANS, STDS, freeze_models=True).to(device)
     if gpu_count > 1:
         ensemble = nn.DataParallel(ensemble)
 
+    # آمار پارامترها
+    gating_net = ensemble.module.gating_network if isinstance(ensemble, nn.DataParallel) else ensemble.gating_network
+    trainable = sum(p.numel() for p in gating_net.parameters())
+    total_params = sum(p.numel() for p in ensemble.parameters())
+    print(f"Total params: {total_params:,} | Trainable: {trainable:,} | Frozen: {total_params - trainable:,}\n")
+
     # دیتالودر
     train_loader, val_loader, test_loader = create_dataloaders(args.data_dir, args.batch_size)
 
-    # آموزش
-    best_val_acc, history = train_gating_network(ensemble, train_loader, val_loader, args.epochs, args.lr, device, args.save_dir)
-
-    # لود بهترین گیت
-    ckpt_path = os.path.join(args.save_dir, 'best_fuzzy_gating.pt')
-    if os.path.exists(ckpt_path):
-        ckpt = torch.load(ckpt_path, map_location=device)
-        if isinstance(ensemble, nn.DataParallel):
-            ensemble.module.gating_network.load_state_dict(ckpt['gating_state_dict'])
-        else:
-            ensemble.gating_network.load_state_dict(ckpt['gating_state_dict'])
-
-    # ارزیابی تکی
+    # ارزیابی تکی قبل از آموزش
     print("\n" + "="*70)
-    print("EVALUATING INDIVIDUAL MODELS ON TEST SET")
+    print("EVALUATING INDIVIDUAL MODELS ON TEST SET (Before Training)")
     print("="*70)
     individual_accs = []
     for i, model in enumerate(base_models):
@@ -359,11 +382,24 @@ def main():
     best_idx = individual_accs.index(best_single)
     print(f"\nBest Single Model: Model {best_idx+1} ({MODEL_NAMES[best_idx]}) → {best_single:.2f}%")
 
+    # آموزش گیت
+    best_val_acc, history = train_gating_network(ensemble, train_loader, val_loader, args.epochs, args.lr, device, args.save_dir)
+
+    # لود بهترین مدل
+    ckpt_path = os.path.join(args.save_dir, 'best_fuzzy_gating.pt')
+    if os.path.exists(ckpt_path):
+        ckpt = torch.load(ckpt_path, map_location=device)
+        if isinstance(ensemble, nn.DataParallel):
+            ensemble.module.gating_network.load_state_dict(ckpt['gating_state_dict'])
+        else:
+            ensemble.gating_network.load_state_dict(ckpt['gating_state_dict'])
+        print("Best gating network loaded.\n")
+
     # ارزیابی ensemble
     print("\n" + "="*70)
     print("EVALUATING FUZZY ENSEMBLE")
     print("="*70)
-    ensemble_test_acc, ensemble_weights = evaluate_ensemble_final(ensemble, test_loader, device, "Test")
+    ensemble_test_acc, ensemble_weights = evaluate_ensemble_final(ensemble, test_loader, device, "Test", MODEL_NAMES)
 
     # مقایسه
     print("\n" + "="*70)
@@ -389,7 +425,7 @@ def main():
     # ذخیره مدل نهایی
     final_model_path = '/kaggle/working/fuzzy_ensemble_final.pt'
     torch.save({
-        'gating_state_dict': ensemble.module.gating_network.state_dict() if isinstance(ensemble, nn.DataParallel) else ensemble.gating_network.state_dict(),
+        'gating_state_dict': gating_net.state_dict(),
         'results': results
     }, final_model_path)
     print(f"Final model saved: {final_model_path}")
