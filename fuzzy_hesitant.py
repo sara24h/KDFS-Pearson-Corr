@@ -148,7 +148,7 @@ def load_pruned_models(model_paths: List[str], device: torch.device) -> List[nn.
             continue
         print(f"  [{i+1}/{len(model_paths)}] Loading: {os.path.basename(path)}")
         try:
-            ckpt = torch.load(path, map_location='cpu')
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
             model = ResNet_50_pruned_hardfakevsreal(masks=ckpt['masks'])
             model.load_state_dict(ckpt['model_state_dict'])
             model = model.to(device).eval()
