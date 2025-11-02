@@ -456,7 +456,7 @@ def main():
     )
 
     # لود بهترین مدل
-    ckpt_path = os.path.join(args.save_dir, 'best_hesitant_fuzzy.pt')
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     if os.path.exists(ckpt_path):
         ckpt = torch.load(ckpt_path, map_location=device)
         if isinstance(ensemble, nn.DataParallel):
