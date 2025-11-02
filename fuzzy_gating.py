@@ -1,16 +1,13 @@
-# fuzzy_gating_ddp.py
+# fuzzy_gating_dp.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributed as dist
-import torch.multiprocessing as mp
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader
 from torchvision import transforms, datasets
 import os
 from tqdm import tqdm
 import numpy as np
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple
 import warnings
 import argparse
 import tempfile
@@ -20,7 +17,7 @@ warnings.filterwarnings("ignore")
 
 
 # =============================================================================
-# مدل‌های اصلی
+# مدل‌ها
 # =============================================================================
 
 class FuzzyGatingNetwork(nn.Module):
@@ -71,7 +68,7 @@ class FuzzyEnsembleModel(nn.Module):
                     p.requires_grad = False
 
     def forward(self, x: torch.Tensor, return_individual: bool = False):
-        weights = self.gating_network(x)  # (B, N)
+        weights = self.gating_network(x)
         outputs = []
 
         for i, model in enumerate(self.models):
@@ -82,22 +79,12 @@ class FuzzyEnsembleModel(nn.Module):
                     out = out[0]
             outputs.append(out)
 
-        outputs = torch.stack(outputs, dim=1)  # (B, N, C)
+        outputs = torch.stack(outputs, dim=1)
         final_output = (outputs * weights.unsqueeze(-1)).sum(dim=1)
 
         if return_individual:
             return final_output, weights, outputs
         return final_output, weights
-
-
-# =============================================================================
-# تابع کمکی: دسترسی ایمن به gating_network
-# =============================================================================
-
-def get_gating_network(model: nn.Module) -> nn.Module:
-    if hasattr(model, 'module'):
-        return model.module.gating_network
-    return model.gating_network
 
 
 # =============================================================================
@@ -115,7 +102,6 @@ def load_pruned_models(model_paths: List[str], device: torch.device) -> List[nn.
         model = ResNet_50_pruned_hardfakevsreal(masks=ckpt['masks'])
         model.load_state_dict(ckpt['model_state_dict'])
         model = model.to(device).eval()
-
         param_count = sum(p.numel() for p in model.parameters())
         print(f"     → Parameters: {param_count:,}")
         models.append(model)
@@ -158,32 +144,41 @@ def create_dataloaders(base_dir: str, batch_size: int, num_workers: int = 2):
     for split, ds in datasets_dict.items():
         print(f"  {split.capitalize():5}: {len(ds):,} images | Classes: {ds.classes}")
     print(f"  Class → Index: {datasets_dict['train'].class_to_idx}\n")
-    return datasets_dict['train'], datasets_dict['valid'], datasets_dict['test']
+
+    loaders = {}
+    for split, ds in datasets_dict.items():
+        shuffle = (split == 'train')
+        drop_last = (split != 'test')
+        loaders[split] = DataLoader(
+            ds, batch_size=batch_size, shuffle=shuffle,
+            num_workers=num_workers, pin_memory=True, drop_last=drop_last
+        )
+
+    print(f"DataLoaders ready! Batch size: {batch_size}")
+    print(f"  Batches → Train: {len(loaders['train'])}, Val: {len(loaders['valid'])}, Test: {len(loaders['test'])}")
+    print("="*70 + "\n")
+    return loaders['train'], loaders['valid'], loaders['test']
 
 
 # =============================================================================
-# ارزیابی با DDP
+# ارزیابی
 # =============================================================================
 
 @torch.no_grad()
-def evaluate_accuracy_ddp(model, loader, device, world_size):
+def evaluate_accuracy(model: nn.Module, loader: DataLoader, device: torch.device) -> float:
     model.eval()
     correct = total = 0
-
     for images, labels in loader:
         images, labels = images.to(device), labels.to(device).float()
         outputs, _ = model(images)
         pred = (outputs.squeeze(1) > 0).long()
-        correct += pred.eq(labels.long()).sum().item()
         total += labels.size(0)
-
-    metrics = torch.tensor([correct, total], device=device, dtype=torch.float32)
-    dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
-    return 100. * metrics[0].item() / metrics[1].item()
+        correct += pred.eq(labels.long()).sum().item()
+    return 100. * correct / total
 
 
 # =============================================================================
-# آموزش Gating Network با DDP
+# آموزش با DataParallel
 # =============================================================================
 
 def train_gating_network(
@@ -193,12 +188,11 @@ def train_gating_network(
     num_epochs: int,
     lr: float,
     device: torch.device,
-    save_dir: str,
-    local_rank: int,
-    world_size: int
+    save_dir: str
 ):
     os.makedirs(save_dir, exist_ok=True)
-    gating_net = get_gating_network(ensemble_model)
+    gating_net = ensemble_model.gating_network
+
     optimizer = torch.optim.AdamW(gating_net.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
     criterion = nn.BCEWithLogitsLoss()
@@ -206,19 +200,17 @@ def train_gating_network(
     best_val_acc = 0.0
     history = {'train_loss': [], 'train_acc': [], 'val_acc': []}
 
-    if local_rank == 0:
-        print("="*70)
-        print("Training Fuzzy Gating Network (DDP + BCEWithLogitsLoss)")
-        print("="*70)
-        print(f"Trainable params: {sum(p.numel() for p in gating_net.parameters()):,}")
-        print(f"Epochs: {num_epochs} | Initial LR: {lr} | Device: {device}\n")
+    print("="*70)
+    print("Training Fuzzy Gating Network (DataParallel + BCEWithLogitsLoss)")
+    print("="*70)
+    print(f"Trainable params: {sum(p.numel() for p in gating_net.parameters()):,}")
+    print(f"Epochs: {num_epochs} | Initial LR: {lr} | Device: {device}\n")
 
     for epoch in range(num_epochs):
-        train_loader.sampler.set_epoch(epoch)
         ensemble_model.train()
         train_loss = train_correct = train_total = 0.0
 
-        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Rank {local_rank}]') if local_rank == 0 else train_loader
+        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
 
         for images, labels in progress_bar:
             images, labels = images.to(device), labels.to(device).float()
@@ -235,42 +227,40 @@ def train_gating_network(
             train_correct += pred.eq(labels.long()).sum().item()
             train_total += batch_size
 
-        # جمع‌آوری از همه GPUها
-        metrics = torch.tensor([train_loss, train_correct, train_total], device=device)
-        dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+            current_acc = 100. * train_correct / train_total
+            avg_loss = train_loss / train_total
+            progress_bar.set_postfix({'loss': f'{avg_loss:.4f}', 'acc': f'{current_acc:.2f}%'})
 
-        train_loss = metrics[0].item() / metrics[2].item()
-        train_acc = 100. * metrics[1].item() / metrics[2].item()
-        val_acc = evaluate_accuracy_ddp(ensemble_model, val_loader, device, world_size)
+        train_acc = 100. * train_correct / train_total
+        train_loss /= train_total
+        val_acc = evaluate_accuracy(ensemble_model, val_loader, device)
 
         scheduler.step()
         history['train_loss'].append(train_loss)
         history['train_acc'].append(train_acc)
         history['val_acc'].append(val_acc)
 
-        if local_rank == 0:
-            print(f"\nEpoch {epoch+1}:")
-            print(f"   Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
-            print(f"   Val Acc: {val_acc:.2f}% | LR: {optimizer.param_groups[0]['lr']:.6f}")
+        print(f"\nEpoch {epoch+1}:")
+        print(f"   Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
+        print(f"   Val Acc: {val_acc:.2f}% | LR: {optimizer.param_groups[0]['lr']:.6f}")
 
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                # ذخیره امن با tempfile
-                tmp_path = os.path.join(save_dir, f'best_tmp_rank{local_rank}.pt')
-                final_path = os.path.join(save_dir, 'best_fuzzy_gating.pt')
-                torch.save({
-                    'epoch': epoch + 1,
-                    'gating_state_dict': gating_net.module.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'val_acc': val_acc,
-                    'history': history
-                }, tmp_path)
-                shutil.move(tmp_path, final_path)
-                print(f"   Best model saved → {val_acc:.2f}%")
-            print("-" * 70)
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            # ذخیره امن
+            tmp_path = os.path.join(save_dir, 'best_tmp.pt')
+            final_path = os.path.join(save_dir, 'best_fuzzy_gating.pt')
+            torch.save({
+                'epoch': epoch + 1,
+                'gating_state_dict': gating_net.state_dict(),
+                'val_acc': val_acc,
+                'history': history
+            }, tmp_path)
+            shutil.move(tmp_path, final_path)
+            print(f"   Best model saved → {val_acc:.2f}%")
 
-    if local_rank == 0:
-        print(f"\nTraining completed! Best Val Acc: {best_val_acc:.2f}%")
+        print("-" * 70)
+
+    print(f"\nTraining completed! Best Val Acc: {best_val_acc:.2f}%")
     return best_val_acc, history
 
 
@@ -279,11 +269,11 @@ def train_gating_network(
 # =============================================================================
 
 @torch.no_grad()
-def evaluate_ensemble_final(model, loader, device, name, local_rank, world_size):
+def evaluate_ensemble_final(model, loader, device, name):
     model.eval()
     all_preds, all_labels, all_weights = [], [], []
 
-    for images, labels in loader:
+    for images, labels in tqdm(loader, desc=f'Evaluating {name}'):
         images, labels = images.to(device), labels.to(device)
         outputs, weights, _ = model(images, return_individual=True)
         pred = (outputs.squeeze(1) > 0).long()
@@ -292,65 +282,41 @@ def evaluate_ensemble_final(model, loader, device, name, local_rank, world_size)
         all_labels.extend(labels.cpu().numpy())
         all_weights.append(weights.cpu().numpy())
 
-    # جمع‌آوری از همه GPUها
-    preds_tensor = torch.tensor(all_preds, device=device)
-    labels_tensor = torch.tensor(all_labels, device=device)
-    weights_np = np.concatenate(all_weights)
+    acc = 100. * np.mean(np.array(all_preds) == np.array(all_labels))
+    avg_weights = np.concatenate(all_weights).mean(axis=0)
 
-    # all_gather برای لیست‌ها
-    gathered_preds = [torch.zeros_like(preds_tensor) for _ in range(world_size)]
-    gathered_labels = [torch.zeros_like(labels_tensor) for _ in range(world_size)]
-    dist.all_gather(gathered_preds, preds_tensor)
-    dist.all_gather(gathered_labels, labels_tensor)
-
-    all_preds = torch.cat(gathered_preds).cpu().numpy()
-    all_labels = torch.cat(gathered_labels).cpu().numpy()
-
-    # میانگین وزنی
-    weights_list = [torch.zeros(weights_np.shape[0], 5, device=device) for _ in range(world_size)]
-    weights_tensor = torch.tensor(weights_np, device=device)
-    dist.all_gather(weights_list, weights_tensor)
-    avg_weights = torch.cat(weights_list).mean(dim=0).cpu().numpy()
-
-    acc = 100. * np.mean(all_preds == all_labels)
-
-    if local_rank == 0:
-        print("\n" + "="*70)
-        print(f"{name} Results → Accuracy: {acc:.2f}%")
-        print("Average Fuzzy Weights:")
-        for i, w in enumerate(avg_weights):
-            print(f"   Model {i+1}: {w:.4f} ({w*100:.2f}%)")
-        print("="*70)
+    print("\n" + "="*70)
+    print(f"{name} Results → Accuracy: {acc:.2f}%")
+    print("Average Fuzzy Weights:")
+    for i, w in enumerate(avg_weights):
+        print(f"   Model {i+1}: {w:.4f} ({w*100:.2f}%)")
+    print("="*70)
     return acc, avg_weights
 
 
 # =============================================================================
-# Main Worker
+# Main
 # =============================================================================
 
-def main_worker(local_rank: int, world_size: int, args):
-    # DDP init
-    dist.init_process_group(
-        backend='nccl',
-        init_method='env://',
-        world_size=world_size,
-        rank=local_rank
-    )
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f'cuda:{local_rank}')
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--epochs', type=int, default=1)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--batch_size', type=int, default=64)  # total batch size
+    parser.add_argument('--data_dir', type=str, default='/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k')
+    parser.add_argument('--save_dir', type=str, default='/kaggle/working/checkpoints')
+    args = parser.parse_args()
 
-    def rank_print(*args, **kwargs):
-        if local_rank == 0:
-            print(*args, **kwargs)
-
-    rank_print(f"Rank {local_rank} initialized. Device: {device}")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    gpu_count = torch.cuda.device_count()
+    print(f"Device: {device} | GPUs: {gpu_count} | Using DataParallel")
 
     # تنظیمات
     MODEL_PATHS = [
         '/kaggle/input/10k-pearson-pruned/pytorch/default/1/10k_pearson_pruned.pt',
         '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt',
         '/kaggle/input/190k-pearson-pruned/pytorch/default/1/190k_pearson_pruned.pt',
-        '/kaggle/input/200k-pearson-pruned/pytorch/default/1/200k_kdfs_pruned.pt',
+        '/kaggle/input/200k-kdfs-pruned/pytorch/default/1/200k_kdfs_pruned.pt',
         '/kaggle/input/330k-pearson-pruned/pytorch/default/1/330k_pearson_pruned.pt'
     ]
 
@@ -359,106 +325,49 @@ def main_worker(local_rank: int, world_size: int, args):
     STDS = [(0.2486,0.2238,0.2211), (0.2490,0.2239,0.2212), (0.2296,0.2066,0.2009),
             (0.2410,0.2161,0.2081), (0.2446,0.2198,0.2141)]
 
-    # Reproducibility
-    seed = 42 + local_rank
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
     # لود مدل‌ها
     base_models = load_pruned_models(MODEL_PATHS, device)
 
-    # Ensemble
-    ensemble = FuzzyEnsembleModel(base_models, MEANS, STDS, freeze_models=True)
-    ensemble = ensemble.to(device)
-
-    # فقط gating network آموزش داده بشه
-    gating_net = get_gating_network(ensemble)
-    gating_net = DDP(gating_net, device_ids=[local_rank], output_device=local_rank)
+    # Ensemble + DataParallel
+    ensemble = FuzzyEnsembleModel(base_models, MEANS, STDS, freeze_models=True).to(device)
+    if gpu_count > 1:
+        ensemble = nn.DataParallel(ensemble)
 
     # آمار
-    total_params = sum(p.numel() for p in ensemble.parameters())
-    trainable = sum(p.numel() for p in gating_net.parameters())
-    rank_print(f"Total params: {total_params:,} | Trainable: {trainable:,} | Frozen: {total_params - trainable:,}\n")
+    total_params = sum(p.numel() for p in ensemble.parameters() if p.requires_grad is False)
+    trainable = sum(p.numel() for p in ensemble.module.gating_network.parameters())
+    print(f"Total params: {total_params + trainable:,} | Trainable: {trainable:,}\n")
 
-    # دیتاست‌ها
-    train_dataset, val_dataset, test_dataset = create_dataloaders(
-        args.data_dir, args.batch_size, num_workers=2
-    )
-
-    # Sampler
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
-    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=local_rank, shuffle=False)
-    test_sampler = DistributedSampler(test_dataset, num_replicas=world_size, rank=local_rank, shuffle=False)
-
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=train_sampler,
-                              num_workers=2, pin_memory=True, drop_last=True)
-    val_loader = DataLoader(val_dataset, batch_size=64, sampler=val_sampler, num_workers=2, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=64, sampler=test_sampler, num_workers=2, pin_memory=True)
-
-    rank_print(f"Batches → Train: {len(train_loader)}, Val: {len(val_loader)}, Test: {len(test_loader)}\n")
+    # دیتالودر
+    train_loader, val_loader, test_loader = create_dataloaders(args.data_dir, args.batch_size, num_workers=2)
 
     # آموزش
     best_val_acc, history = train_gating_network(
         ensemble, train_loader, val_loader,
-        num_epochs=args.epochs, lr=args.lr, device=device,
-        save_dir=args.save_dir, local_rank=local_rank, world_size=world_size
+        num_epochs=args.epochs, lr=args.lr, device=device, save_dir=args.save_dir
     )
 
-    # بارگذاری بهترین مدل (فقط rank 0)
-    if local_rank == 0:
-        ckpt_path = os.path.join(args.save_dir, 'best_fuzzy_gating.pt')
-        if os.path.exists(ckpt_path):
-            ckpt = torch.load(ckpt_path, map_location=device)
-            gating_net.module.load_state_dict(ckpt['gating_state_dict'])
-            print("Best gating network loaded.\n")
-        else:
-            print("Warning: Checkpoint not found! Using current state.")
+    # بارگذاری بهترین مدل
+    ckpt_path = os.path.join(args.save_dir, 'best_fuzzy_gating.pt')
+    if os.path.exists(ckpt_path):
+        ckpt = torch.load(ckpt_path, map_location=device)
+        ensemble.module.gating_network.load_state_dict(ckpt['gating_state_dict'])
+        print("Best gating network loaded.\n")
 
-    # ارزیابی نهایی
-    val_acc, val_weights = evaluate_ensemble_final(ensemble, val_loader, device, "Validation", local_rank, world_size)
-    test_acc, test_weights = evaluate_ensemble_final(ensemble, test_loader, device, "Test", local_rank, world_size)
+    # ارزیابی
+    val_acc, val_weights = evaluate_ensemble_final(ensemble, val_loader, device, "Validation")
+    test_acc, test_weights = evaluate_ensemble_final(ensemble, test_loader, device, "Test")
 
-    # ذخیره نهایی (فقط rank 0)
-    if local_rank == 0:
-        final_path = '/kaggle/working/fuzzy_ensemble_final_ddp.pt'
-        torch.save({
-            'gating_state_dict': gating_net.module.state_dict(),
-            'val_acc': best_val_acc,
-            'test_acc': test_acc,
-            'val_weights': val_weights.tolist(),
-            'test_weights': test_weights.tolist(),
-            'history': history
-        }, final_path)
-        print(f"\nFinal DDP model saved: {final_path}")
-
-    dist.destroy_process_group()
-
-
-# =============================================================================
-# Main
-# =============================================================================
-
-def main():
-    parser = argparse.ArgumentParser(description="Train Fuzzy Gating Network with DDP")
-    parser.add_argument('--epochs', type=int, default=1, help='Number of training epochs')
-    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size per GPU')
-    parser.add_argument('--data_dir', type=str, default='/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k')
-    parser.add_argument('--save_dir', type=str, default='/kaggle/working/checkpoints')
-    args = parser.parse_args()
-
-    world_size = torch.cuda.device_count()
-    if world_size < 2:
-        print("Error: Need at least 2 GPUs for DDP!")
-        return
-
-    mp.spawn(
-        main_worker,
-        args=(world_size, args),
-        nprocs=world_size,
-        join=True
-    )
+    # ذخیره نهایی
+    final_path = '/kaggle/working/fuzzy_ensemble_final_dp.pt'
+    torch.save({
+        'gating_state_dict': ensemble.module.gating_network.state_dict(),
+        'val_acc': best_val_acc,
+        'test_acc': test_acc,
+        'history': history
+    }, final_path)
+    print(f"\nFinal model saved: {final_path}")
+    print("All done!")
 
 
 if __name__ == "__main__":
