@@ -329,7 +329,7 @@ def main():
         '/kaggle/input/10k-pearson-pruned/pytorch/default/1/10k_pearson_pruned.pt',
         '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt',
         '/kaggle/input/190k-pearson-pruned/pytorch/default/1/190k_pearson_pruned.pt',
-        '/kaggle/input/200k-kdfs-pruned/pytorch/default/1/200k_kdfs_pruned.pt',
+        '/kaggle/input/200k-pearson-pruned/pytorch/default/1/200k_kdfs_pruned.pt',
         '/kaggle/input/330k-pearson-pruned/pytorch/default/1/330k_pearson_pruned.pt'
     ]
 
