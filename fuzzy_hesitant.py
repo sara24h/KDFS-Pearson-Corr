@@ -148,7 +148,8 @@ def load_pruned_models(model_paths: List[str], device: torch.device) -> List[nn.
             continue
         print(f"  [{i+1}/{len(model_paths)}] Loading: {os.path.basename(path)}")
         try:
-            ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+            # ✅ اصلاح: استفاده از 'path' نه 'ckpt_path' + map_location='cpu'
+            ckpt = torch.load(path, map_location='cpu', weights_only=False)
             model = ResNet_50_pruned_hardfakevsreal(masks=ckpt['masks'])
             model.load_state_dict(ckpt['model_state_dict'])
             model = model.to(device).eval()
@@ -278,7 +279,6 @@ def train_hesitant_fuzzy(ensemble_model, train_loader, val_loader, num_epochs, l
             train_correct += pred.eq(labels.long()).sum().item()
             train_total += batch_size
             
-            # محاسبه variance در membership values (نشان‌دهنده hesitancy)
             membership_vars.append(memberships.var(dim=2).mean().item())
 
             current_acc = 100. * train_correct / train_total
@@ -410,7 +410,7 @@ def main():
     STDS = [(0.2486,0.2238,0.2211), (0.2490,0.2239,0.2212), (0.2296,0.2066,0.2009),
             (0.2410,0.2161,0.2081), (0.2446,0.2198,0.2141)]
 
-    # لود مدل‌ها
+    # لود مدل‌ها — اکنون بدون خطا
     base_models = load_pruned_models(MODEL_PATHS, device)
     if len(base_models) != len(MODEL_PATHS):
         print(f"[WARNING] Only {len(base_models)}/{len(MODEL_PATHS)} models loaded. Adjusting MEANS/STDS.")
@@ -455,9 +455,10 @@ def main():
         args.epochs, args.lr, device, args.save_dir
     )
 
+    # لود بهترین مدل — اکنون با تعریف ckpt_path
     ckpt_path = os.path.join(args.save_dir, 'best_hesitant_fuzzy.pt')
     if os.path.exists(ckpt_path):
-        ckpt = torch.load(ckpt_path, map_location=device)
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         if isinstance(ensemble, nn.DataParallel):
             ensemble.module.hesitant_fuzzy.load_state_dict(ckpt['hesitant_state_dict'])
         else:
