@@ -46,7 +46,8 @@ def initialize_model(model_name, device):
         model.fc = nn.Linear(num_ftrs, 1)
         for param in model.parameters():
             param.requires_grad = False
-        for param in model.layer4.parameters():
+        for param in model.layer4.parame
+        ters():
             param.requires_grad = True
         for param in model.fc.parameters():
             param.requires_grad = True
@@ -54,7 +55,7 @@ def initialize_model(model_name, device):
         model = models.mobilenet_v2(weights='IMAGENET1K_V1')
         num_ftrs = model.classifier[1].in_features
         model.classifier = nn.Sequential(
-            nn.Dropout(p=0.2),
+            nn.Dropout(p=0.5),
             nn.Linear(num_ftrs, 1)
         )
         for param in model.parameters():
@@ -69,7 +70,7 @@ def initialize_model(model_name, device):
         model.fc = nn.Linear(num_ftrs, 1)
         for param in model.parameters():
             param.requires_grad = False
-        # فعال کردن لایه‌های Inception آخر و لایه نهایی برای fine-tuning
+
         for param in model.inception5a.parameters():
             param.requires_grad = True
         for param in model.inception5b.parameters():
@@ -163,7 +164,7 @@ if __name__ == "__main__":
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam([
         {'params': [p for p in model.parameters() if p.requires_grad], 'lr': lr}
-    ], weight_decay=1e-4)
+    ], weight_decay=1e-3)
 
     scaler = GradScaler('cuda') if device.type == 'cuda' else None
 
