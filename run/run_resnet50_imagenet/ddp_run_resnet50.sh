@@ -3,7 +3,7 @@
 # Default values
 arch=${ARCH:-ResNet_50}
 result_dir=${RESULT_DIR:-/kaggle/working/results/run_resnet50_imagenet_prune1}
-teacher_ckpt_path=${TEACHER_CKPT_PATH:-/kaggle/working/KDFS-Pearson/teacher_dir/teacher_model_best.pth}
+teacher_ckpt_path=${TEACHER_CKPT_PATH:-/kaggle/working/KDFS-Pearson-Corr/teacher_dir/teacher_model_best.pth}
 device=${DEVICE:-0,1}
 num_workers=${NUM_WORKERS:-4}
 pin_memory=${PIN_MEMORY:-true}
@@ -197,7 +197,7 @@ elif [ "$PHASE" = "finetune" ]; then
         exit 1
     fi
 
-    echo "torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson/main.py \
+    echo "torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson-Corr/main.py \
         --phase finetune \
         --arch $arch \
         --device cuda \
@@ -221,7 +221,7 @@ elif [ "$PHASE" = "finetune" ]; then
         --dataset_dir $dataset_dir \
         $( [ -n "$resume" ] && echo "--resume $resume" ) \
         $ddp_flag"
-    torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson/main.py \
+    torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson-Corr/main.py \
         --phase finetune \
         --arch "$arch" \
         --device cuda \
