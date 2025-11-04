@@ -162,7 +162,7 @@ if [ "$PHASE" = "train" ]; then
 fi
 
 if [ "$PHASE" = "train" ]; then
-    torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson/main.py \
+    torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson-Corr/main.py \
         --phase train \
         --arch "$arch" \
         --device cuda \
