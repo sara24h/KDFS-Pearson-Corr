@@ -16,18 +16,15 @@ from thop import profile
 from data.dataset import Dataset_selector
 import glob
 
-
 def parse_args():
-    parser = argparse.ArgumentParser(description='Transfer learning with ResNet50 or MobileNetV2 for fake vs real face classification.')
-    parser.add_argument('--dataset_mode', type=str, required=True,
+    parser = argparse.ArgumentParser(description='Transfer learning with ResNet50 for fake vs real face classification.')
+    parser.add_argument('--dataset_mode', type=str, required=True, 
                         choices=['hardfake', 'rvf10k', '140k', '190k', '200k', '12.9k', '330k'],
-                        help='Dataset to use: hardfake, rvf10k, 140k, 190k, 200k, 12.9k, or 330k')
+                        help='Dataset to use')
     parser.add_argument('--data_dir', type=str, required=True,
                         help='Path to the dataset directory containing images and CSV file(s)')
     parser.add_argument('--teacher_dir', type=str, default='teacher_dir',
                         help='Directory to save the trained model and outputs')
-    parser.add_argument('--model', type=str, default='resnet50', choices=['resnet50', 'mobilenetv2', 'googlenet'],
-                        help='Model to use: resnet50 or mobilenetv2')
     parser.add_argument('--img_height', type=int, default=300,
                         help='Height of input images (default: 300 for hardfake, 256 for others)')
     parser.add_argument('--img_width', type=int, default=300,
@@ -40,52 +37,25 @@ def parse_args():
                         help='Learning rate for the optimizer')
     return parser.parse_args()
 
+def initialize_model(device):
+    model = models.resnet50(weights='IMAGENET1K_V1')
+    num_ftrs = model.fc.in_features
+    model.fc = nn.Linear(num_ftrs, 1)
 
-def initialize_model(model_name, device):
-    if model_name == 'resnet50':
-        model = models.resnet50(weights='IMAGENET1K_V1')
-        num_ftrs = model.fc.in_features
-        model.fc = nn.Linear(num_ftrs, 1)
-        for param in model.parameters():
-            param.requires_grad = False
-        for param in model.layer4.parameters():  # اصلاح خطا: "parame ters()" → "parameters()"
-            param.requires_grad = True
-        for param in model.fc.parameters():
-            param.requires_grad = True
+    for param in model.parameters():
+        param.requires_grad = False
 
-    elif model_name == 'mobilenetv2':
-        model = models.mobilenet_v2(weights='IMAGENET1K_V1')
-        num_ftrs = model.classifier[1].in_features
-        model.classifier = nn.Sequential(
-            nn.Dropout(p=0.5),
-            nn.Linear(num_ftrs, 1)
-        )
-        for param in model.parameters():
-            param.requires_grad = False
-        for param in model.features[14:].parameters():
-            param.requires_grad = True
-        for param in model.classifier.parameters():
-            param.requires_grad = True
-
-    elif model_name == 'googlenet':
-        model = models.googlenet(weights='IMAGENET1K_V1')
-        num_ftrs = model.fc.in_features
-        model.fc = nn.Linear(num_ftrs, 1)
-        for param in model.parameters():
-            param.requires_grad = False
-        for param in model.inception5a.parameters():
-            param.requires_grad = True
-        for param in model.inception5b.parameters():
-            param.requires_grad = True
-        for param in model.fc.parameters():
-            param.requires_grad = True
-    else:
-        raise ValueError(f"Unsupported model: {model_name}")
+    for param in model.layer3.parameters():
+        param.requires_grad = True
+    for param in model.layer4.parameters():
+        param.requires_grad = True
+    for param in model.fc.parameters():
+        param.requires_grad = True
     return model.to(device)
-
 
 if __name__ == "__main__":
     args = parse_args()
+
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.enabled = True
@@ -93,7 +63,6 @@ if __name__ == "__main__":
     dataset_mode = args.dataset_mode
     data_dir = args.data_dir
     teacher_dir = args.teacher_dir
-    model_name = args.model
     img_height = 256 if dataset_mode in ['rvf10k', '140k', '190k', '200k', '12.9k', '330k'] else args.img_height
     img_width = 256 if dataset_mode in ['rvf10k', '140k', '190k', '200k', '12.9k', '330k'] else args.img_width
     batch_size = args.batch_size
@@ -106,35 +75,16 @@ if __name__ == "__main__":
     if not os.path.exists(teacher_dir):
         os.makedirs(teacher_dir)
 
-    train_transform = transforms.Compose([
-        transforms.Resize((img_height, img_width)),
-        transforms.RandomCrop((img_height, img_width)),
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomRotation(10),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-        transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-    val_transform = transforms.Compose([
-        transforms.Resize((img_height, img_width)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-    test_transform = val_transform
-
+    # Initialize dataset
     dataset_args = {
         'dataset_mode': dataset_mode,
         'train_batch_size': batch_size,
         'eval_batch_size': batch_size,
         'num_workers': 4,
         'pin_memory': True,
-        'ddp': False,
-        'train_transform': train_transform,   # اضافه شد
-        'val_transform': val_transform,       # اضافه شد
-        'test_transform': test_transform,     # اضافه شد
+        'ddp': False
     }
-
+    
     if dataset_mode == 'hardfake':
         dataset_args.update({
             'hardfake_csv_file': os.path.join(data_dir, 'data.csv'),
@@ -175,22 +125,25 @@ if __name__ == "__main__":
         })
 
     dataset = Dataset_selector(**dataset_args)
+
     train_loader = dataset.loader_train
     val_loader = dataset.loader_val if hasattr(dataset, 'loader_val') else None
     test_loader = dataset.loader_test if hasattr(dataset, 'loader_test') else None
 
-    model = initialize_model(model_name, device)
+    model = initialize_model(device)
+
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam([
         {'params': [p for p in model.parameters() if p.requires_grad], 'lr': lr}
-    ], weight_decay=1e-3)
+    ], weight_decay=1e-4)
+
     scaler = GradScaler('cuda') if device.type == 'cuda' else None
 
     if device.type == 'cuda':
         torch.cuda.empty_cache()
 
     best_val_acc = 0.0
-    best_model_path = os.path.join(teacher_dir, f'teacher_model_{model_name}_best.pth')
+    best_model_path = os.path.join(teacher_dir, f'teacher_model_resnet50_best.pth')
 
     for epoch in range(epochs):
         model.train()
@@ -200,10 +153,12 @@ if __name__ == "__main__":
         for images, labels in train_loader:
             images = images.to(device)
             labels = labels.to(device).float()
+
             optimizer.zero_grad()
             with autocast('cuda', enabled=device.type == 'cuda'):
                 outputs = model(images).squeeze(1)
                 loss = criterion(outputs, labels)
+
             if device.type == 'cuda':
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -230,6 +185,7 @@ if __name__ == "__main__":
                 for images, labels in val_loader:
                     images = images.to(device)
                     labels = labels.to(device).float()
+
                     with autocast('cuda', enabled=device.type == 'cuda'):
                         outputs = model(images).squeeze(1)
                         loss = criterion(outputs, labels)
@@ -245,10 +201,10 @@ if __name__ == "__main__":
             if val_accuracy > best_val_acc:
                 best_val_acc = val_accuracy
                 torch.save(model.state_dict(), best_model_path)
-                print(f'Saved best {model_name} model with validation accuracy: {val_accuracy:.2f}% at epoch {epoch+1}')
+                print(f'Saved best resnet50 model with validation accuracy: {val_accuracy:.2f}% at epoch {epoch+1}')
 
-    torch.save(model.state_dict(), os.path.join(teacher_dir, f'teacher_model_{model_name}_final.pth'))
-    print(f'Saved final {model_name} model at epoch {epochs}')
+    torch.save(model.state_dict(), os.path.join(teacher_dir, 'teacher_model_resnet50_final.pth'))
+    print(f'Saved final resnet50 model at epoch {epochs}')
 
     if test_loader:
         model.eval()
@@ -259,6 +215,7 @@ if __name__ == "__main__":
             for images, labels in test_loader:
                 images = images.to(device)
                 labels = labels.to(device).float()
+
                 with autocast('cuda', enabled=device.type == 'cuda'):
                     outputs = model(images).squeeze(1)
                     loss = criterion(outputs, labels)
@@ -266,15 +223,19 @@ if __name__ == "__main__":
                 preds = (torch.sigmoid(outputs) > 0.5).float()
                 correct += (preds == labels).sum().item()
                 total += labels.size(0)
-
         test_loss = test_loss / len(test_loader)
         test_accuracy = 100 * correct / total
         print(f'Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.2f}%')
 
     if test_loader:
+        transform_test = transforms.Compose([
+            transforms.Resize((img_height, img_width)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
         img_column = 'filename' if dataset_mode in ['190k', '200k', '330k'] else 'path' if dataset_mode in ['140k', '12.9k'] else 'images_id'
-        test_csv = os.path.join(data_dir, 'test.csv') if dataset_mode in ['rvf10k', '140k'] else None
 
+        test_csv = os.path.join(data_dir, 'test.csv') if dataset_mode in ['rvf10k', '140k'] else None
         if test_csv and os.path.exists(test_csv):
             val_data = pd.read_csv(test_csv)
         else:
@@ -303,15 +264,15 @@ if __name__ == "__main__":
                 row = val_data.iloc[idx]
                 img_name = row[img_column]
                 label = row['label']
+
                 img_path = os.path.join(data_dir, img_name)
                 if not os.path.exists(img_path):
                     print(f"Warning: Image not found: {img_path}")
                     axes[i].set_title("Image not found")
                     axes[i].axis('off')
                     continue
-
                 image = Image.open(img_path).convert('RGB')
-                image_transformed = test_transform(image).unsqueeze(0).to(device)  # استفاده از test_transform
+                image_transformed = transform_test(image).unsqueeze(0).to(device)
                 with autocast('cuda', enabled=device.type == 'cuda'):
                     output = model(image_transformed).squeeze(1)
                 prob = torch.sigmoid(output).item()
@@ -323,19 +284,17 @@ if __name__ == "__main__":
                 print(f"Image: {img_path}, True Label: {true_label}, Predicted: {predicted_label}")
 
         plt.tight_layout()
-        file_path = os.path.join(teacher_dir, f'test_samples_{model_name}.png')
+        file_path = os.path.join(teacher_dir, 'test_samples_resnet50.png')
         plt.savefig(file_path)
         display(IPImage(filename=file_path))
 
-    # FLOPs and Parameters
     for param in model.parameters():
         param.requires_grad = True
-
     flops, params = get_model_complexity_info(model, (3, img_height, img_width), as_strings=True, print_per_layer_stat=True)
-    print(f'{model_name} FLOPs (ptflops): {flops}')
-    print(f'{model_name} Parameters (ptflops): {params}')
+    print(f'resnet50 FLOPs (ptflops): {flops}')
+    print(f'resnet50 Parameters (ptflops): {params}')
 
     input = torch.randn(1, 3, img_height, img_width).to(device)
     macs, params = profile(model, inputs=(input,))
-    print(f'{model_name} MACs (thop): {macs}')
-    print(f'{model_name} Parameters (thop): {params}')
+    print(f'resnet50 MACs (thop): {macs}')
+    print(f'resnet50 Parameters (thop): {params}')
