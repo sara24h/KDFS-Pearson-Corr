@@ -187,18 +187,17 @@ def load_pruned_models(model_paths: List[str], device: torch.device, rank: int) 
 
         try:
             ckpt = torch.load(path, map_location='cpu', weights_only=False)
-
+            
+            # 1. کل state_dict دانش‌آموز را استخراج کنید
             student_state_dict = ckpt['student']
 
-            masks_dict = {k: v for k, v in student_state_dict.items() if 'mask' in k}
-            weights_state_dict = {k: v for k, v in student_state_dict.items() if 'mask' not in k}
-
             if rank == 0:
-                print(f" [INFO] Found {len(masks_dict)} mask tensors and {len(weights_state_dict)} weight/bias/buffer tensors.")
+                print(f" [INFO] Loading model with {len(student_state_dict)} parameters/buffers/masks.")
 
-            model = ResNet_50_pruned_hardfakevsreal(masks=masks_dict)
+            model = ResNet_50_pruned_hardfakevsreal()
             
-            model.load_state_dict(weights_state_dict)
+            # 3. کل state_dict (شامل وزن‌ها و ماسک‌ها) را یکجا بارگذاری کنید
+            model.load_state_dict(student_state_dict)
 
             model = model.to(device).eval()
 
