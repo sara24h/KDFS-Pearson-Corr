@@ -457,7 +457,7 @@ def main():
     # Models
     MODEL_PATHS = [
         '/kaggle/working/140k_final.pt',
-        '/kaggle/working/190k_pruned_new_finetune.pt',
+        '/kaggle/input/190k-pearson-pruned/pytorch/default/1/190k_pearson_pruned.pt',
         '/kaggle/working/200k_pruned_new_finetune.pt',
     ]
   
