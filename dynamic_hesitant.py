@@ -175,54 +175,38 @@ def load_pruned_models(model_paths: List[str], device: torch.device, rank: int) 
     models = []
     if rank == 0:
         print(f"Loading {len(model_paths)} pruned models...")
-
+ 
     for i, path in enumerate(model_paths):
         if not os.path.exists(path):
             if rank == 0:
                 print(f" [WARNING] File not found: {path}")
             continue
-
+     
         if rank == 0:
             print(f" [{i+1}/{len(model_paths)}] Loading: {os.path.basename(path)}")
-
+     
         try:
             ckpt = torch.load(path, map_location='cpu', weights_only=False)
-            
-            # 1. کل state_dict دانش‌آموز را استخراج کنید
-            student_state_dict = ckpt['student']
-
-            # 2. ماسک‌ها و وزن‌ها را به صورت جداگانه استخراج کنید
-            masks_dict = {k: v for k, v in student_state_dict.items() if 'mask' in k}
-            weights_state_dict = {k: v for k, v in student_state_dict.items() if 'mask' not in k}
-
-            if rank == 0:
-                print(f" [INFO] Initializing model with {len(masks_dict)} mask tensors.")
-                print(f" [INFO] Loading weights with {len(weights_state_dict)} tensors.")
-
-            # 3. مدل را با استفاده از دیکشنری ماسک‌های واقعی مقداردهی اولیه کنید
-            model = ResNet_50_pruned_hardfakevsreal(masks=masks_dict)
-            
-            # 4. وزن‌ها را با strict=False بارگذاری کنید تا از خطاهای تطبیق کلید جلوگیری شود
-            model.load_state_dict(weights_state_dict, strict=False)
-
+            model = ResNet_50_pruned_hardfakevsreal(masks=ckpt['masks'])
+            model.load_state_dict(ckpt['model_state_dict'])
             model = model.to(device).eval()
-
+         
             if rank == 0:
                 param_count = sum(p.numel() for p in model.parameters())
                 print(f" → Parameters: {param_count:,}")
-
+         
             models.append(model)
         except Exception as e:
             if rank == 0:
                 print(f" [ERROR] Failed to load {path}: {e}")
             continue
-
+ 
     if len(models) == 0:
         raise ValueError("No models loaded!")
-
+ 
     if rank == 0:
         print(f"All {len(models)} models loaded!\n")
-
+ 
     return models
 
 class SplitDataset(torch.utils.data.Dataset):
