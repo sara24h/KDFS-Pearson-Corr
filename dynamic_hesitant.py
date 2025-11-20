@@ -456,12 +456,12 @@ def main():
         print(f"="*70 + "\n")
     # Models
     MODEL_PATHS = [
-        '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt',
-        '/kaggle/input/190k-pearson-pruned/pytorch/default/1/190k_pearson_pruned.pt',
-        '/kaggle/input/200k-pearson-pruned/pytorch/default/1/200k_kdfs_pruned.pt',
+        '/kaggle/working/140k_final.pt',
+        '/kaggle/working/190k_pruned_new_finetune.pt',
+        '/kaggle/working/200k_pruned_new_finetune.pt',
     ]
   
-    MODEL_NAMES = ["140k_pearson", "190k_pearson", "200k_kdfs"]
+    MODEL_NAMES = ["140k_pearson", "190k_pearson", "200k_pearson"]
     MEANS = [(0.5207,0.4258,0.3806), (0.4868,0.3972,0.3624), (0.4668,0.3816,0.3414)]
     STDS = [(0.2490,0.2239,0.2212), (0.2296,0.2066,0.2009), (0.2410,0.2161,0.2081)]
   
