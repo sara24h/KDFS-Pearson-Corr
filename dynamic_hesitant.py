@@ -191,21 +191,19 @@ def load_pruned_models(model_paths: List[str], device: torch.device, rank: int) 
             # 1. کل state_dict دانش‌آموز را استخراج کنید
             student_state_dict = ckpt['student']
 
-            # 2. ماسک‌ها را بر اساس کلیدهایشان استخراج کنید، اما مقادیر را None قرار دهید
-            #    این یک حدس است که __init__ فقط به کلیدها برای ساختار نیاز دارد
-            #    و مقادیر واقعی توسط load_state_dict پر می‌شوند.
-            mask_keys = [k for k in student_state_dict.keys() if 'mask' in k]
-            dummy_masks_dict = {key: None for key in mask_keys}
+            # 2. ماسک‌ها و وزن‌ها را به صورت جداگانه استخراج کنید
+            masks_dict = {k: v for k, v in student_state_dict.items() if 'mask' in k}
+            weights_state_dict = {k: v for k, v in student_state_dict.items() if 'mask' not in k}
 
             if rank == 0:
-                print(f" [INFO] Initializing model with {len(dummy_masks_dict)} mask keys.")
-                print(f" [INFO] Loading full state dict with {len(student_state_dict)} items.")
+                print(f" [INFO] Initializing model with {len(masks_dict)} mask tensors.")
+                print(f" [INFO] Loading weights with {len(weights_state_dict)} tensors.")
 
-            # 3. مدل را با دیکشنری ماسک‌های ساختگی مقداردهی اولیه کنید
-            model = ResNet_50_pruned_hardfakevsreal(masks=dummy_masks_dict)
+            # 3. مدل را با استفاده از دیکشنری ماسک‌های واقعی مقداردهی اولیه کنید
+            model = ResNet_50_pruned_hardfakevsreal(masks=masks_dict)
             
-            # 4. کل state_dict (شامل وزن‌ها و مقادیر واقعی ماسک‌ها) را یکجا بارگذاری کنید
-            model.load_state_dict(student_state_dict)
+            # 4. وزن‌ها را با strict=False بارگذاری کنید تا از خطاهای تطبیق کلید جلوگیری شود
+            model.load_state_dict(weights_state_dict, strict=False)
 
             model = model.to(device).eval()
 
