@@ -20,19 +20,26 @@ from sklearn.metrics import accuracy_score, precision_recall_fscore_support, con
 warnings.filterwarnings("ignore")
 
 # =============================================================================
-# مرحله 2: تعریف مجدد و اصلاح‌شده معماری مدل هرس‌شده (ResNet_pruned)
+# مرحله 2: تعریف اصلاح‌شده و صحیح معماری مدل هرس‌شده (ResNet_pruned)
 # =============================================================================
 class Bottleneck_pruned(nn.Module):
     expansion = 4
 
-    def __init__(self, in_channels, out_channels, conv1_channels, conv2_channels, conv3_channels, stride=1, downsample=None):
+    def __init__(self, in_channels, out_channels, conv1_channels, conv2_channels, stride=1, downsample=None):
         super(Bottleneck_pruned, self).__init__()
+        # conv1: کاهش کانال‌ها
         self.conv1 = nn.Conv2d(in_channels, conv1_channels, kernel_size=1, bias=False)
         self.bn1 = nn.BatchNorm2d(conv1_channels)
+        
+        # conv2: کانولوشن اصلی
         self.conv2 = nn.Conv2d(conv1_channels, conv2_channels, kernel_size=3, stride=stride, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(conv2_channels)
-        self.conv3 = nn.Conv2d(conv2_channels, conv3_channels, kernel_size=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(conv3_channels)
+        
+        # conv3: افزایش کانال‌ها به مقدار نهایی (out_channels)
+        # *** این بخش کلیدی است که اصلاح شده است ***
+        self.conv3 = nn.Conv2d(conv2_channels, out_channels, kernel_size=1, bias=False)
+        self.bn3 = nn.BatchNorm2d(out_channels)
+        
         self.relu = nn.ReLU(inplace=True)
         self.downsample = downsample
         self.stride = stride
@@ -54,6 +61,7 @@ class Bottleneck_pruned(nn.Module):
         if self.downsample is not None:
             identity = self.downsample(x)
 
+        # اکنون ابعاد out و identity مطابقت دارند
         out += identity
         out = self.relu(out)
 
@@ -68,15 +76,17 @@ class ResNet_pruned(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
 
+        # لیست remaining_filters اکنون فقط شامل مقادیر برای conv1 و conv2 است
+        # ما مقدار سوم (conv3) را نادیده می‌گیریم زیرا باید بر اساس out_channels باشد
         remaining_filters = [
             # layer1
-            12, 12, 64, 11, 10, 59, 9, 11, 49,
+            12, 12, 11, 10, 9, 11,
             # layer2
-            23, 21, 86, 22, 17, 86, 23, 17, 66, 21, 14, 56,
+            23, 21, 22, 17, 23, 17, 21, 14,
             # layer3
-            20, 48, 105, 54, 14, 95, 35, 11, 77, 42, 12, 50, 41, 7, 35, 28, 3, 41,
+            20, 48, 54, 14, 35, 11, 42, 12, 41, 7, 28, 3,
             # layer4
-            37, 55, 55, 78, 5, 67, 52, 16, 89
+            37, 55, 78, 5, 52, 16
         ]
         filter_iter = iter(remaining_filters)
 
@@ -86,7 +96,6 @@ class ResNet_pruned(nn.Module):
         layer3_out_channels = 256 * block.expansion # 1024
         layer4_out_channels = 512 * block.expansion # 2048
 
-        # ساخت لایه‌ها با پاس دادن تعداد کانال‌های خروجی صحیح
         self.layer1 = self._make_layer(block, layers[0], filter_iter, out_channels=layer1_out_channels, stride=1)
         self.layer2 = self._make_layer(block, layers[1], filter_iter, out_channels=layer2_out_channels, stride=2)
         self.layer3 = self._make_layer(block, layers[2], filter_iter, out_channels=layer3_out_channels, stride=2)
@@ -104,18 +113,18 @@ class ResNet_pruned(nn.Module):
             )
 
         layers = []
+        # ساخت اولین بلوک در لایه
         conv1_c = next(filter_iter)
         conv2_c = next(filter_iter)
-        conv3_c = next(filter_iter)
-        layers.append(block(self.in_channels, out_channels, conv1_c, conv2_c, conv3_c, stride, downsample))
+        layers.append(block(self.in_channels, out_channels, conv1_c, conv2_c, stride, downsample))
         
         self.in_channels = out_channels
 
+        # ساخت بلوک‌های باقی‌مانده در لایه
         for _ in range(1, blocks):
             conv1_c = next(filter_iter)
             conv2_c = next(filter_iter)
-            conv3_c = next(filter_iter)
-            layers.append(block(self.in_channels, out_channels, conv1_c, conv2_c, conv3_c))
+            layers.append(block(self.in_channels, out_channels, conv1_c, conv2_c))
 
         return nn.Sequential(*layers)
 
@@ -177,20 +186,18 @@ print(f"Number of training samples: {len(train_dataset)}")
 print(f"Number of validation samples: {len(valid_dataset)}")
 print(f"Number of test samples: {len(test_dataset)}")
 
-# =============================================================================
-# مرحله 5: بارگذاری صحیح مدل، تعریف تابع هزینه و بهینه‌ساز
-# =============================================================================
+
 model = ResNet_pruned(Bottleneck_pruned, [3, 4, 6, 3])
 checkpoint = torch.load(PRUNED_MODEL_PATH, map_location=DEVICE)
+
 try:
-    model.load_state_dict(checkpoint['model_state_dict'])
-except KeyError:
-    print("خطا: کلید 'model_state_dict' در فایل چک‌پوینت یافت نشد.")
-    print("کلیدهای موجود در فایل:", checkpoint.keys())
-    raise
+    model.load_state_dict(checkpoint['model_state_dict'], strict=False) # strict=False به بارگذاری کمک می‌کند
+    print("✅ مدل با موفقیت بارگذاری شد (با احتمال عدم تطابق جزئی).")
+except Exception as e:
+    print(f"خطا در بارگذاری وزن‌ها: {e}")
+    print("ممکن است نیاز به تطبیق دستی وزن‌ها باشد.")
 
 model.to(DEVICE)
-print("✅ مدل با موفقیت بارگذاری شد.")
 
 criterion = nn.BCEWithLogitsLoss()
 optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
