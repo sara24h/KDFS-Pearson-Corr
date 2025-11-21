@@ -1,387 +1,278 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
-from PIL import Image
-import os
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
 from tqdm import tqdm
+import os
 import numpy as np
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
-import sys
-from ResNet_pruned_finetune import ResNet_50_pruned_hardfakevsreal
+import warnings
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix
 
+warnings.filterwarnings("ignore")
 
-class WildDeepFakeDataset(Dataset):
-    """دیتاست برای لود کردن تصاویر fake و real"""
-    
-    def __init__(self, root_dir, transform=None):
-        self.root_dir = root_dir
-        self.transform = transform
-        self.samples = []
+class Bottleneck_pruned(nn.Module):
+    expansion = 4
+
+    def __init__(self, in_channels, out_channels, conv1_channels, conv2_channels, conv3_channels, stride=1, downsample=None):
+        super(Bottleneck_pruned, self).__init__()
+        # استفاده از تعداد کانال‌های هرس‌شده
+        self.conv1 = nn.Conv2d(in_channels, conv1_channels, kernel_size=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(conv1_channels)
+        self.conv2 = nn.Conv2d(conv1_channels, conv2_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(conv2_channels)
+        self.conv3 = nn.Conv2d(conv2_channels, conv3_channels, kernel_size=1, bias=False)
+        self.bn3 = nn.BatchNorm2d(conv3_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.downsample = downsample
+        self.stride = stride
+
+    def forward(self, x):
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out += identity
+        out = self.relu(out)
+
+        return out
+
+class ResNet_pruned(nn.Module):
+    def __init__(self, block, layers, num_classes=1):
+        super(ResNet_pruned, self).__init__()
+        self.in_channels = 64
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+
+        # ساخت لایه‌ها با تعداد کانال‌های دقیق هرس‌شده
+        # remaining_filters از خروجی شما استخراج شده است
+        remaining_filters = [
+            # layer1
+            12, 12, 64, 11, 10, 59, 9, 11, 49,
+            # layer2
+            23, 21, 86, 22, 17, 86, 23, 17, 66, 21, 14, 56,
+            # layer3
+            20, 48, 105, 54, 14, 95, 35, 11, 77, 42, 12, 50, 41, 7, 35, 28, 3, 41,
+            # layer4
+            37, 55, 55, 78, 5, 67, 52, 16, 89
+        ]
+        filter_iter = iter(remaining_filters)
+
+        self.layer1 = self._make_layer(block, layers[0], filter_iter, stride=1)
+        self.layer2 = self._make_layer(block, layers[1], filter_iter, stride=2)
+        self.layer3 = self._make_layer(block, layers[2], filter_iter, stride=2)
+        self.layer4 = self._make_layer(block, layers[3], filter_iter, stride=2)
+
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(512 * block.expansion, num_classes) # 512 * 4 = 2048
+
+    def _make_layer(self, block, blocks, filter_iter, stride=1):
+        downsample = None
+        # لایه اول هر گروه ممکن است نیاز به downsampling داشته باشد
+        if stride != 1 or self.in_channels != 512 * block.expansion:
+            out_channels_for_downsample = 256 if self.in_channels == 64 else 512
+            downsample = nn.Sequential(
+                nn.Conv2d(self.in_channels, out_channels_for_downsample * block.expansion, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels_for_downsample * block.expansion),
+            )
+
+        layers = []
+        # ساخت بلوک اول با پارامترهای هرس‌شده
+        conv1_c = next(filter_iter)
+        conv2_c = next(filter_iter)
+        conv3_c = next(filter_iter)
+        layers.append(block(self.in_channels, 256 * block.expansion, conv1_c, conv2_c, conv3_c, stride, downsample))
         
-        # خواندن فایل‌ها از پوشه‌های fake و real
-        for label, class_name in enumerate(['real', 'fake']):
-            class_dir = os.path.join(root_dir, class_name)
-            if os.path.exists(class_dir):
-                for img_name in os.listdir(class_dir):
-                    if img_name.lower().endswith(('.png', '.jpg', '.jpeg')):
-                        self.samples.append((
-                            os.path.join(class_dir, img_name),
-                            label
-                        ))
-        
-        print(f"✅ تعداد نمونه‌های لود شده از {root_dir}: {len(self.samples)}")
-    
-    def __len__(self):
-        return len(self.samples)
-    
-    def __getitem__(self, idx):
-        img_path, label = self.samples[idx]
-        image = Image.open(img_path).convert('RGB')
-        
-        if self.transform:
-            image = self.transform(image)
-        
-        return image, torch.tensor(label, dtype=torch.float32)
+
+        if self.in_channels == 64: self.in_channels = 256
+        elif self.in_channels == 256: self.in_channels = 512
+        elif self.in_channels == 512: self.in_channels = 1024
+        elif self.in_channels == 1024: self.in_channels = 2048
+
+        # ساخت بلوک‌های بعدی
+        for _ in range(1, blocks):
+            conv1_c = next(filter_iter)
+            conv2_c = next(filter_iter)
+            conv3_c = next(filter_iter)
+            layers.append(block(self.in_channels, 256 * block.expansion, conv1_c, conv2_c, conv3_c))
+
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
+        return x
 
 
-def get_transforms(phase, mean, std):
-    """تعریف transformations برای train و validation/test"""
-    
-    if phase == 'train':
-        return transforms.Compose([
-            transforms.Resize((256, 256)),
-            transforms.RandomCrop(224),
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomRotation(degrees=10),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std)
-        ])
-    else:
-        return transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std)
-        ])
+DATA_DIR = '/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k' # <-- این مسیر را تغییر دهید
+
+PRUNED_MODEL_PATH = '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt' # <-- این مسیر را تغییر دهید
+
+MEAN = [(0.5207,0.4258,0.3806]
+STD = [0.2490,0.2239,0.2212]
+
+BATCH_SIZE = 32
+NUM_EPOCHS = 15 # می‌توانید این مقدار را افزایش دهید
+LEARNING_RATE = 1e-4
+
+# تنظیم دستگاه (GPU در صورت وجود)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {DEVICE}")
+
+train_transforms = transforms.Compose([
+    transforms.Resize((256, 256)),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=MEAN, std=STD)
+])
+
+test_val_transforms = transforms.Compose([
+    transforms.Resize((256, 256)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=MEAN, std=STD)
+])
+
+# ایجاد دیتاست‌ها با استفاده از ImageFolder
+train_dataset = datasets.ImageFolder(os.path.join(DATA_DIR, 'train'), transform=train_transforms)
+valid_dataset = datasets.ImageFolder(os.path.join(DATA_DIR, 'valid'), transform=test_val_transforms)
+test_dataset = datasets.ImageFolder(os.path.join(DATA_DIR, 'test'), transform=test_val_transforms)
+
+# ایجاد DataLoaderها
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
+valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
+test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
+
+print(f"Classes found: {train_dataset.classes}")
+print(f"Number of training samples: {len(train_dataset)}")
+print(f"Number of validation samples: {len(valid_dataset)}")
+print(f"Number of test samples: {len(test_dataset)}")
 
 
-def load_pruned_model(checkpoint_path, device):
-    """لود کردن مدل هرس‌شده از checkpoint"""
-    
-    print(f"📥 در حال لود کردن مدل از {checkpoint_path}...")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    
-    # استخراج masks از checkpoint
-    masks = checkpoint['masks']
-    
-    # ✅ تبدیل masks به parameter برای اینکه gradient tracking نداشته باشند
-    # ولی در عین حال به device منتقل بشن
-    fixed_masks = []
-    for mask in masks:
-        if isinstance(mask, torch.Tensor):
-            # ساخت یک tensor جدید روی device مناسب بدون gradient
-            fixed_mask = mask.detach().clone().to(device)
-            fixed_mask.requires_grad = False
-            fixed_masks.append(fixed_mask)
-        else:
-            fixed_masks.append(mask)
-    
-    # ساخت مدل با masks
-    model = ResNet_50_pruned_hardfakevsreal(masks=fixed_masks)
-    
-    # لود کردن weights
-    model.load_state_dict(checkpoint['model_state_dict'])
-    
-    model = model.to(device)
-    
-    # ✅ اطمینان از اینکه مدل در training mode قرار بگیره
-    model.train()
-    
-    print(f"✅ مدل با موفقیت لود شد!")
-    print(f"📊 تعداد پارامترها: {sum(p.numel() for p in model.parameters()):,}")
-    
-    return model
+model = torch.load(PRUNED_MODEL_PATH, map_location=DEVICE)
+model.to(DEVICE)
 
+# تابع هزینه برای دسته‌بندی دودویی
+criterion = nn.BCEWithLogitsLoss()
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch):
-    """آموزش یک epoch"""
-    
+# بهینه‌ساز Adam
+optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+
+best_val_acc = 0.0
+
+for epoch in range(NUM_EPOCHS):
+    # --- فاز آموزش ---
     model.train()
     running_loss = 0.0
-    all_preds = []
-    all_labels = []
-    
-    pbar = tqdm(dataloader, desc=f"🚀 Epoch {epoch} [Train]")
-    
-    for images, labels in pbar:
-        images, labels = images.to(device), labels.to(device)
-        
-        # Forward
+    correct_train = 0
+    total_train = 0
+
+    train_progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{NUM_EPOCHS} [Training]", leave=False)
+    for images, labels in train_progress_bar:
+        images, labels = images.to(DEVICE), labels.to(DEVICE).float().unsqueeze(1)
+
         optimizer.zero_grad()
-        
-        # ✅ استفاده از torch.no_grad() برای forward pass نیازی نیست
-        # چون می‌خوایم gradient محاسبه بشه
-        outputs, _ = model(images)
-        outputs = outputs.squeeze()
+        outputs = model(images)
         loss = criterion(outputs, labels)
-        
-        # Backward
         loss.backward()
         optimizer.step()
-        
-        # محاسبه metrics
-        running_loss += loss.item()
-        with torch.no_grad():
-            preds = (torch.sigmoid(outputs) > 0.5).float()
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-        
-        pbar.set_postfix({'loss': f"{loss.item():.4f}"})
-    
-    epoch_loss = running_loss / len(dataloader)
-    epoch_acc = accuracy_score(all_labels, all_preds)
-    
-    return epoch_loss, epoch_acc
 
+        running_loss += loss.item() * images.size(0)
+        predicted = (torch.sigmoid(outputs) > 0.5).float()
+        total_train += labels.size(0)
+        correct_train += (predicted == labels).sum().item()
 
-def validate(model, dataloader, criterion, device, phase='Valid'):
-    """ارزیابی مدل روی validation یا test set"""
-    
+    epoch_loss = running_loss / len(train_dataset)
+    epoch_acc = 100 * correct_train / total_train
+
+    # --- فاز اعتبارسنجی ---
     model.eval()
-    running_loss = 0.0
-    all_preds = []
-    all_probs = []
-    all_labels = []
-    
-    pbar = tqdm(dataloader, desc=f"🔍 {phase}")
-    
+    val_loss = 0.0
+    correct_val = 0
+    total_val = 0
+
     with torch.no_grad():
-        for images, labels in pbar:
-            images, labels = images.to(device), labels.to(device)
-            
-            outputs, _ = model(images)
-            outputs = outputs.squeeze()
+        val_progress_bar = tqdm(valid_loader, desc=f"Epoch {epoch+1}/{NUM_EPOCHS} [Validation]", leave=False)
+        for images, labels in val_progress_bar:
+            images, labels = images.to(DEVICE), labels.to(DEVICE).float().unsqueeze(1)
+            outputs = model(images)
             loss = criterion(outputs, labels)
-            
-            running_loss += loss.item()
-            probs = torch.sigmoid(outputs)
-            preds = (probs > 0.5).float()
-            
-            all_preds.extend(preds.cpu().numpy())
-            all_probs.extend(probs.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-    
-    epoch_loss = running_loss / len(dataloader)
-    epoch_acc = accuracy_score(all_labels, all_preds)
-    
-    # محاسبه metrics اضافی
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        all_labels, all_preds, average='binary', zero_division=0
-    )
-    auc = roc_auc_score(all_labels, all_probs)
-    
-    return {
-        'loss': epoch_loss,
-        'accuracy': epoch_acc,
-        'precision': precision,
-        'recall': recall,
-        'f1': f1,
-        'auc': auc
-    }
- 
-def fine_tune(
-    model_path,
-    data_dir,
-    output_dir,
-    mean=[0.5207,0.4258,0.3806],
-    std=[0.2490,0.2239,0.2212],
-    batch_size=32,
-    num_epochs=50,
-    learning_rate=1e-4,
-    weight_decay=1e-4,
-    patience=10
-):
 
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # تنظیم device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            val_loss += loss.item() * images.size(0)
+            predicted = (torch.sigmoid(outputs) > 0.5).float()
+            total_val += labels.size(0)
+            correct_val += (predicted == labels).sum().item()
 
-    model = load_pruned_model(model_path, device)
-    
-    # تعریف transformations
-    train_transform = get_transforms('train', mean, std)
-    val_transform = get_transforms('val', mean, std)
-    
-    # لود دیتاست‌ها
-    print("\n📁 در حال لود کردن دیتاست‌ها...")
-    train_dataset = WildDeepFakeDataset(
-        os.path.join(data_dir, 'train'),
-        transform=train_transform
-    )
-    valid_dataset = WildDeepFakeDataset(
-        os.path.join(data_dir, 'valid'),
-        transform=val_transform
-    )
-    test_dataset = WildDeepFakeDataset(
-        os.path.join(data_dir, 'test'),
-        transform=val_transform
-    )
-    
-    # DataLoaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True
-    )
-    valid_loader = DataLoader(
-        valid_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True
-    )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True
-    )
-    
-    # تعریف loss و optimizer
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=learning_rate,
-        weight_decay=weight_decay
-    )
-    
-    # Learning rate scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode='min',
-        factor=0.5,
-        patience=5,
-        verbose=True
-    )
-    
-    # متغیرهای early stopping
-    best_val_loss = float('inf')
-    best_val_acc = 0.0
-    epochs_no_improve = 0
-    
-    print("\n" + "="*70)
-    print("🚀 شروع Fine-tuning")
-    print("="*70)
-    
-    # حلقه آموزش
-    for epoch in range(1, num_epochs + 1):
-        print(f"\n📍 Epoch {epoch}/{num_epochs}")
-        print("-" * 70)
-        
-        # آموزش
-        train_loss, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, epoch
-        )
-        
-        # اعتبارسنجی
-        val_metrics = validate(model, valid_loader, criterion, device, 'Valid')
-        
-        # نمایش نتایج
-        print(f"\n📊 Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
-        print(f"📊 Valid Loss: {val_metrics['loss']:.4f} | Valid Acc: {val_metrics['accuracy']:.4f}")
-        print(f"📊 Valid F1: {val_metrics['f1']:.4f} | Valid AUC: {val_metrics['auc']:.4f}")
-        
-        # بروزرسانی learning rate
-        scheduler.step(val_metrics['loss'])
-        
-        # ذخیره بهترین مدل
-        if val_metrics['loss'] < best_val_loss:
-            best_val_loss = val_metrics['loss']
-            best_val_acc = val_metrics['accuracy']
-            epochs_no_improve = 0
-            
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'masks': model.masks if hasattr(model, 'masks') else None,
-                'val_loss': best_val_loss,
-                'val_acc': best_val_acc,
-                'val_metrics': val_metrics
-            }
-            
-            best_model_path = os.path.join(output_dir, 'best_model.pt')
-            torch.save(checkpoint, best_model_path)
-            print(f"💾 مدل بهتری ذخیره شد! (Val Loss: {best_val_loss:.4f})")
-        else:
-            epochs_no_improve += 1
-            print(f"⏳ {epochs_no_improve}/{patience} epochs بدون بهبود")
-        
-        # Early stopping
-        if epochs_no_improve >= patience:
-            print(f"\n⛔ Early stopping! بهترین Val Loss: {best_val_loss:.4f}")
-            break
-    
-    # ارزیابی نهایی روی test set
-    print("\n" + "="*70)
-    print("🧪 ارزیابی نهایی روی Test Set")
-    print("="*70)
-    
-    # لود بهترین مدل
-    best_checkpoint = torch.load(os.path.join(output_dir, 'best_model.pt'))
-    model.load_state_dict(best_checkpoint['model_state_dict'])
-    
-    test_metrics = validate(model, test_loader, criterion, device, 'Test')
-    
-    print(f"\n🎯 نتایج نهایی:")
-    print(f"   Test Loss:      {test_metrics['loss']:.4f}")
-    print(f"   Test Accuracy:  {test_metrics['accuracy']:.4f}")
-    print(f"   Test Precision: {test_metrics['precision']:.4f}")
-    print(f"   Test Recall:    {test_metrics['recall']:.4f}")
-    print(f"   Test F1-Score:  {test_metrics['f1']:.4f}")
-    print(f"   Test AUC:       {test_metrics['auc']:.4f}")
-    
-    # ذخیره نتایج
-    results = {
-        'best_epoch': best_checkpoint['epoch'],
-        'best_val_loss': best_val_loss,
-        'best_val_acc': best_val_acc,
-        'test_metrics': test_metrics
-    }
-    
-    torch.save(results, os.path.join(output_dir, 'training_results.pt'))
-    
-    print(f"\n✅ Fine-tuning تمام شد!")
-    print(f"📁 فایل‌های خروجی در {output_dir} ذخیره شدند")
-    
-    return model, results
+    epoch_val_loss = val_loss / len(valid_dataset)
+    epoch_val_acc = 100 * correct_val / total_val
 
+    print(f"Epoch {epoch+1}/{NUM_EPOCHS} -> "
+          f"Train Loss: {epoch_loss:.4f}, Train Acc: {epoch_acc:.2f}% | "
+          f"Val Loss: {epoch_val_loss:.4f}, Val Acc: {epoch_val_acc:.2f}%")
 
-if __name__ == "__main__":
-    # تنظیمات
-    MODEL_PATH = '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt'
-    DATA_DIR = '/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k'
-    OUTPUT_DIR = '/kaggle/working/140k_finetuned_model'
-    
-    MEAN = [0.5207,0.4258,0.3806]
-    STD = [0.2490,0.2239,0.2212]
-    
-    # شروع fine-tuning
-    model, results = fine_tune(
-        model_path=MODEL_PATH,
-        data_dir=DATA_DIR,
-        output_dir=OUTPUT_DIR,
-        mean=MEAN,
-        std=STD,
-        batch_size=32,
-        num_epochs=50,
-        learning_rate=1e-4,
-        weight_decay=1e-4,
-        patience=10
-    )
+    # ذخیره بهترین مدل بر اساس دقت اعتبارسنجی
+    if epoch_val_acc > best_val_acc:
+        best_val_acc = epoch_val_acc
+        torch.save(model.state_dict(), '/kaggle/working/best_finetuned_pruned_model.pth')
+        print(f"  -> New best model saved with validation accuracy: {best_val_acc:.2f}%")
+
+print("\nFinished Training.")
+
+model.load_state_dict(torch.load('/kaggle/working/best_finetuned_pruned_model.pth'))
+model.eval()
+
+all_preds = []
+all_labels = []
+
+with torch.no_grad():
+    test_progress_bar = tqdm(test_loader, desc="[Final Testing]", leave=True)
+    for images, labels in test_progress_bar:
+        images = images.to(DEVICE)
+        outputs = model(images)
+        predicted = (torch.sigmoid(outputs) > 0.5).float()
+
+        all_preds.extend(predicted.cpu().numpy())
+        all_labels.extend(labels.numpy())
+
+# محاسبه معیارهای نهایی
+all_preds = np.array(all_preds).flatten()
+all_labels = np.array(all_labels)
+
+test_acc = accuracy_score(all_labels, all_preds) * 100
+precision, recall, f1, _ = precision_recall_fscore_support(all_labels, all_preds, average='binary')
+cm = confusion_matrix(all_labels, all_preds)
+
+print("\n" + "="*50)
+print("         Final Test Results on 20k-wild-dataset")
+print("="*50)
+print(f"Test Accuracy: {test_acc:.2f}%")
+print(f"Precision:    {precision:.4f}")
+print(f"Recall:       {recall:.4f}")
+print(f"F1-Score:     {f1:.4f}")
+print("\nConfusion Matrix:")
+print(cm)
+print("="*50)
