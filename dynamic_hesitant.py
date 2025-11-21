@@ -214,9 +214,11 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
         transforms.ToTensor(),
     ])
     
+    # *** تغییر کلیدی: نرمال‌سازی به ترنسفورم تست اضافه شد ***
     val_test_transform = transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # Using standard ImageNet stats
     ])
     
     splits = ['train', 'valid', 'test']
@@ -241,7 +243,6 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
     
     loaders = {}
     for split, ds in datasets_dict.items():
-        # استفاده از DistributedSampler برای همه splits
         sampler = DistributedSampler(
             ds, 
             num_replicas=world_size, 
@@ -256,7 +257,7 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
             sampler=sampler,
             num_workers=num_workers, 
             pin_memory=True, 
-            drop_last=False,  # sampler خودش drop_last را مدیریت می‌کند
+            drop_last=False,
             worker_init_fn=worker_init_fn
         )
         loaders[split] = loader
@@ -271,7 +272,7 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
 
 @torch.no_grad()
 def evaluate_single_model(model: nn.Module, loader: DataLoader, device: torch.device, 
-                          name: str, rank: int, world_size: int) -> float:
+                          name: str, rank: int, world_size: int, model_idx: int, means: List[Tuple[float]], stds: List[Tuple[float]]) -> float:
     """ارزیابی یک مدل با جمع‌آوری نتایج از همه GPU‌ها"""
     model.eval()
     correct = total = 0
@@ -280,6 +281,12 @@ def evaluate_single_model(model: nn.Module, loader: DataLoader, device: torch.de
   
     for images, labels in iterator:
         images, labels = images.to(device), labels.to(device).float()
+        
+        # *** تغییر کلیدی: نرمال‌سازی تصاویر بر اساس مدل مربوطه ***
+        current_mean = torch.tensor(means[model_idx]).view(1, 3, 1, 1).to(device)
+        current_std = torch.tensor(stds[model_idx]).view(1, 3, 1, 1).to(device)
+        images = (images - current_mean) / current_std
+        
         out = model(images)
         if isinstance(out, (tuple, list)):
             out = out[0]
@@ -440,14 +447,12 @@ def evaluate_ensemble_final_ddp(model, loader, device, name, model_names, rank, 
     all_memberships = torch.cat(all_memberships, dim=0)
     
     # جمع‌آوری از همه GPU‌ها
-    # برای predictions و labels
     gathered_preds = [torch.zeros_like(all_preds) for _ in range(world_size)]
     gathered_labels = [torch.zeros_like(all_labels) for _ in range(world_size)]
     
     dist.all_gather(gathered_preds, all_preds)
     dist.all_gather(gathered_labels, all_labels)
     
-    # برای weights و memberships
     gathered_weights = [torch.zeros_like(all_weights) for _ in range(world_size)]
     gathered_memberships = [torch.zeros_like(all_memberships) for _ in range(world_size)]
     
@@ -549,7 +554,7 @@ def main():
     
     # Models
     MODEL_PATHS = [
-        '/kaggle/input/140k-pruned-fintuned-/pytorch/default/1/best_model (1).pth',
+        '/kaggle/input/140k-pruned-fintuned/pytorch/default/1/best_model.pth',
         '/kaggle/input/190k-pearson-pruned/pytorch/default/1/190k_pearson_pruned.pt',
         '/kaggle/input/200k-pearson-pruned/pytorch/default/1/200k_kdfs_pruned.pt',
     ]
@@ -598,8 +603,9 @@ def main():
     
     # ارزیابی هر مدل به صورت جداگانه
     for i, model in enumerate(base_models):
+        # *** تغییر کلیدی: ارسال مدل، ایندکس، میانگین‌ها و انحراف معیارها ***
         acc = evaluate_single_model(model, test_loader, device, 
-                                    f"Model {i+1} ({MODEL_NAMES[i]})", rank, world_size)
+                                    f"Model {i+1} ({MODEL_NAMES[i]})", rank, world_size, i, MEANS, STDS)
         individual_accs.append(acc)
     
     if is_main:
