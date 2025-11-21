@@ -540,11 +540,17 @@ def main():
         print("="*70)
         individual_accs = []
         for i, model in enumerate(base_models):
-            acc = evaluate_single_model_ddp(model, test_loader, device, f"Model {i+1} ({MODEL_NAMES[i]})", rank, world_size)
+            acc = evaluate_single_model_ddp(
+                model, test_loader, device, 
+                f"Model {i+1} ({MODEL_NAMES[i]})", 
+                rank, world_size
+            )
             individual_accs.append(acc)
-        best_single = max(individual_accs)
-        best_idx = individual_accs.index(best_single)
-        print(f"\nBest Single Model: Model {best_idx+1} ({MODEL_NAMES[best_idx]}) → {best_single:.2f}%")
+            
+        if is_main:
+            best_single = max(individual_accs)
+            best_idx = individual_accs.index(best_single)
+            print(f"\nBest Single Model: Model {best_idx+1} ({MODEL_NAMES[best_idx]}) → {best_single:.2f}%")
       
     dist.barrier()
     best_val_acc, history = train_hesitant_fuzzy_ddp(
