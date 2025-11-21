@@ -262,14 +262,15 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
         print("="*70 + "\n")
   
     return loaders['train'], loaders['valid'], loaders['test']
-@torch.no_grad()
 
-def evaluate_single_model(model: nn.Module, loader: DataLoader, device: torch.device, name: str, rank: int) -> float:
+@torch.no_grad()
+def evaluate_single_model_ddp(model, loader, device, name, rank, world_size):
+  
     model.eval()
     correct = total = 0
-  
+    
     iterator = tqdm(loader, desc=f"Evaluating {name}") if rank == 0 else loader
-  
+    
     for images, labels in iterator:
         images, labels = images.to(device), labels.to(device).float()
         out = model(images)
@@ -278,12 +279,18 @@ def evaluate_single_model(model: nn.Module, loader: DataLoader, device: torch.de
         pred = (out.squeeze(1) > 0).long()
         total += labels.size(0)
         correct += pred.eq(labels.long()).sum().item()
-  
-    acc = 100. * correct / total
-  
+
+    correct_tensor = torch.tensor(correct, dtype=torch.long, device=device)
+    total_tensor = torch.tensor(total, dtype=torch.long, device=device)
+    
+    dist.all_reduce(correct_tensor, op=dist.ReduceOp.SUM)
+    dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
+    
+    acc = 100. * correct_tensor.item() / total_tensor.item()
+    
     if rank == 0:
-        print(f" {name}: {acc:.2f}%")
-  
+        print(f" {name}: {acc:.2f}% (total: {total_tensor.item()} samples)")
+    
     return acc
   
 def train_hesitant_fuzzy_ddp(ensemble_model, train_loader, val_loader, num_epochs, lr, device, save_dir, rank, world_size):
@@ -377,40 +384,68 @@ def train_hesitant_fuzzy_ddp(ensemble_model, train_loader, val_loader, num_epoch
         print(f"\nTraining completed! Best Val Acc: {best_val_acc:.2f}%")
   
     return best_val_acc, history
+    
 @torch.no_grad()
-
-def evaluate_ensemble_final_ddp(model, loader, device, name, model_names, rank):
+def evaluate_ensemble_final_ddp_fixed(model, loader, device, name, model_names, rank, world_size):
+    
     model.eval()
-    all_preds, all_labels, all_weights, all_memberships = [], [], [], []
+    all_preds, all_labels = [], []
+    all_weights_list, all_memberships_list = [], []
+    
     iterator = tqdm(loader, desc=f"Evaluating {name}") if rank == 0 else loader
+    
     for images, labels in iterator:
         images, labels = images.to(device), labels.to(device)
         outputs, weights, memberships, _ = model(images, return_details=True)
         pred = (outputs.squeeze(1) > 0).long()
+        
         all_preds.extend(pred.cpu().numpy())
         all_labels.extend(labels.cpu().numpy())
-        all_weights.append(weights.cpu().numpy())
-        all_memberships.append(memberships.cpu().numpy())
-    acc = 100. * np.mean(np.array(all_preds) == np.array(all_labels))
-    avg_weights = np.concatenate(all_weights).mean(axis=0)
-    avg_memberships = np.concatenate(all_memberships).mean(axis=0)
+        all_weights_list.append(weights.cpu().numpy())
+        all_memberships_list.append(memberships.cpu().numpy())
+    
+    # محاسبه دقت
+    correct = np.sum(np.array(all_preds) == np.array(all_labels))
+    total = len(all_labels)
+    
+    correct_tensor = torch.tensor(correct, dtype=torch.long, device=device)
+    total_tensor = torch.tensor(total, dtype=torch.long, device=device)
+    
+    dist.all_reduce(correct_tensor, op=dist.ReduceOp.SUM)
+    dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
+    
+    acc = 100. * correct_tensor.item() / total_tensor.item()
+    
+    # محاسبه میانگین وزن‌ها
+    local_avg_weights = np.concatenate(all_weights_list).mean(axis=0)
+    local_avg_memberships = np.concatenate(all_memberships_list).mean(axis=0)
+    
+    weights_tensor = torch.tensor(local_avg_weights, device=device)
+    memberships_tensor = torch.tensor(local_avg_memberships, device=device)
+    
+    dist.all_reduce(weights_tensor, op=dist.ReduceOp.SUM)
+    dist.all_reduce(memberships_tensor, op=dist.ReduceOp.SUM)
+    
+    avg_weights = (weights_tensor / world_size).cpu().numpy()
+    avg_memberships = (memberships_tensor / world_size).cpu().numpy()
+    
     if rank == 0:
-        print(f"\n{name} Results → Accuracy: {acc:.2f}%")
+        print(f"\n{name} Results → Accuracy: {acc:.2f}% (total: {total_tensor.item()} samples)")
         print("\nFinal Hesitant Fuzzy Weights:")
         for i, (w, name) in enumerate(zip(avg_weights, model_names)):
             print(f" Model {i+1} ({name}): {w:.4f} ({w*100:.2f}%)")
-      
+        
         print("\nHesitant Membership Values per Model:")
         for i, name in enumerate(model_names):
             memberships = avg_memberships[i]
             variance = memberships.var()
             print(f" Model {i+1} ({name}):")
-            print(f" Memberships: {[f'{m:.3f}' for m in memberships]}")
-            print(f" Variance (Hesitancy): {variance:.4f}")
-  
+            print(f"   Memberships: {[f'{m:.3f}' for m in memberships]}")
+            print(f"   Variance (Hesitancy): {variance:.4f}")
+    
     return acc, avg_weights.tolist(), avg_memberships.tolist()
+    
 @torch.no_grad()
-
 def evaluate_accuracy_ddp(model, loader, device, rank):
     model.eval()
     correct = total = 0
