@@ -9,7 +9,7 @@ import numpy as np
 import warnings
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix
 import torch.nn.functional as F
-import argparse 
+import argparse
 
 warnings.filterwarnings("ignore")
 
@@ -17,14 +17,21 @@ parser = argparse.ArgumentParser(description="Fine-tuning a Pruned ResNet Model 
 
 parser.add_argument('--data_dir', type=str, default='/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k', help='Path to the dataset directory')
 parser.add_argument('--pruned_model_path', type=str, default='/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt', help='Path to the pruned model checkpoint')
+parser.add_argument('--output_path', type=str, default='/kaggle/working/best_model.pth', help='Path to save the fine-tuned model')
+
+# آرگومان‌های هایپرپارامترهای آموزش
 parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
-parser.add_argument('--num_epochs', type=int, default=10, help='Maximum number of training epochs')
+parser.add_argument('--num_epochs', type=int, default=15, help='Maximum number of training epochs')
 parser.add_argument('--learning_rate', type=float, default=1e-4, help='Initial learning rate')
 parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for regularization')
 parser.add_argument('--dropout_prob', type=float, default=0.5, help='Dropout probability')
 parser.add_argument('--patience', type=int, default=5, help='Patience for Early Stopping')
+
+# آرگومان‌های نرمال‌سازی
 parser.add_argument('--mean', type=float, nargs='+', default=[0.5207, 0.4258, 0.3806], help='Mean values for normalization')
 parser.add_argument('--std', type=float, nargs='+', default=[0.2490, 0.2239, 0.2212], help='Std values for normalization')
+
+# آرگومان استراتژی انجماد لایه‌ها
 parser.add_argument('--freeze_strategy', type=str, default='up_to_l4', choices=['none', 'fc_only', 'up_to_l3', 'up_to_l4'],
                     help="Strategy for freezing layers: 'none' (train all), 'fc_only' (freeze all but fc), 'up_to_l3' (freeze up to layer 3), 'up_to_l4' (freeze all but fc)")
 
@@ -132,6 +139,11 @@ train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=Tru
 valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
 test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
+print(f"Classes found: {train_dataset.classes}")
+print(f"Number of training samples: {len(train_dataset)}")
+print(f"Number of validation samples: {len(valid_dataset)}")
+print(f"Number of test samples: {len(test_dataset)}")
+
 # =============================================================================
 # مرحله 4: بارگذاری مدل، انجماد لایه‌ها، تعریف تابع هزینه و بهینه‌ساز
 # =============================================================================
@@ -140,6 +152,14 @@ checkpoint = torch.load(args.pruned_model_path, map_location=DEVICE)
 model.load_state_dict(checkpoint['model_state_dict'], strict=True)
 model.to(DEVICE)
 print("✅ مدل با موفقیت بارگذاری شد.")
+
+# --- تغییر کلیدی ۱: استخراج ماسک‌ها از چک‌پوینت اصلی ---
+try:
+    masks = checkpoint['masks']
+    print("✅ ماسک‌ها با موفقیت از چک‌پوینت اصلی استخراج شدند.")
+except KeyError:
+    print("⚠️  هشدار: کلید 'masks' در چک‌پوینت اصلی یافت نشد. ماسک‌ها ذخیره نخواهند شد.")
+    masks = None # یا می‌توانید یک دیکشنری خالی ایجاد کنید
 
 # --- منطق انجماد لایه‌ها بر اساس استراتژی انتخاب شده ---
 if args.freeze_strategy == 'fc_only':
@@ -201,9 +221,19 @@ for epoch in range(args.num_epochs):
     scheduler.step(epoch_val_loss)
 
     print(f"Epoch {epoch+1}/{args.num_epochs} -> Train Loss: {epoch_loss:.4f}, Train Acc: {epoch_acc:.2f}% | Val Loss: {epoch_val_loss:.4f}, Val Acc: {epoch_val_acc:.2f}%")
+    
     if epoch_val_acc > best_val_acc:
         best_val_acc = epoch_val_acc
-        torch.save(model.state_dict(), '/kaggle/working/best_model.pth')
+
+        best_checkpoint = {
+            'model_state_dict': model.state_dict(),
+            'hyperparameters': vars(args),
+            'class_to_idx': train_dataset.class_to_idx
+        }
+        if masks is not None:
+            best_checkpoint['masks'] = masks
+        
+        torch.save(best_checkpoint, args.output_path)
         print(f"  -> New best model saved with validation accuracy: {best_val_acc:.2f}%")
         epochs_no_improve = 0
     else:
@@ -213,10 +243,7 @@ for epoch in range(args.num_epochs):
         print(f"\nEarly stopping triggered after {epoch+1} epochs."); break
 print("\nFinished Training.")
 
-# =============================================================================
-# مرحله 6: ارزیابی نهایی روی داده‌های تست
-# =============================================================================
-model.load_state_dict(torch.load('/kaggle/working/best_model.pth'))
+model.load_state_dict(torch.load(args.output_path)['model_state_dict'])
 model.eval()
 all_preds, all_labels = [], []
 with torch.no_grad():
