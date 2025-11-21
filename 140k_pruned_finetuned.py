@@ -1,326 +1,364 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
-from torchvision import transforms, datasets
+import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
+from PIL import Image
 import os
 from tqdm import tqdm
 import numpy as np
-from typing import List, Tuple, Dict
-import warnings
-import random
-import torch.optim.lr_scheduler as lr_scheduler 
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
+import sys
+from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
 
-# 💡 فرض بر این است که ایمپورت مدل واقعی موفق است و مسیر درست است.
-from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal 
 
-warnings.filterwarnings("ignore")
-
-# ====================== بارگذاری مدل (مدل واقعی برای Fine-Tuning) ======================
-def load_pruned_models(model_paths: List[str], device: torch.device) -> List[nn.Module]:
-    """بارگذاری مدل‌های پایه هرس‌شده ResNet-50 و تنظیم برای Fine-Tuning."""
+class WildDeepFakeDataset(Dataset):
+    """دیتاست برای لود کردن تصاویر fake و real"""
     
-    if not model_paths:
-        print("[ERROR] MODEL_PATHS cannot be empty for single model fine-tuning.")
-        raise ValueError("No model path provided.")
+    def __init__(self, root_dir, transform=None):
+        self.root_dir = root_dir
+        self.transform = transform
+        self.samples = []
         
-    path = model_paths[0]
+        # خواندن فایل‌ها از پوشه‌های fake و real
+        for label, class_name in enumerate(['real', 'fake']):
+            class_dir = os.path.join(root_dir, class_name)
+            if os.path.exists(class_dir):
+                for img_name in os.listdir(class_dir):
+                    if img_name.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        self.samples.append((
+                            os.path.join(class_dir, img_name),
+                            label
+                        ))
+        
+        print(f"✅ تعداد نمونه‌های لود شده از {root_dir}: {len(self.samples)}")
     
-    masks = None
-    try:
-        # بارگذاری چک پوینت
-        ckpt = torch.load(path, map_location='cpu', weights_only=False)
-        masks = ckpt.get('masks')
-        if masks is None:
-            print(f"[INFO] 'masks' not found in {os.path.basename(path)}. Proceeding without masks.")
-            
-    except Exception as e:
-        print(f"[ERROR] Could not load checkpoint from {path}: {e}")
-        raise RuntimeError(f"Failed to load checkpoint for model initialization: {path}")
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        img_path, label = self.samples[idx]
+        image = Image.open(img_path).convert('RGB')
+        
+        if self.transform:
+            image = self.transform(image)
+        
+        return image, torch.tensor(label, dtype=torch.float32)
 
-    # ⬅️ نمونه‌سازی مدل واقعی
+
+def get_transforms(phase, mean, std):
+    """تعریف transformations برای train و validation/test"""
+    
+    if phase == 'train':
+        return transforms.Compose([
+            transforms.Resize((256, 256)),
+            transforms.RandomCrop(224),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomRotation(degrees=10),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std)
+        ])
+    else:
+        return transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std)
+        ])
+
+
+def load_pruned_model(checkpoint_path, device):
+    """لود کردن مدل هرس‌شده از checkpoint"""
+    
+    print(f"📥 در حال لود کردن مدل از {checkpoint_path}...")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # استخراج masks از checkpoint
+    masks = checkpoint['masks']
+    
+    # ساخت مدل با masks
     model = ResNet_50_pruned_hardfakevsreal(masks=masks)
     
-    # بارگذاری وزن‌های مدل
-    model.load_state_dict(ckpt['model_state_dict'])
-    
-    # تنظیم مدل برای Fine-Tuning: انتقال به دیوایس و آماده‌سازی برای آموزش
+    # لود کردن weights
+    model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(device)
-    # 💡 توجه: مدل را در اینجا به .train() نمی‌بریم؛ در تابع fine_tune_single_model_executor این کار انجام می‌شود.
-    # اما اگر مدل هرس‌شده شما در حالت eval() بهینه‌تر عمل می‌کند (برای جلوگیری از تغییر وزن‌های هرس)،
-    # باید در تابع fine_tune بخش model.train() را به‌درستی مدیریت کنید.
-    # ما آن را به حالت پیش‌فرض (آموزش) می‌گذاریم.
     
-    print(f"Loaded 1 ResNet_50 model using checkpoint path: {path}")
-    return [model]
+    print(f"✅ مدل با موفقیت لود شد!")
+    print(f"📊 تعداد پارامترها: {sum(p.numel() for p in model.parameters()):,}")
+    
+    return model
 
-# ====================== توابع کمکی (Single Process Setup) ======================
-def set_seed(seed: int = 42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    print(f"[SEED] All random seeds set to: {seed}")
-        
-def worker_init_fn(worker_id):
-    worker_seed = torch.initial_seed() % 2**32
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
 
-# ----------------------------------------------------------------------
+def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch):
 
-# ====================== DataLoaders (Single Process) ======================
-def create_dataloaders_single_gpu(base_dir: str, batch_size: int, num_workers: int = 2):
-    """ایجاد DataLoaders استاندارد"""
-    
-    train_transform = transforms.Compose([
-        transforms.Resize((256, 256)),
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomRotation(10),
-        transforms.ColorJitter(0.2, 0.2),
-        transforms.ToTensor(),
-    ])
-    
-    val_test_transform = transforms.Compose([
-        transforms.Resize((256, 256)),
-        transforms.ToTensor(),
-    ])
-    
-    datasets_dict = {}
-    for split in ['train', 'valid', 'test']:
-        path = os.path.join(base_dir, split)
-        if not os.path.exists(path):
-             print(f"[ERROR] Folder not found: {path}")
-             raise FileNotFoundError(f"Folder not found: {path}")
-        
-        transform = train_transform if split == 'train' else val_test_transform
-        datasets_dict[split] = datasets.ImageFolder(path, transform=transform)
-    
-    loaders = {}
-    for split, ds in datasets_dict.items():
-        loader = DataLoader(
-            ds, 
-            batch_size=batch_size, 
-            shuffle=(split == 'train'), 
-            num_workers=num_workers, 
-            pin_memory=True, 
-            drop_last=(split == 'train'),
-            worker_init_fn=worker_init_fn
-        )
-        loaders[split] = loader
-    
-    print(f"DataLoaders ready! Batch size: {batch_size}. Train Samples: {len(datasets_dict['train']):,}")
-    
-    return loaders['train'], loaders['valid'], loaders['test']
-
-# ----------------------------------------------------------------------
-
-# ====================== ارزیابی تک مدل ======================
-@torch.no_grad()
-def evaluate_single_model_ft(model: nn.Module, loader: DataLoader, device: torch.device, 
-                             name: str, mean: Tuple[float], std: Tuple[float]) -> float:
-    """ارزیابی یک مدل در حالت تک فرآیند"""
-    
-    # 💡 برای ارزیابی حتماً مدل را در حالت eval قرار دهید
-    model.eval() 
-    correct = total = 0
-    normalize = transforms.Normalize(mean=mean, std=std)
-    
-    iterator = tqdm(loader, desc=f"Evaluating {name}")
-    
-    for images, labels in iterator:
-        images, labels = images.to(device), labels.to(device).float()
-        images = normalize(images) 
-        
-        out = model(images)
-        if isinstance(out, (tuple, list)):
-            out = out[0]
-        
-        pred = (out.squeeze(1) > 0).long()
-        total += labels.size(0)
-        correct += pred.eq(labels.long()).sum().item()
-        
-    acc = 100. * correct / total
-    print(f" {name} Accuracy: {acc:.2f}%")
-        
-    return acc
-
-# ----------------------------------------------------------------------
-
-# ====================== تابع اصلی Fine-Tuning (Single Process) ======================
-def fine_tune_single_model_executor(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, 
-                                device: torch.device, ft_epochs: int, ft_lr: float, 
-                                save_dir: str, mean: Tuple[float], std: Tuple[float], 
-                                model_name: str) -> float:
-    """Fine-tunes a single base model in a single process."""
-
-    print(f"\n{'#'*70}")
-    print(f"[{model_name}] Starting Fine-Tuning on {device}...")
-    print(f" Epochs: {ft_epochs} | Learning Rate: {ft_lr} | Mean/Std: {mean}/{std}")
-    trainable_params = sum(p.numel() for p in model.parameters())
-    print(f" Total Trainable Params: {trainable_params:,}")
-    print(f"{'#'*70}")
-    
-    # 💡 برای آموزش حتماً مدل را در حالت train قرار دهید
     model.train()
-    # اطمینان از اینکه تمامی پارامترها قابل آموزش هستند
-    for p in model.parameters():
-        p.requires_grad = True
+    running_loss = 0.0
+    all_preds = []
+    all_labels = []
+    
+    pbar = tqdm(dataloader, desc=f"🚀 Epoch {epoch} [Train]")
+    
+    for images, labels in pbar:
+        images, labels = images.to(device), labels.to(device)
+        
+        # Forward
+        optimizer.zero_grad()
+        outputs, _ = model(images)
+        outputs = outputs.squeeze()
+        loss = criterion(outputs, labels)
+        
+        # Backward
+        loss.backward()
+        optimizer.step()
+        
+        # محاسبه metrics
+        running_loss += loss.item()
+        preds = (torch.sigmoid(outputs) > 0.5).float()
+        all_preds.extend(preds.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+        
+        pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+    
+    epoch_loss = running_loss / len(dataloader)
+    epoch_acc = accuracy_score(all_labels, all_preds)
+    
+    return epoch_loss, epoch_acc
 
-    normalize = transforms.Normalize(mean=mean, std=std)
-    
-    optimizer = torch.optim.AdamW(model.parameters(), lr=ft_lr, weight_decay=1e-4)
-    
-    scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=ft_epochs) 
-    
-    criterion = nn.BCEWithLogitsLoss()
-    
-    best_val_acc = 0.0
-    
-    for epoch in range(ft_epochs):
-        model.train()
-        train_loss = train_correct = train_total = 0.0
-        
-        iterator = tqdm(train_loader, desc=f'[{model_name}] Epoch {epoch+1}/{ft_epochs} [Train]')
-        
-        for images, labels in iterator:
-            images, labels = images.to(device), labels.to(device).float()
-            images = normalize(images) 
-            
-            optimizer.zero_grad()
-            out = model(images)
-            
-            if isinstance(out, (tuple, list)):
-                out = out[0]
-            
-            loss = criterion(out.squeeze(1), labels)
-            loss.backward()
-            optimizer.step()
-            
-            train_loss += loss.item() * images.size(0)
-            pred = (out.squeeze(1) > 0).long()
-            train_correct += pred.eq(labels.long()).sum().item()
-            train_total += images.size(0)
-            
-            current_acc = 100. * train_correct / train_total
-            avg_loss = train_loss / train_total
-            iterator.set_postfix({'loss': f'{avg_loss:.4f}', 'acc': f'{current_acc:.2f}%'})
 
-        val_acc = evaluate_single_model_ft(model, val_loader, device, f"[{model_name}] Validation", mean, std)
-        scheduler.step()
-        
-        final_train_acc = 100. * train_correct / train_total
-        print(f"\n[{model_name}] Epoch {epoch+1} Summary:")
-        print(f" Train Loss: {train_loss / train_total:.4f} | Train Acc: {final_train_acc:.2f}%")
-        print(f" Val Acc: {val_acc:.2f}% | LR: {optimizer.param_groups[0]['lr']:.6f}")
-
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            save_path = os.path.join(save_dir, f'{model_name}_ft_best.pt')
-            
-            masks = getattr(model, 'masks', None) 
-            
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'masks': masks, 
-                'val_acc': val_acc,
-            }, save_path)
-            print(f" ✓ Best Fine-Tuned model saved to {save_path} → {val_acc:.2f}%")
-        
-    print(f"\n[{model_name}] Fine-Tuning Completed! Best Val Acc: {best_val_acc:.2f}%")
-        
+def validate(model, dataloader, criterion, device, phase='Valid'):
+    """ارزیابی مدل روی validation یا test set"""
+    
     model.eval()
-    return best_val_acc
+    running_loss = 0.0
+    all_preds = []
+    all_probs = []
+    all_labels = []
+    
+    pbar = tqdm(dataloader, desc=f"🔍 {phase}")
+    
+    with torch.no_grad():
+        for images, labels in pbar:
+            images, labels = images.to(device), labels.to(device)
+            
+            outputs, _ = model(images)
+            outputs = outputs.squeeze()
+            loss = criterion(outputs, labels)
+            
+            running_loss += loss.item()
+            probs = torch.sigmoid(outputs)
+            preds = (probs > 0.5).float()
+            
+            all_preds.extend(preds.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+    
+    epoch_loss = running_loss / len(dataloader)
+    epoch_acc = accuracy_score(all_labels, all_preds)
+    
+    # محاسبه metrics اضافی
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        all_labels, all_preds, average='binary', zero_division=0
+    )
+    auc = roc_auc_score(all_labels, all_probs)
+    
+    return {
+        'loss': epoch_loss,
+        'accuracy': epoch_acc,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'auc': auc
+    }
 
-# ----------------------------------------------------------------------
+def fine_tune(
+    model_path,
+    data_dir,
+    output_dir,
+    mean=[0.5207,0.4258,0.3806],
+    std=[0.2490,0.2239,0.2212],
+    batch_size=32,
+    num_epochs=50,
+    learning_rate=1e-4,
+    weight_decay=1e-4,
+    patience=10
+):
 
-# ====================== MAIN FUNCTION (تک مدل و Hardcoded) ======================
-def main():
+    os.makedirs(output_dir, exist_ok=True)
 
-    FT_EPOCHS = 10
-    FT_LR = 1e-4
-    BATCH_SIZE = 64
-    DATA_DIR = '/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k' 
-    SAVE_DIR = '/kaggle/working/finetuned_models'
-    NUM_WORKERS = 4
-    
-    SEED = 42
-    set_seed(SEED)
-    
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    print(f"Device set to: {device}")
-    
-    print(f"="*70)
-    print(f"Single Model Fine-Tuning | Device: {device}")
-    print(f"Epochs: {FT_EPOCHS} | LR: {FT_LR} | Batch Size: {BATCH_SIZE}")
-    print(f"="*70 + "\n")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # ====================== DATA & MODEL DEFINITION (فقط یک مدل) ======================
-    
-    MODEL_PATHS = [
-        '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt',
-    ]
-    MODEL_NAME = "140k_pearson" 
-    MEAN = (0.5207,0.4258,0.3806)
-    STD = (0.2490,0.2239,0.2212)
-    
-    os.makedirs(SAVE_DIR, exist_ok=True)
-    
-    # بارگذاری مدل 
-    base_models = load_pruned_models(MODEL_PATHS, device)
-    model = base_models[0]
+    model = load_pruned_model(model_path, device)
 
-    # ====================== DATALOADERS ======================
-    train_loader, val_loader, test_loader = create_dataloaders_single_gpu(
-        DATA_DIR, BATCH_SIZE, NUM_WORKERS
+    train_transform = get_transforms('train', mean, std)
+    val_transform = get_transforms('val', mean, std)
+    
+    # لود دیتاست‌ها
+    print("\n📁 در حال لود کردن دیتاست‌ها...")
+    train_dataset = WildDeepFakeDataset(
+        os.path.join(data_dir, 'train'),
+        transform=train_transform
+    )
+    valid_dataset = WildDeepFakeDataset(
+        os.path.join(data_dir, 'valid'),
+        transform=val_transform
+    )
+    test_dataset = WildDeepFakeDataset(
+        os.path.join(data_dir, 'test'),
+        transform=val_transform
     )
     
-    # ====================== FINE-TUNING EXECUTION ======================
-    print(f"Starting Fine-Tuning for Model: {MODEL_NAME}")
-    
-    best_val_acc = fine_tune_single_model_executor(
-        model, train_loader, val_loader, 
-        device, FT_EPOCHS, FT_LR, 
-        SAVE_DIR, MEAN, STD, MODEL_NAME
+    # DataLoaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True
+    )
+    valid_loader = DataLoader(
+        valid_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True
     )
     
-    final_accs = {MODEL_NAME: best_val_acc}
-
-    # ====================== FINAL EVALUATION ======================
+    # تعریف loss و optimizer
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=learning_rate,
+        weight_decay=weight_decay
+    )
+    
+    # Learning rate scheduler
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=0.5,
+        patience=5,
+        verbose=True
+    )
+    
+    # متغیرهای early stopping
+    best_val_loss = float('inf')
+    best_val_acc = 0.0
+    epochs_no_improve = 0
+    
     print("\n" + "="*70)
-    print(f"Final Test Evaluation ({MODEL_NAME})")
+    print("🚀 شروع Fine-tuning")
     print("="*70)
+    
+    # حلقه آموزش
+    for epoch in range(1, num_epochs + 1):
+        print(f"\n📍 Epoch {epoch}/{num_epochs}")
+        print("-" * 70)
         
-    best_ft_path = os.path.join(SAVE_DIR, f'{MODEL_NAME}_ft_best.pt')
+        # آموزش
+        train_loss, train_acc = train_one_epoch(
+            model, train_loader, criterion, optimizer, device, epoch
+        )
+        
+        # اعتبارسنجی
+        val_metrics = validate(model, valid_loader, criterion, device, 'Valid')
+        
+        # نمایش نتایج
+        print(f"\n📊 Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
+        print(f"📊 Valid Loss: {val_metrics['loss']:.4f} | Valid Acc: {val_metrics['accuracy']:.4f}")
+        print(f"📊 Valid F1: {val_metrics['f1']:.4f} | Valid AUC: {val_metrics['auc']:.4f}")
+        
+        # بروزرسانی learning rate
+        scheduler.step(val_metrics['loss'])
+        
+        # ذخیره بهترین مدل
+        if val_metrics['loss'] < best_val_loss:
+            best_val_loss = val_metrics['loss']
+            best_val_acc = val_metrics['accuracy']
+            epochs_no_improve = 0
+            
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'masks': model.masks if hasattr(model, 'masks') else None,
+                'val_loss': best_val_loss,
+                'val_acc': best_val_acc,
+                'val_metrics': val_metrics
+            }
+            
+            best_model_path = os.path.join(output_dir, 'best_model.pt')
+            torch.save(checkpoint, best_model_path)
+            print(f"💾 مدل بهتری ذخیره شد! (Val Loss: {best_val_loss:.4f})")
+        else:
+            epochs_no_improve += 1
+            print(f"⏳ {epochs_no_improve}/{patience} epochs بدون بهبود")
+        
+        # Early stopping
+        if epochs_no_improve >= patience:
+            print(f"\n⛔ Early stopping! بهترین Val Loss: {best_val_loss:.4f}")
+            break
     
-    if os.path.exists(best_ft_path):
-        try:
-            # بارگذاری بهترین مدل ذخیره شده
-            ckpt = torch.load(best_ft_path, map_location=device, weights_only=False)
-            
-            # مدل را با ماسک‌های درست (اگر وجود دارند) نمونه‌سازی می‌کنیم.
-            model_eval = ResNet_50_pruned_hardfakevsreal(masks=ckpt.get('masks')).to(device).eval() 
-            model_eval.load_state_dict(ckpt['model_state_dict'])
-            
-            # ارزیابی روی Test Set
-            test_acc = evaluate_single_model_ft(model_eval, test_loader, device, 
-                                                 f"{MODEL_NAME} Final Test", MEAN, STD)
-            final_accs[f'{MODEL_NAME}_test'] = test_acc
-        except Exception as e:
-            print(f"[ERROR] Could not load or evaluate {MODEL_NAME}: {e}")
-    else:
-        print(f"[INFO] Best checkpoint not found for {MODEL_NAME}.")
-
-    # ====================== RESULTS ======================
+    # ارزیابی نهایی روی test set
     print("\n" + "="*70)
-    print("Final Fine-Tuning Results:")
-    for name, acc in final_accs.items():
-        print(f" {name}: {acc:.2f}%")
-    print("ALL DONE!")
+    print("🧪 ارزیابی نهایی روی Test Set")
     print("="*70)
+    
+    # لود بهترین مدل
+    best_checkpoint = torch.load(os.path.join(output_dir, 'best_model.pt'))
+    model.load_state_dict(best_checkpoint['model_state_dict'])
+    
+    test_metrics = validate(model, test_loader, criterion, device, 'Test')
+    
+    print(f"\n🎯 نتایج نهایی:")
+    print(f"   Test Loss:      {test_metrics['loss']:.4f}")
+    print(f"   Test Accuracy:  {test_metrics['accuracy']:.4f}")
+    print(f"   Test Precision: {test_metrics['precision']:.4f}")
+    print(f"   Test Recall:    {test_metrics['recall']:.4f}")
+    print(f"   Test F1-Score:  {test_metrics['f1']:.4f}")
+    print(f"   Test AUC:       {test_metrics['auc']:.4f}")
+    
+    # ذخیره نتایج
+    results = {
+        'best_epoch': best_checkpoint['epoch'],
+        'best_val_loss': best_val_loss,
+        'best_val_acc': best_val_acc,
+        'test_metrics': test_metrics
+    }
+    
+    torch.save(results, os.path.join(output_dir, 'training_results.pt'))
+    
+    print(f"\n✅ Fine-tuning تمام شد!")
+    print(f"📁 فایل‌های خروجی در {output_dir} ذخیره شدند")
+    
+    return model, results
+
 
 if __name__ == "__main__":
-    main()
+    # تنظیمات
+    MODEL_PATH = '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt'  # مسیر مدل هرس‌شده
+    DATA_DIR = '/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k'    # مسیر دیتاست
+    OUTPUT_DIR = '/kaggle/working/140k_finetuned_pruned_model' # مسیر خروجی
+    
+
+    MEAN = [0.5207,0.4258,0.3806]  # ImageNet defaults
+    STD = [0.2490,0.2239,0.2212]   # ImageNet defaults
+
+    model, results = fine_tune(
+        model_path=MODEL_PATH,
+        data_dir=DATA_DIR,
+        output_dir=OUTPUT_DIR,
+        mean=MEAN,
+        std=STD,
+        batch_size=32,
+        num_epochs=50,
+        learning_rate=1e-4,
+        weight_decay=1e-4,
+        patience=10
+    )
