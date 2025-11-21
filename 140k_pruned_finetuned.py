@@ -17,19 +17,16 @@ import numpy as np
 import warnings
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix
 
-# نادیده گرفتن هشدارهای غیرضروری برای خروجی تمیزتر
 warnings.filterwarnings("ignore")
 
 # =============================================================================
-# مرحله 2: تعریف مجدد معماری مدل هرس‌شده (ResNet_pruned)
-# این بخش بر اساس خروجی print(model) که ارائه دادید، بازسازی شده است.
+# مرحله 2: تعریف مجدد و اصلاح‌شده معماری مدل هرس‌شده (ResNet_pruned)
 # =============================================================================
 class Bottleneck_pruned(nn.Module):
     expansion = 4
 
     def __init__(self, in_channels, out_channels, conv1_channels, conv2_channels, conv3_channels, stride=1, downsample=None):
         super(Bottleneck_pruned, self).__init__()
-        # استفاده از تعداد کانال‌های هرس‌شده
         self.conv1 = nn.Conv2d(in_channels, conv1_channels, kernel_size=1, bias=False)
         self.bn1 = nn.BatchNorm2d(conv1_channels)
         self.conv2 = nn.Conv2d(conv1_channels, conv2_channels, kernel_size=3, stride=stride, padding=1, bias=False)
@@ -83,39 +80,42 @@ class ResNet_pruned(nn.Module):
         ]
         filter_iter = iter(remaining_filters)
 
-        self.layer1 = self._make_layer(block, layers[0], filter_iter, stride=1)
-        self.layer2 = self._make_layer(block, layers[1], filter_iter, stride=2)
-        self.layer3 = self._make_layer(block, layers[2], filter_iter, stride=2)
-        self.layer4 = self._make_layer(block, layers[3], filter_iter, stride=2)
+        # تعداد کانال‌های خروجی برای هر لایه بر اساس ResNet-50 استاندارد
+        layer1_out_channels = 64 * block.expansion # 256
+        layer2_out_channels = 128 * block.expansion # 512
+        layer3_out_channels = 256 * block.expansion # 1024
+        layer4_out_channels = 512 * block.expansion # 2048
+
+        # ساخت لایه‌ها با پاس دادن تعداد کانال‌های خروجی صحیح
+        self.layer1 = self._make_layer(block, layers[0], filter_iter, out_channels=layer1_out_channels, stride=1)
+        self.layer2 = self._make_layer(block, layers[1], filter_iter, out_channels=layer2_out_channels, stride=2)
+        self.layer3 = self._make_layer(block, layers[2], filter_iter, out_channels=layer3_out_channels, stride=2)
+        self.layer4 = self._make_layer(block, layers[3], filter_iter, out_channels=layer4_out_channels, stride=2)
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(512 * block.expansion, num_classes) # 512 * 4 = 2048
+        self.fc = nn.Linear(layer4_out_channels, num_classes)
 
-    def _make_layer(self, block, blocks, filter_iter, stride=1):
+    def _make_layer(self, block, blocks, filter_iter, out_channels, stride=1):
         downsample = None
-        if stride != 1 or self.in_channels != 512 * block.expansion:
-            out_channels_for_downsample = 256 if self.in_channels == 64 else 512
+        if stride != 1 or self.in_channels != out_channels:
             downsample = nn.Sequential(
-                nn.Conv2d(self.in_channels, out_channels_for_downsample * block.expansion, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(out_channels_for_downsample * block.expansion),
+                nn.Conv2d(self.in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels),
             )
 
         layers = []
         conv1_c = next(filter_iter)
         conv2_c = next(filter_iter)
         conv3_c = next(filter_iter)
-        layers.append(block(self.in_channels, 256 * block.expansion, conv1_c, conv2_c, conv3_c, stride, downsample))
+        layers.append(block(self.in_channels, out_channels, conv1_c, conv2_c, conv3_c, stride, downsample))
         
-        if self.in_channels == 64: self.in_channels = 256
-        elif self.in_channels == 256: self.in_channels = 512
-        elif self.in_channels == 512: self.in_channels = 1024
-        elif self.in_channels == 1024: self.in_channels = 2048
+        self.in_channels = out_channels
 
         for _ in range(1, blocks):
             conv1_c = next(filter_iter)
             conv2_c = next(filter_iter)
             conv3_c = next(filter_iter)
-            layers.append(block(self.in_channels, 256 * block.expansion, conv1_c, conv2_c, conv3_c))
+            layers.append(block(self.in_channels, out_channels, conv1_c, conv2_c, conv3_c))
 
         return nn.Sequential(*layers)
 
@@ -180,16 +180,8 @@ print(f"Number of test samples: {len(test_dataset)}")
 # =============================================================================
 # مرحله 5: بارگذاری صحیح مدل، تعریف تابع هزینه و بهینه‌ساز
 # =============================================================================
-
-# --- بارگذاری صحیح مدل از یک فایل چک‌پوینت (دیکشنری) ---
-
-# 1. ابتدا یک نمونه خالی از معماری مدل می‌سازیم
 model = ResNet_pruned(Bottleneck_pruned, [3, 4, 6, 3])
-
-# 2. فایل چک‌پوینت را که یک دیکشنری است، بارگذاری می‌کنیم
 checkpoint = torch.load(PRUNED_MODEL_PATH, map_location=DEVICE)
-
-# 3. وزن‌ها را از دیکشنری استخراج کرده و در مدل لود می‌کنیم
 try:
     model.load_state_dict(checkpoint['model_state_dict'])
 except KeyError:
@@ -197,15 +189,10 @@ except KeyError:
     print("کلیدهای موجود در فایل:", checkpoint.keys())
     raise
 
-# 4. مدل را به دستگاه (GPU یا CPU) منتقل می‌کنیم
 model.to(DEVICE)
-
 print("✅ مدل با موفقیت بارگذاری شد.")
 
-# تابع هزینه برای دسته‌بندی دودویی
 criterion = nn.BCEWithLogitsLoss()
-
-# بهینه‌ساز Adam
 optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
 # =============================================================================
@@ -214,7 +201,6 @@ optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 best_val_acc = 0.0
 
 for epoch in range(NUM_EPOCHS):
-    # --- فاز آموزش ---
     model.train()
     running_loss = 0.0
     correct_train = 0
@@ -238,7 +224,6 @@ for epoch in range(NUM_EPOCHS):
     epoch_loss = running_loss / len(train_dataset)
     epoch_acc = 100 * correct_train / total_train
 
-    # --- فاز اعتبارسنجی ---
     model.eval()
     val_loss = 0.0
     correct_val = 0
