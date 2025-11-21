@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 
@@ -66,7 +65,6 @@ class BottleneckBlock(nn.Module):
                 dtype=feature_map.dtype
             )
             
-            # ✅ استفاده از out-of-place operation به جای inplace
             # کپی کردن feature_map به کانال‌های فعال
             active_channels = self.masks[2] == 1
             padded_feature_map[:, active_channels, :, :] = feature_map
@@ -186,19 +184,4 @@ class ResNet_50_pruned_hardfakevsreal(nn.Module):
         return output, features
 
 
-def ResNet_18_pruned_imagenet(masks):
-    return ResNet_pruned(
-        block=BasicBlock_pruned, num_blocks=[2, 2, 2, 2], masks=masks, num_classes=1
-    )
-
-
-def ResNet_34_pruned_imagenet(masks):
-    return ResNet_pruned(
-        block=BasicBlock_pruned, num_blocks=[3, 4, 6, 3], masks=masks, num_classes=1
-    )
-
-
-def ResNet_50_pruned_hardfakevsreal(masks):
-    return ResNet_pruned(
-        block=Bottleneck_pruned, num_blocks=[3, 4, 6, 3], masks=masks, num_classes=1
-    )
+model = ResNet_50_pruned_hardfakevsreal(masks=your_masks)
