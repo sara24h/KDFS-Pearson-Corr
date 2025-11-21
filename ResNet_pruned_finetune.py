@@ -184,4 +184,4 @@ class ResNet_50_pruned_hardfakevsreal(nn.Module):
         return output, features
 
 
-model = ResNet_50_pruned_hardfakevsreal(masks=your_masks)
+#model = ResNet_50_pruned_hardfakevsreal(masks=your_masks)
