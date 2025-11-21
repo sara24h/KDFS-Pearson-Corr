@@ -533,7 +533,7 @@ def main():
         print("="*70)
         individual_accs = []
         for i, model in enumerate(base_models):
-            acc = evaluate_single_model(model, test_loader, device, f"Model {i+1} ({MODEL_NAMES[i]})", rank)
+            acc = evaluate_single_model_ddp(model, test_loader, device, f"Model {i+1} ({MODEL_NAMES[i]})", rank, world_size)
             individual_accs.append(acc)
         best_single = max(individual_accs)
         best_idx = individual_accs.index(best_single)
@@ -559,8 +559,8 @@ def main():
         print("\n" + "="*70)
         print("EVALUATING FUZZY HESITANT ENSEMBLE")
         print("="*70)
-        ensemble_test_acc, ensemble_weights, membership_values = evaluate_ensemble_final_ddp(
-            ensemble, test_loader, device, "Test", MODEL_NAMES, rank
+        ensemble_test_acc, ensemble_weights, membership_values = evaluate_ensemble_final_ddp_fixed(
+            ensemble, test_loader, device, "Test", MODEL_NAMES, rank, world_size
         )
         print("\n" + "="*70)
         print("FINAL COMPARISON")
