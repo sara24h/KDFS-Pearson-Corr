@@ -9,7 +9,7 @@ from tqdm import tqdm
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
 import sys
-from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
+from ResNet_pruned_finetune import ResNet_50_pruned_hardfakevsreal
 
 
 class WildDeepFakeDataset(Dataset):
