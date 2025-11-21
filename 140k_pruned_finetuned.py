@@ -133,7 +133,7 @@ DATA_DIR = '/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k' # <-- ای
 
 PRUNED_MODEL_PATH = '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt' # <-- این مسیر را تغییر دهید
 
-MEAN = [(0.5207,0.4258,0.3806]
+MEAN = [0.5207,0.4258,0.3806]
 STD = [0.2490,0.2239,0.2212]
 
 BATCH_SIZE = 32
