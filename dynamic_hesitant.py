@@ -214,11 +214,11 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
         transforms.ToTensor(),
     ])
     
-    # *** تغییر کلیدی: نرمال‌سازی به ترنسفورم تست اضافه شد ***
+    # *** تغییر کلیدی: حذف نرمال‌سازی از DataLoader ***
+    # نرمال‌سازی در داخل توابع ارزیابی انجام می‌شود
     val_test_transform = transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # Using standard ImageNet stats
     ])
     
     splits = ['train', 'valid', 'test']
@@ -272,22 +272,23 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
 
 @torch.no_grad()
 def evaluate_single_model(model: nn.Module, loader: DataLoader, device: torch.device, 
-                          name: str, rank: int, world_size: int, model_idx: int, means: List[Tuple[float]], stds: List[Tuple[float]]) -> float:
-    """ارزیابی یک مدل با جمع‌آوری نتایج از همه GPU‌ها"""
+                          name: str, rank: int, world_size: int, model_idx: int, 
+                          means: List[Tuple[float]], stds: List[Tuple[float]]) -> float:
+    """ارزیابی یک مدل با استفاده از همان نرمال‌سازی انسامبل"""
     model.eval()
     correct = total = 0
   
     iterator = tqdm(loader, desc=f"Evaluating {name}") if rank == 0 else loader
-  
+
+    temp_normalizer = MultiModelNormalization(means, stds).to(device)
+
     for images, labels in iterator:
         images, labels = images.to(device), labels.to(device).float()
         
-        # *** تغییر کلیدی: نرمال‌سازی تصاویر بر اساس مدل مربوطه ***
-        current_mean = torch.tensor(means[model_idx]).view(1, 3, 1, 1).to(device)
-        current_std = torch.tensor(stds[model_idx]).view(1, 3, 1, 1).to(device)
-        images = (images - current_mean) / current_std
+        # استفاده از نرمال‌ساز برای نرمال‌سازی تصاویر بر اساس مدل مربوطه
+        images_normalized = temp_normalizer(images, model_idx)
         
-        out = model(images)
+        out = model(images_normalized)
         if isinstance(out, (tuple, list)):
             out = out[0]
         pred = (out.squeeze(1) > 0).long()
@@ -560,6 +561,7 @@ def main():
     ]
   
     MODEL_NAMES = ["140k_pearson", "190k_pearson", "200k_kdfs"]
+
     MEANS = [(0.5207,0.4258,0.3806), (0.4868,0.3972,0.3624), (0.4668,0.3816,0.3414)]
     STDS = [(0.2490,0.2239,0.2212), (0.2296,0.2066,0.2009), (0.2410,0.2161,0.2081)]
   
@@ -603,7 +605,7 @@ def main():
     
     # ارزیابی هر مدل به صورت جداگانه
     for i, model in enumerate(base_models):
-        # *** تغییر کلیدی: ارسال مدل، ایندکس، میانگین‌ها و انحراف معیارها ***
+        # *** تغییر کلیدی: ارسال لیست کامل MEANS و STDS به تابع ارزیابی ***
         acc = evaluate_single_model(model, test_loader, device, 
                                     f"Model {i+1} ({MODEL_NAMES[i]})", rank, world_size, i, MEANS, STDS)
         individual_accs.append(acc)
@@ -656,7 +658,7 @@ def main():
         
         # ذخیره نتایج با seed
         results = {
-            "method": "Fuzzy Hesitant Sets (DDP)",
+            "method": "Fuzzy Hesitant Sets (DDP) - FAIR COMPARISON",
             "seed": args.seed,
             "num_gpus": world_size,
             "num_memberships": args.num_memberships,
@@ -671,7 +673,7 @@ def main():
             "training_history": history
         }
         
-        result_path = '/kaggle/working/hesitant_fuzzy_ddp_results.json'
+        result_path = '/kaggle/working/hesitant_fuzzy_ddp_fair_comparison_results.json'
       
         try:
             with open(result_path, 'w') as f:
@@ -680,7 +682,7 @@ def main():
         except Exception as e:
             print(f"\n[ERROR] Failed to save results: {e}")
       
-        final_model_path = '/kaggle/working/hesitant_fuzzy_ddp_final.pt'
+        final_model_path = '/kaggle/working/hesitant_fuzzy_ddp_fair_comparison_final.pt'
         
         try:
             torch.save({
