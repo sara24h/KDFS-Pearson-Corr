@@ -16,30 +16,24 @@ import os
 import numpy as np
 import warnings
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix
+import torch.nn.functional as F # برای عملیات پد کردن
 
 warnings.filterwarnings("ignore")
 
 # =============================================================================
-# مرحله 2: تعریف اصلاح‌شده و صحیح معماری مدل هرس‌شده (ResNet_pruned)
+# مرحله 2: تعریف معماری مدل هرس‌شده با منطق اتصال پرش اصلاح‌شده
 # =============================================================================
 class Bottleneck_pruned(nn.Module):
     expansion = 4
 
-    def __init__(self, in_channels, out_channels, conv1_channels, conv2_channels, stride=1, downsample=None):
+    def __init__(self, in_channels, out_channels, conv1_channels, conv2_channels, conv3_channels, stride=1, downsample=None):
         super(Bottleneck_pruned, self).__init__()
-        # conv1: کاهش کانال‌ها
         self.conv1 = nn.Conv2d(in_channels, conv1_channels, kernel_size=1, bias=False)
         self.bn1 = nn.BatchNorm2d(conv1_channels)
-        
-        # conv2: کانولوشن اصلی
         self.conv2 = nn.Conv2d(conv1_channels, conv2_channels, kernel_size=3, stride=stride, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(conv2_channels)
-        
-        # conv3: افزایش کانال‌ها به مقدار نهایی (out_channels)
-        # *** این بخش کلیدی است که اصلاح شده است ***
-        self.conv3 = nn.Conv2d(conv2_channels, out_channels, kernel_size=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(out_channels)
-        
+        self.conv3 = nn.Conv2d(conv2_channels, conv3_channels, kernel_size=1, bias=False)
+        self.bn3 = nn.BatchNorm2d(conv3_channels)
         self.relu = nn.ReLU(inplace=True)
         self.downsample = downsample
         self.stride = stride
@@ -61,7 +55,18 @@ class Bottleneck_pruned(nn.Module):
         if self.downsample is not None:
             identity = self.downsample(x)
 
-        # اکنون ابعاد out و identity مطابقت دارند
+        # *** بخش کلیدی برای حل مشکل عدم تطابق ابعاد ***
+        # اگر تعداد کانال‌ها برابر نبود، تانسور کوچکتر را پد می‌کنیم
+        if out.shape[1] != identity.shape[1]:
+            if out.shape[1] < identity.shape[1]:
+                # پد کردن 'out' تا هم‌اندازه 'identity' شود
+                pad_channels = identity.shape[1] - out.shape[1]
+                out = F.pad(out, (0, 0, 0, 0, 0, pad_channels))
+            else:
+                # پد کردن 'identity' تا هم‌اندازه 'out' شود
+                pad_channels = out.shape[1] - identity.shape[1]
+                identity = F.pad(identity, (0, 0, 0, 0, 0, pad_channels))
+        
         out += identity
         out = self.relu(out)
 
@@ -76,55 +81,59 @@ class ResNet_pruned(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
 
-        # لیست remaining_filters اکنون فقط شامل مقادیر برای conv1 و conv2 است
-        # ما مقدار سوم (conv3) را نادیده می‌گیریم زیرا باید بر اساس out_channels باشد
         remaining_filters = [
             # layer1
-            12, 12, 11, 10, 9, 11,
+            12, 12, 64, 11, 10, 59, 9, 11, 49,
             # layer2
-            23, 21, 22, 17, 23, 17, 21, 14,
+            23, 21, 86, 22, 17, 86, 23, 17, 66, 21, 14, 56,
             # layer3
-            20, 48, 54, 14, 35, 11, 42, 12, 41, 7, 28, 3,
+            20, 48, 105, 54, 14, 95, 35, 11, 77, 42, 12, 50, 41, 7, 35, 28, 3, 41,
             # layer4
-            37, 55, 78, 5, 52, 16
+            37, 55, 55, 78, 5, 67, 52, 16, 89
         ]
         filter_iter = iter(remaining_filters)
 
-        # تعداد کانال‌های خروجی برای هر لایه بر اساس ResNet-50 استاندارد
+        # تعریف تعداد کانال‌های استاندارد برای هر لایه
         layer1_out_channels = 64 * block.expansion # 256
         layer2_out_channels = 128 * block.expansion # 512
         layer3_out_channels = 256 * block.expansion # 1024
         layer4_out_channels = 512 * block.expansion # 2048
 
-        self.layer1 = self._make_layer(block, layers[0], filter_iter, out_channels=layer1_out_channels, stride=1)
-        self.layer2 = self._make_layer(block, layers[1], filter_iter, out_channels=layer2_out_channels, stride=2)
-        self.layer3 = self._make_layer(block, layers[2], filter_iter, out_channels=layer3_out_channels, stride=2)
-        self.layer4 = self._make_layer(block, layers[3], filter_iter, out_channels=layer4_out_channels, stride=2)
+        self.layer1 = self._make_layer(block, layers[0], filter_iter, layer1_out_channels, stride=1)
+        self.layer2 = self._make_layer(block, layers[1], filter_iter, layer2_out_channels, stride=2)
+        self.layer3 = self._make_layer(block, layers[2], filter_iter, layer3_out_channels, stride=2)
+        self.layer4 = self._make_layer(block, layers[3], filter_iter, layer4_out_channels, stride=2)
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        # لایه نهایی باید به تعداد کانال‌های خروجی آخرین لایه (که استاندارد است) متصل شود
         self.fc = nn.Linear(layer4_out_channels, num_classes)
 
-    def _make_layer(self, block, blocks, filter_iter, out_channels, stride=1):
+    def _make_layer(self, block, blocks, filter_iter, layer_out_channels, stride=1):
         downsample = None
-        if stride != 1 or self.in_channels != out_channels:
+        # اگر استراید بزرگتر از ۱ باشد یا کانال‌های ورودی با خروجی لایه برابر نباشد، به downsample نیاز است
+        if stride != 1 or self.in_channels != layer_out_channels:
             downsample = nn.Sequential(
-                nn.Conv2d(self.in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(out_channels),
+                nn.Conv2d(self.in_channels, layer_out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(layer_out_channels),
             )
 
         layers = []
         # ساخت اولین بلوک در لایه
         conv1_c = next(filter_iter)
         conv2_c = next(filter_iter)
-        layers.append(block(self.in_channels, out_channels, conv1_c, conv2_c, stride, downsample))
+        conv3_c = next(filter_iter)
+        layers.append(block(self.in_channels, layer_out_channels, conv1_c, conv2_c, conv3_c, stride, downsample))
         
-        self.in_channels = out_channels
+        # به‌روزرسانی تعداد کانال‌های ورودی برای بلوک‌های بعدی به مقدار استاندارد لایه
+        self.in_channels = layer_out_channels
 
         # ساخت بلوک‌های باقی‌مانده در لایه
         for _ in range(1, blocks):
             conv1_c = next(filter_iter)
             conv2_c = next(filter_iter)
-            layers.append(block(self.in_channels, out_channels, conv1_c, conv2_c))
+            conv3_c = next(filter_iter)
+            # برای بلوک‌های بعدی، ورودی برابر با خروجی استاندارد لایه است
+            layers.append(block(self.in_channels, layer_out_channels, conv1_c, conv2_c, conv3_c))
 
         return nn.Sequential(*layers)
 
@@ -186,25 +195,20 @@ print(f"Number of training samples: {len(train_dataset)}")
 print(f"Number of validation samples: {len(valid_dataset)}")
 print(f"Number of test samples: {len(test_dataset)}")
 
-
+# =============================================================================
+# مرحله 5: بارگذاری صحیح مدل، تعریف تابع هزینه و بهینه‌ساز
+# =============================================================================
 model = ResNet_pruned(Bottleneck_pruned, [3, 4, 6, 3])
 checkpoint = torch.load(PRUNED_MODEL_PATH, map_location=DEVICE)
 
-try:
-    model.load_state_dict(checkpoint['model_state_dict'], strict=False) # strict=False به بارگذاری کمک می‌کند
-    print("✅ مدل با موفقیت بارگذاری شد (با احتمال عدم تطابق جزئی).")
-except Exception as e:
-    print(f"خطا در بارگذاری وزن‌ها: {e}")
-    print("ممکن است نیاز به تطبیق دستی وزن‌ها باشد.")
-
+# با تعریف جدید، مدل باید بدون خطا و با strict=True بارگذاری شود
+model.load_state_dict(checkpoint['model_state_dict'], strict=True)
 model.to(DEVICE)
+print("✅ مدل با موفقیت و بدون خطا بارگذاری شد.")
 
 criterion = nn.BCEWithLogitsLoss()
 optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-# =============================================================================
-# مرحله 6: حلقه آموزش و اعتبارسنجی
-# =============================================================================
 best_val_acc = 0.0
 
 for epoch in range(NUM_EPOCHS):
@@ -262,9 +266,6 @@ for epoch in range(NUM_EPOCHS):
 
 print("\nFinished Training.")
 
-# =============================================================================
-# مرحله 7: ارزیابی نهایی روی داده‌های تست
-# =============================================================================
 model.load_state_dict(torch.load('/kaggle/working/best_finetuned_pruned_model.pth'))
 model.eval()
 
