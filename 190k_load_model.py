@@ -9,7 +9,7 @@ from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal
 checkpoint_path = '/kaggle/input/190k-pearson-pruned/pytorch/default/1/190k_pearson_pruned.pt'
 
 print("="*70)
-print("loading Student Sparse")
+print("Step 1: Load Student Sparse model")
 print("="*70)
 
 checkpoint = torch.load(checkpoint_path, map_location='cpu')
@@ -17,26 +17,25 @@ sparse_state_dict = checkpoint['student']
 
 student = ResNet_50_sparse_hardfakevsreal()
 student.load_state_dict(sparse_state_dict)
-print(" Student Sparse loaded")
+print("Student Sparse model loaded successfully.")
 
 print("\n" + "="*70)
-print("Learnable Mask Parameters (روش 2)")
+print("Step 2: Extract masks from Learnable Mask Parameters (Method 2)")
 print("="*70)
 
 def extract_masks_from_student(student_model):
-
     masks = []
     remaining_counts = []
     
-    print("\nextrct masks:\n")
+    print("\nExtracting masks:\n")
 
     if hasattr(student_model, 'mask_modules'):
         mask_modules = student_model.mask_modules
-        print(f"تعداد mask modules: {len(mask_modules)}\n")
+        print(f"Number of mask modules: {len(mask_modules)}\n")
         
         for idx, mask_module in enumerate(mask_modules):
             if hasattr(mask_module, 'mask_weight'):
-                mask_weight = mask_module.mask_weight  # شکل: (num_filters, 2, 1, 1)
+                mask_weight = mask_module.mask_weight  # shape: (num_filters, 2, 1, 1)
                 
                 mask = torch.argmax(mask_weight, dim=1).squeeze(1).squeeze(1)
                 
@@ -46,7 +45,7 @@ def extract_masks_from_student(student_model):
                 masks.append(mask)
                 remaining_counts.append(remaining)
 
-                if idx < 36:  # نمایش اطلاعات تفصیلی برای اولین layers
+                if idx < 36:  # Show detailed info for first layers
                     if idx % 3 == 0:
                         block_num = idx // 3
                         if idx < 9:
@@ -60,9 +59,9 @@ def extract_masks_from_student(student_model):
                         print(f"{layer_name}:")
                     
                     conv_num = (idx % 3) + 1
-                    print(f"  conv{conv_num}: {remaining}/{num_filters} فیلتر (Binary mask)")
+                    print(f"  conv{conv_num}: {remaining}/{num_filters} filters (Binary mask)")
     else:
-        print("❌ مدل mask_modules ندارد!")
+        print("Model does not have mask_modules.")
         return None, None
     
     return masks, remaining_counts
@@ -70,12 +69,11 @@ def extract_masks_from_student(student_model):
 masks, remaining_counts = extract_masks_from_student(student)
 
 if masks is not None:
-    print(f"\n✅ تعداد ماسک‌های ساخته شده: {len(masks)}")
-    print(f"✅ جمع فیلترهای باقی‌مانده: {sum(remaining_counts)}")
+    print(f"\nNumber of generated masks: {len(masks)}")
+    print(f"Total remaining filters: {sum(remaining_counts)}")
     
-    # نمایش لیست
     print("\n" + "="*70)
-    print("📋 فیلترهای باقی‌مانده:")
+    print("Remaining filters:")
     print("="*70)
     print("remaining_filters = [")
     
@@ -94,11 +92,11 @@ if masks is not None:
             idx += 3
     print("]")
 else:
-    print("❌ خطا در استخراج ماسک‌ها!")
+    print("Error in extracting masks.")
     raise RuntimeError("Cannot extract masks from student model")
 
 print("\n" + "="*70)
-print("مرحله 3: مقایسه روش‌های استخراج ماسک")
+print("Step 3: Compare mask extraction methods")
 print("="*70)
 
 def extract_masks_from_weights(state_dict):
@@ -133,38 +131,38 @@ def extract_masks_from_weights(state_dict):
 
 masks_old, remaining_counts_old = extract_masks_from_weights(sparse_state_dict)
 
-print("\n📊 مقایسه نتایج:\n")
-print(f"روش 1 (Norm-based):")
-print(f"  - تعداد ماسک‌ها: {len(masks_old)}")
-print(f"  - جمع فیلترهای باقی‌مانده: {sum(remaining_counts_old)}")
+print("\nComparison of results:\n")
+print(f"Method 1 (Norm-based):")
+print(f"  - Number of masks: {len(masks_old)}")
+print(f"  - Total remaining filters: {sum(remaining_counts_old)}")
 
-print(f"\nروش 2 (Learnable Mask-based):")
-print(f"  - تعداد ماسک‌ها: {len(masks)}")
-print(f"  - جمع فیلترهای باقی‌مانده: {sum(remaining_counts)}")
+print(f"\nMethod 2 (Learnable Mask-based):")
+print(f"  - Number of masks: {len(masks)}")
+print(f"  - Total remaining filters: {sum(remaining_counts)}")
 
-print(f"\n📈 تفاوت:")
-print(f"  - تفاوت در فیلترها: {sum(remaining_counts) - sum(remaining_counts_old)} فیلتر")
-print(f"  - درصد تفاوت: {((sum(remaining_counts) - sum(remaining_counts_old)) / sum(remaining_counts_old) * 100):.2f}%")
+print(f"\nDifference:")
+print(f"  - Difference in filters: {sum(remaining_counts) - sum(remaining_counts_old)} filters")
+print(f"  - Percentage difference: {((sum(remaining_counts) - sum(remaining_counts_old)) / sum(remaining_counts_old) * 100):.2f}%")
 
 print("\n" + "="*70)
-print("مرحله 4: ساخت مدل Pruned")
+print("Step 4: Build the Pruned model")
 print("="*70)
 
 try:
     model_pruned = ResNet_50_pruned_hardfakevsreal(masks=masks)
-    print("✅ مدل pruned با موفقیت ساخته شد!")
+    print("Pruned model built successfully.")
     
     total_params = sum(p.numel() for p in model_pruned.parameters())
-    print(f"✅ تعداد پارامترهای مدل pruned: {total_params:,}")
+    print(f"Number of parameters in pruned model: {total_params:,}")
     
 except Exception as e:
-    print(f"❌ خطا در ساخت مدل: {e}")
+    print(f"Error in building pruned model: {e}")
     import traceback
     traceback.print_exc()
     raise
 
 print("\n" + "="*70)
-print("مرحله 5: لود وزن‌ها در مدل Pruned")
+print("Step 5: Load weights into Pruned model")
 print("="*70)
 
 def load_pruned_weights(model_pruned, sparse_state_dict, masks):
@@ -191,7 +189,7 @@ def load_pruned_weights(model_pruned, sparse_state_dict, masks):
         ('layer4', 3),
     ]
     
-    print("\nلود وزن‌ها:\n")
+    print("\nLoading weights:\n")
     
     for layer_name, num_blocks in layer_configs:
         for block_idx in range(num_blocks):
@@ -216,7 +214,6 @@ def load_pruned_weights(model_pruned, sparse_state_dict, masks):
                     
                     print(f"{layer_name}.{block_idx}.conv{conv_idx}: {pruned_weight.shape}")
                     
-                    # BatchNorm
                     if sparse_bn_key in sparse_state_dict:
                         pruned_state_dict[f'{layer_name}.{block_idx}.bn{conv_idx}.weight'] = \
                             sparse_state_dict[sparse_bn_key][active_filters]
@@ -249,51 +246,51 @@ def load_pruned_weights(model_pruned, sparse_state_dict, masks):
 
 try:
     pruned_weights = load_pruned_weights(model_pruned, sparse_state_dict, masks)
-    print(f"\n✅ وزن‌های pruned آماده شد: {len(pruned_weights)} کلید")
+    print(f"\nPruned weights ready: {len(pruned_weights)} keys")
 
     missing, unexpected = model_pruned.load_state_dict(pruned_weights, strict=False)
-    print(f"✅ وزن‌ها لود شدند")
+    print(f"Weights loaded successfully.")
     print(f"   - Missing keys: {len(missing)}")
     print(f"   - Unexpected keys: {len(unexpected)}")
     
     if len(missing) > 0:
-        print(f"   - نمونه missing keys: {missing[:3]}")
+        print(f"   - Example missing keys: {missing[:3]}")
     if len(unexpected) > 0:
-        print(f"   - نمونه unexpected keys: {unexpected[:3]}")
+        print(f"   - Example unexpected keys: {unexpected[:3]}")
     
 except Exception as e:
-    print(f"❌ خطا در لود وزن‌ها: {e}")
+    print(f"Error loading weights: {e}")
     import traceback
     traceback.print_exc()
     raise
 
 print("\n" + "="*70)
-print("مرحله 6: تست مدل Pruned")
+print("Step 6: Test the Pruned model")
 print("="*70)
 
 try:
     model_pruned.eval()
     with torch.no_grad():
-        dummy_input = torch.randn(2, 3, 256, 256)
+        dummy_input = torch.randn(2, 3, 224, 224)
         output, features = model_pruned(dummy_input)
-        print(f"✅ تست موفق!")
-        print(f"   - شکل input: {dummy_input.shape}")
-        print(f"   - شکل output: {output.shape}")
-        print(f"   - تعداد feature maps: {len(features)}")
+        print(f"Test successful.")
+        print(f"   - Input shape: {dummy_input.shape}")
+        print(f"   - Output shape: {output.shape}")
+        print(f"   - Number of feature maps: {len(features)}")
         if len(features) > 0:
-            print(f"   - شکل اولین feature map: {features[0].shape}")
+            print(f"   - First feature map shape: {features[0].shape}")
 except Exception as e:
-    print(f"❌ خطا در تست: {e}")
+    print(f"Error during test: {e}")
     import traceback
     traceback.print_exc()
     raise
 
 print("\n" + "="*70)
-print("مرحله 7: ذخیره مدل Pruned")
+print("Step 7: Save the Pruned model")
 print("="*70)
 
 try:
-    save_path = '/kaggle/working/190k-resnet50_pruned_model_learnable_masks.pt'
+    save_path = '/kaggle/working/resnet50_base_pruned_model_learnable_masks.pt'
     
     checkpoint_to_save = {
         'model_state_dict': model_pruned.state_dict(),
@@ -306,31 +303,31 @@ try:
     }
     
     torch.save(checkpoint_to_save, save_path)
-    print(f"✅ مدل کامل ذخیره شد در: {save_path}")
+    print(f"Full model saved at: {save_path}")
     
     import os
     file_size_mb = os.path.getsize(save_path) / (1024 * 1024)
-    print(f"✅ حجم فایل: {file_size_mb:.2f} MB")
+    print(f"File size: {file_size_mb:.2f} MB")
     
-    save_path_weights = '/kaggle/working/190k-resnet50_pruned_weights_learnable_masks.pt'
+    save_path_weights = '/kaggle/working/resnet50_base_pruned_weights_learnable_masks.pt'
     torch.save(model_pruned.state_dict(), save_path_weights)
     file_size_weights_mb = os.path.getsize(save_path_weights) / (1024 * 1024)
-    print(f"✅ فقط وزن‌ها ذخیره شد در: {save_path_weights}")
-    print(f"✅ حجم فایل (فقط وزن‌ها): {file_size_weights_mb:.2f} MB")
+    print(f"Weights only saved at: {save_path_weights}")
+    print(f"File size (weights only): {file_size_weights_mb:.2f} MB")
     
-    print("\n📦 اطلاعات ذخیره شده:")
-    print(f"   - تعداد پارامترها: {total_params:,}")
-    print(f"   - تعداد ماسک‌ها: {len(masks)}")
-    print(f"   - جمع فیلترهای باقی‌مانده: {sum(remaining_counts)}")
-    print(f"   - روش استخراج: Learnable Mask Parameters (روش 2)")
+    print("\nSaved information:")
+    print(f"   - Number of parameters: {total_params:,}")
+    print(f"   - Number of masks: {len(masks)}")
+    print(f"   - Total remaining filters: {sum(remaining_counts)}")
+    print(f"   - Extraction method: Learnable Mask Parameters (Method 2)")
     if checkpoint_to_save['best_prec1']:
-        print(f"   - بهترین دقت: {checkpoint_to_save['best_prec1']:.2f}%")
+        print(f"   - Best accuracy: {checkpoint_to_save['best_prec1']:.2f}%")
     
 except Exception as e:
-    print(f"❌ خطا در ذخیره: {e}")
+    print(f"Error during save: {e}")
     import traceback
     traceback.print_exc()
 
 print("\n" + "="*70)
-print("🎉 تمام مراحل با موفقیت انجام شد!")
+print("All steps completed successfully.")
 print("="*70)
