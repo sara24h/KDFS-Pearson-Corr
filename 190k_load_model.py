@@ -9,7 +9,7 @@ from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal
 checkpoint_path = '/kaggle/input/190k-pearson-pruned/pytorch/default/1/190k_pearson_pruned.pt'
 
 print("="*70)
-print("مرحله 1: لود مدل Student Sparse")
+print("loading Student Sparse")
 print("="*70)
 
 checkpoint = torch.load(checkpoint_path, map_location='cpu')
@@ -17,10 +17,10 @@ sparse_state_dict = checkpoint['student']
 
 student = ResNet_50_sparse_hardfakevsreal()
 student.load_state_dict(sparse_state_dict)
-print("✅ مدل Student Sparse لود شد!")
+print(" Student Sparse loaded")
 
 print("\n" + "="*70)
-print("مرحله 2: استخراج ماسک‌ها از Learnable Mask Parameters (روش 2)")
+print("Learnable Mask Parameters (روش 2)")
 print("="*70)
 
 def extract_masks_from_student(student_model):
@@ -28,7 +28,7 @@ def extract_masks_from_student(student_model):
     masks = []
     remaining_counts = []
     
-    print("\nاستخراج ماسک‌ها:\n")
+    print("\nextrct masks:\n")
 
     if hasattr(student_model, 'mask_modules'):
         mask_modules = student_model.mask_modules
@@ -274,7 +274,7 @@ print("="*70)
 try:
     model_pruned.eval()
     with torch.no_grad():
-        dummy_input = torch.randn(2, 3, 224, 224)
+        dummy_input = torch.randn(2, 3, 256, 256)
         output, features = model_pruned(dummy_input)
         print(f"✅ تست موفق!")
         print(f"   - شکل input: {dummy_input.shape}")
@@ -293,7 +293,7 @@ print("مرحله 7: ذخیره مدل Pruned")
 print("="*70)
 
 try:
-    save_path = '/kaggle/working/resnet50_pruned_model_learnable_masks.pt'
+    save_path = '/kaggle/working/140k-resnet50_pruned_model_learnable_masks.pt'
     
     checkpoint_to_save = {
         'model_state_dict': model_pruned.state_dict(),
@@ -312,7 +312,7 @@ try:
     file_size_mb = os.path.getsize(save_path) / (1024 * 1024)
     print(f"✅ حجم فایل: {file_size_mb:.2f} MB")
     
-    save_path_weights = '/kaggle/working/resnet50_pruned_weights_learnable_masks.pt'
+    save_path_weights = '/kaggle/working/140k-resnet50_pruned_weights_learnable_masks.pt'
     torch.save(model_pruned.state_dict(), save_path_weights)
     file_size_weights_mb = os.path.getsize(save_path_weights) / (1024 * 1024)
     print(f"✅ فقط وزن‌ها ذخیره شد در: {save_path_weights}")
