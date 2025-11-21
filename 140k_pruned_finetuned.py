@@ -9,7 +9,10 @@ from tqdm import tqdm
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
 import sys
-from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
+
+# اضافه کردن پوشه مدل به path
+sys.path.append('/kaggle/working/model/pruned_model')
+from ResNet_pruned import ResNet_50_pruned_hardfakevsreal
 
 
 class WildDeepFakeDataset(Dataset):
@@ -67,6 +70,32 @@ def get_transforms(phase, mean, std):
         ])
 
 
+def fix_masks_for_training(model):
+    """
+    تبدیل masks به buffer و غیرفعال کردن gradient برای جلوگیری از مشکل inplace
+    """
+    def fix_block_masks(block):
+        if hasattr(block, 'masks') and block.masks is not None:
+            # تبدیل هر mask به tensor بدون gradient
+            fixed_masks = []
+            for mask in block.masks:
+                if isinstance(mask, torch.Tensor):
+                    # ایجاد کپی جدید بدون gradient
+                    fixed_mask = mask.detach().clone()
+                    fixed_mask.requires_grad = False
+                    fixed_masks.append(fixed_mask)
+                else:
+                    fixed_masks.append(mask)
+            block.masks = fixed_masks
+    
+    # اعمال به تمام blocks
+    for module in model.modules():
+        if hasattr(module, 'masks'):
+            fix_block_masks(module)
+    
+    return model
+
+
 def load_pruned_model(checkpoint_path, device):
     """لود کردن مدل هرس‌شده از checkpoint"""
     
@@ -76,11 +105,25 @@ def load_pruned_model(checkpoint_path, device):
     # استخراج masks از checkpoint
     masks = checkpoint['masks']
     
+    # تبدیل masks به tensor بدون gradient
+    fixed_masks = []
+    for mask in masks:
+        if isinstance(mask, torch.Tensor):
+            fixed_mask = mask.detach().clone()
+            fixed_mask.requires_grad = False
+            fixed_masks.append(fixed_mask)
+        else:
+            fixed_masks.append(mask)
+    
     # ساخت مدل با masks
-    model = ResNet_50_pruned_hardfakevsreal(masks=masks)
+    model = ResNet_50_pruned_hardfakevsreal(masks=fixed_masks)
     
     # لود کردن weights
     model.load_state_dict(checkpoint['model_state_dict'])
+    
+    # اصلاح masks در تمام blocks
+    model = fix_masks_for_training(model)
+    
     model = model.to(device)
     
     print(f"✅ مدل با موفقیت لود شد!")
@@ -90,7 +133,8 @@ def load_pruned_model(checkpoint_path, device):
 
 
 def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch):
-
+    """آموزش یک epoch"""
+    
     model.train()
     running_loss = 0.0
     all_preds = []
@@ -169,7 +213,7 @@ def validate(model, dataloader, criterion, device, phase='Valid'):
         'f1': f1,
         'auc': auc
     }
-
+ 
 def fine_tune(
     model_path,
     data_dir,
@@ -184,11 +228,13 @@ def fine_tune(
 ):
 
     os.makedirs(output_dir, exist_ok=True)
-
+    
+    # تنظیم device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     model = load_pruned_model(model_path, device)
-
+    
+    # تعریف transformations
     train_transform = get_transforms('train', mean, std)
     val_transform = get_transforms('val', mean, std)
     
@@ -344,12 +390,18 @@ if __name__ == "__main__":
     # تنظیمات
     MODEL_PATH = '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt'  # مسیر مدل هرس‌شده
     DATA_DIR = '/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k'    # مسیر دیتاست
-    OUTPUT_DIR = '/kaggle/working/140k_finetuned_pruned_model' # مسیر خروجی
+    OUTPUT_DIR = '/kaggle/working/140k_finetuned_model' # مسیر خروجی
     
-
+    # مقادیر mean و std (می‌تونی خودت تنظیم کنی)
+    # اگر برای دیتاست Wild-DeepFake محاسبه کردی، اینجا قرار بده
     MEAN = [0.5207,0.4258,0.3806]  # ImageNet defaults
     STD = [0.2490,0.2239,0.2212]   # ImageNet defaults
-
+    
+    # یا اگر مقادیر خودت رو داری:
+    # MEAN = [0.XXX, 0.XXX, 0.XXX]
+    # STD = [0.XXX, 0.XXX, 0.XXX]
+    
+    # شروع fine-tuning
     model, results = fine_tune(
         model_path=MODEL_PATH,
         data_dir=DATA_DIR,
