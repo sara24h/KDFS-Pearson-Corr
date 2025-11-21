@@ -9,10 +9,7 @@ from tqdm import tqdm
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
 import sys
-
-# اضافه کردن پوشه مدل به path
-sys.path.append('/kaggle/working/model/pruned_model')
-from ResNet_pruned import ResNet_50_pruned_hardfakevsreal
+from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
 
 
 class WildDeepFakeDataset(Dataset):
