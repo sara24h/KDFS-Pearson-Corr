@@ -350,7 +350,7 @@ def train_hesitant_fuzzy_ddp(ensemble_model, train_loader, val_loader, num_epoch
         train_acc = 100. * train_correct_tensor.item() / train_total_tensor.item()
         train_loss = train_loss_tensor.item() / train_total_tensor.item()
         avg_membership_var = np.mean(membership_vars)
-        val_acc = evaluate_accuracy_ddp(ensemble_model, val_loader, device, rank)
+        val_acc = evaluate_accuracy_ddp(ensemble_model, val_loader, device, rank, world_size)
         scheduler.step()
       
         if rank == 0:
@@ -446,7 +446,8 @@ def evaluate_ensemble_final_ddp_fixed(model, loader, device, name, model_names, 
     return acc, avg_weights.tolist(), avg_memberships.tolist()
     
 @torch.no_grad()
-def evaluate_accuracy_ddp(model, loader, device, rank):
+def evaluate_accuracy_ddp(model, loader, device, rank, world_size):
+ 
     model.eval()
     correct = total = 0
   
@@ -456,8 +457,14 @@ def evaluate_accuracy_ddp(model, loader, device, rank):
         pred = (outputs.squeeze(1) > 0).long()
         total += labels.size(0)
         correct += pred.eq(labels.long()).sum().item()
-  
-    acc = 100. * correct / total
+
+    correct_tensor = torch.tensor(correct, dtype=torch.long, device=device)
+    total_tensor = torch.tensor(total, dtype=torch.long, device=device)
+    
+    dist.all_reduce(correct_tensor, op=dist.ReduceOp.SUM)
+    dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
+    
+    acc = 100. * correct_tensor.item() / total_tensor.item()
     return acc
   
 def main():
