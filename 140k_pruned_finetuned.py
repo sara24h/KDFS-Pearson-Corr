@@ -67,32 +67,6 @@ def get_transforms(phase, mean, std):
         ])
 
 
-def fix_masks_for_training(model):
-    """
-    تبدیل masks به buffer و غیرفعال کردن gradient برای جلوگیری از مشکل inplace
-    """
-    def fix_block_masks(block):
-        if hasattr(block, 'masks') and block.masks is not None:
-            # تبدیل هر mask به tensor بدون gradient
-            fixed_masks = []
-            for mask in block.masks:
-                if isinstance(mask, torch.Tensor):
-                    # ایجاد کپی جدید بدون gradient
-                    fixed_mask = mask.detach().clone()
-                    fixed_mask.requires_grad = False
-                    fixed_masks.append(fixed_mask)
-                else:
-                    fixed_masks.append(mask)
-            block.masks = fixed_masks
-    
-    # اعمال به تمام blocks
-    for module in model.modules():
-        if hasattr(module, 'masks'):
-            fix_block_masks(module)
-    
-    return model
-
-
 def load_pruned_model(checkpoint_path, device):
     """لود کردن مدل هرس‌شده از checkpoint"""
     
@@ -102,11 +76,13 @@ def load_pruned_model(checkpoint_path, device):
     # استخراج masks از checkpoint
     masks = checkpoint['masks']
     
-    # تبدیل masks به tensor بدون gradient
+    # ✅ تبدیل masks به parameter برای اینکه gradient tracking نداشته باشند
+    # ولی در عین حال به device منتقل بشن
     fixed_masks = []
     for mask in masks:
         if isinstance(mask, torch.Tensor):
-            fixed_mask = mask.detach().clone()
+            # ساخت یک tensor جدید روی device مناسب بدون gradient
+            fixed_mask = mask.detach().clone().to(device)
             fixed_mask.requires_grad = False
             fixed_masks.append(fixed_mask)
         else:
@@ -118,10 +94,10 @@ def load_pruned_model(checkpoint_path, device):
     # لود کردن weights
     model.load_state_dict(checkpoint['model_state_dict'])
     
-    # اصلاح masks در تمام blocks
-    model = fix_masks_for_training(model)
-    
     model = model.to(device)
+    
+    # ✅ اطمینان از اینکه مدل در training mode قرار بگیره
+    model.train()
     
     print(f"✅ مدل با موفقیت لود شد!")
     print(f"📊 تعداد پارامترها: {sum(p.numel() for p in model.parameters()):,}")
@@ -144,6 +120,9 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch):
         
         # Forward
         optimizer.zero_grad()
+        
+        # ✅ استفاده از torch.no_grad() برای forward pass نیازی نیست
+        # چون می‌خوایم gradient محاسبه بشه
         outputs, _ = model(images)
         outputs = outputs.squeeze()
         loss = criterion(outputs, labels)
@@ -154,9 +133,10 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch):
         
         # محاسبه metrics
         running_loss += loss.item()
-        preds = (torch.sigmoid(outputs) > 0.5).float()
-        all_preds.extend(preds.cpu().numpy())
-        all_labels.extend(labels.cpu().numpy())
+        with torch.no_grad():
+            preds = (torch.sigmoid(outputs) > 0.5).float()
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
         
         pbar.set_postfix({'loss': f"{loss.item():.4f}"})
     
@@ -385,18 +365,12 @@ def fine_tune(
 
 if __name__ == "__main__":
     # تنظیمات
-    MODEL_PATH = '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt'  # مسیر مدل هرس‌شده
-    DATA_DIR = '/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k'    # مسیر دیتاست
-    OUTPUT_DIR = '/kaggle/working/140k_finetuned_model' # مسیر خروجی
+    MODEL_PATH = '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt'
+    DATA_DIR = '/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k'
+    OUTPUT_DIR = '/kaggle/working/140k_finetuned_model'
     
-    # مقادیر mean و std (می‌تونی خودت تنظیم کنی)
-    # اگر برای دیتاست Wild-DeepFake محاسبه کردی، اینجا قرار بده
-    MEAN = [0.5207,0.4258,0.3806]  # ImageNet defaults
-    STD = [0.2490,0.2239,0.2212]   # ImageNet defaults
-    
-    # یا اگر مقادیر خودت رو داری:
-    # MEAN = [0.XXX, 0.XXX, 0.XXX]
-    # STD = [0.XXX, 0.XXX, 0.XXX]
+    MEAN = [0.5207,0.4258,0.3806]
+    STD = [0.2490,0.2239,0.2212]
     
     # شروع fine-tuning
     model, results = fine_tune(
