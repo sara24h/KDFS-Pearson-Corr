@@ -8,14 +8,16 @@ import numpy as np
 from typing import List, Tuple, Dict
 import warnings
 import random
-import torch.optim.lr_scheduler as lr_scheduler
+import torch.optim.lr_scheduler as lr_scheduler 
+
+# 💡 فرض بر این است که ایمپورت مدل واقعی موفق است و مسیر درست است.
 from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal 
 
 warnings.filterwarnings("ignore")
 
-# ====================== بارگذاری مدل (مدل واقعی) ======================
+# ====================== بارگذاری مدل (مدل واقعی برای Fine-Tuning) ======================
 def load_pruned_models(model_paths: List[str], device: torch.device) -> List[nn.Module]:
-    """بارگذاری مدل‌های پایه هرس‌شده ResNet-50"""
+    """بارگذاری مدل‌های پایه هرس‌شده ResNet-50 و تنظیم برای Fine-Tuning."""
     
     if not model_paths:
         print("[ERROR] MODEL_PATHS cannot be empty for single model fine-tuning.")
@@ -23,10 +25,9 @@ def load_pruned_models(model_paths: List[str], device: torch.device) -> List[nn.
         
     path = model_paths[0]
     
-    
     masks = None
     try:
-        # بارگذاری چک پوینت برای استخراج ماسک و state_dict
+        # بارگذاری چک پوینت
         ckpt = torch.load(path, map_location='cpu', weights_only=False)
         masks = ckpt.get('masks')
         if masks is None:
@@ -34,18 +35,24 @@ def load_pruned_models(model_paths: List[str], device: torch.device) -> List[nn.
             
     except Exception as e:
         print(f"[ERROR] Could not load checkpoint from {path}: {e}")
-        # اگر چک‌پوینت لود نشود، ادامه Fine-Tuning غیرممکن است
         raise RuntimeError(f"Failed to load checkpoint for model initialization: {path}")
 
-    # ⬅️ نمونه‌سازی مدل واقعی (ResNet_50_pruned_hardfakevsreal)
+    # ⬅️ نمونه‌سازی مدل واقعی
     model = ResNet_50_pruned_hardfakevsreal(masks=masks)
     
     # بارگذاری وزن‌های مدل
     model.load_state_dict(ckpt['model_state_dict'])
-    model = model.to(device).eval() # در تابع fine_tune دوباره به train تغییر می‌کند
+    
+    # تنظیم مدل برای Fine-Tuning: انتقال به دیوایس و آماده‌سازی برای آموزش
+    model = model.to(device)
+    # 💡 توجه: مدل را در اینجا به .train() نمی‌بریم؛ در تابع fine_tune_single_model_executor این کار انجام می‌شود.
+    # اما اگر مدل هرس‌شده شما در حالت eval() بهینه‌تر عمل می‌کند (برای جلوگیری از تغییر وزن‌های هرس)،
+    # باید در تابع fine_tune بخش model.train() را به‌درستی مدیریت کنید.
+    # ما آن را به حالت پیش‌فرض (آموزش) می‌گذاریم.
     
     print(f"Loaded 1 ResNet_50 model using checkpoint path: {path}")
     return [model]
+
 # ====================== توابع کمکی (Single Process Setup) ======================
 def set_seed(seed: int = 42):
     random.seed(seed)
@@ -62,6 +69,7 @@ def worker_init_fn(worker_id):
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
+# ----------------------------------------------------------------------
 
 # ====================== DataLoaders (Single Process) ======================
 def create_dataloaders_single_gpu(base_dir: str, batch_size: int, num_workers: int = 2):
@@ -107,13 +115,16 @@ def create_dataloaders_single_gpu(base_dir: str, batch_size: int, num_workers: i
     
     return loaders['train'], loaders['valid'], loaders['test']
 
+# ----------------------------------------------------------------------
 
 # ====================== ارزیابی تک مدل ======================
 @torch.no_grad()
 def evaluate_single_model_ft(model: nn.Module, loader: DataLoader, device: torch.device, 
                              name: str, mean: Tuple[float], std: Tuple[float]) -> float:
     """ارزیابی یک مدل در حالت تک فرآیند"""
-    model.eval()
+    
+    # 💡 برای ارزیابی حتماً مدل را در حالت eval قرار دهید
+    model.eval() 
     correct = total = 0
     normalize = transforms.Normalize(mean=mean, std=std)
     
@@ -136,6 +147,7 @@ def evaluate_single_model_ft(model: nn.Module, loader: DataLoader, device: torch
         
     return acc
 
+# ----------------------------------------------------------------------
 
 # ====================== تابع اصلی Fine-Tuning (Single Process) ======================
 def fine_tune_single_model_executor(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, 
@@ -151,7 +163,9 @@ def fine_tune_single_model_executor(model: nn.Module, train_loader: DataLoader, 
     print(f" Total Trainable Params: {trainable_params:,}")
     print(f"{'#'*70}")
     
+    # 💡 برای آموزش حتماً مدل را در حالت train قرار دهید
     model.train()
+    # اطمینان از اینکه تمامی پارامترها قابل آموزش هستند
     for p in model.parameters():
         p.requires_grad = True
 
@@ -221,6 +235,8 @@ def fine_tune_single_model_executor(model: nn.Module, train_loader: DataLoader, 
     model.eval()
     return best_val_acc
 
+# ----------------------------------------------------------------------
+
 # ====================== MAIN FUNCTION (تک مدل و Hardcoded) ======================
 def main():
 
@@ -244,7 +260,6 @@ def main():
 
     # ====================== DATA & MODEL DEFINITION (فقط یک مدل) ======================
     
-    # مدل مد نظر شما:
     MODEL_PATHS = [
         '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt',
     ]
@@ -254,8 +269,7 @@ def main():
     
     os.makedirs(SAVE_DIR, exist_ok=True)
     
-    # بارگذاری مدل (اولین مدل)
-    # 💡 اکنون از تابع اصلاح شده استفاده می‌کند
+    # بارگذاری مدل 
     base_models = load_pruned_models(MODEL_PATHS, device)
     model = base_models[0]
 
@@ -287,7 +301,7 @@ def main():
             # بارگذاری بهترین مدل ذخیره شده
             ckpt = torch.load(best_ft_path, map_location=device, weights_only=False)
             
-            # ⚠️ مدل را با ماسک‌های درست (اگر وجود دارند) نمونه‌سازی می‌کنیم.
+            # مدل را با ماسک‌های درست (اگر وجود دارند) نمونه‌سازی می‌کنیم.
             model_eval = ResNet_50_pruned_hardfakevsreal(masks=ckpt.get('masks')).to(device).eval() 
             model_eval.load_state_dict(ckpt['model_state_dict'])
             
