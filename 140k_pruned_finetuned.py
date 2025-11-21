@@ -1,3 +1,11 @@
+# =============================================================================
+# مرحله 0: نصب کتابخانه‌های مورد نیاز (در صورت لزوم)
+# =============================================================================
+# !pip install torch torchvision scikit-learn tqdm
+
+# =============================================================================
+# مرحله 1: وارد کردن کتابخانه‌ها
+# =============================================================================
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -9,8 +17,13 @@ import numpy as np
 import warnings
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix
 
+# نادیده گرفتن هشدارهای غیرضروری برای خروجی تمیزتر
 warnings.filterwarnings("ignore")
 
+# =============================================================================
+# مرحله 2: تعریف مجدد معماری مدل هرس‌شده (ResNet_pruned)
+# این بخش بر اساس خروجی print(model) که ارائه دادید، بازسازی شده است.
+# =============================================================================
 class Bottleneck_pruned(nn.Module):
     expansion = 4
 
@@ -58,8 +71,6 @@ class ResNet_pruned(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
 
-        # ساخت لایه‌ها با تعداد کانال‌های دقیق هرس‌شده
-        # remaining_filters از خروجی شما استخراج شده است
         remaining_filters = [
             # layer1
             12, 12, 64, 11, 10, 59, 9, 11, 49,
@@ -82,7 +93,6 @@ class ResNet_pruned(nn.Module):
 
     def _make_layer(self, block, blocks, filter_iter, stride=1):
         downsample = None
-        # لایه اول هر گروه ممکن است نیاز به downsampling داشته باشد
         if stride != 1 or self.in_channels != 512 * block.expansion:
             out_channels_for_downsample = 256 if self.in_channels == 64 else 512
             downsample = nn.Sequential(
@@ -91,19 +101,16 @@ class ResNet_pruned(nn.Module):
             )
 
         layers = []
-        # ساخت بلوک اول با پارامترهای هرس‌شده
         conv1_c = next(filter_iter)
         conv2_c = next(filter_iter)
         conv3_c = next(filter_iter)
         layers.append(block(self.in_channels, 256 * block.expansion, conv1_c, conv2_c, conv3_c, stride, downsample))
         
-
         if self.in_channels == 64: self.in_channels = 256
         elif self.in_channels == 256: self.in_channels = 512
         elif self.in_channels == 512: self.in_channels = 1024
         elif self.in_channels == 1024: self.in_channels = 2048
 
-        # ساخت بلوک‌های بعدی
         for _ in range(1, blocks):
             conv1_c = next(filter_iter)
             conv2_c = next(filter_iter)
@@ -128,22 +135,22 @@ class ResNet_pruned(nn.Module):
         x = self.fc(x)
         return x
 
-
-DATA_DIR = '/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k' # <-- این مسیر را تغییر دهید
-
-PRUNED_MODEL_PATH = '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt' # <-- این مسیر را تغییر دهید
-
-MEAN = [0.5207,0.4258,0.3806]
-STD = [0.2490,0.2239,0.2212]
-
+# =============================================================================
+# مرحله 3: تنظیمات اولیه و پارامترها
+# =============================================================================
+DATA_DIR = '/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k'
+PRUNED_MODEL_PATH = '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt'
+MEAN = [0.5207, 0.4258, 0.3806]
+STD = [0.2490, 0.2239, 0.2212]
 BATCH_SIZE = 32
-NUM_EPOCHS = 15 # می‌توانید این مقدار را افزایش دهید
+NUM_EPOCHS = 15
 LEARNING_RATE = 1e-4
-
-# تنظیم دستگاه (GPU در صورت وجود)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 
+# =============================================================================
+# مرحله 4: آماده‌سازی داده‌ها (DataLoaders)
+# =============================================================================
 train_transforms = transforms.Compose([
     transforms.Resize((256, 256)),
     transforms.RandomHorizontalFlip(),
@@ -157,12 +164,10 @@ test_val_transforms = transforms.Compose([
     transforms.Normalize(mean=MEAN, std=STD)
 ])
 
-# ایجاد دیتاست‌ها با استفاده از ImageFolder
 train_dataset = datasets.ImageFolder(os.path.join(DATA_DIR, 'train'), transform=train_transforms)
 valid_dataset = datasets.ImageFolder(os.path.join(DATA_DIR, 'valid'), transform=test_val_transforms)
 test_dataset = datasets.ImageFolder(os.path.join(DATA_DIR, 'test'), transform=test_val_transforms)
 
-# ایجاد DataLoaderها
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
 valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
@@ -172,9 +177,30 @@ print(f"Number of training samples: {len(train_dataset)}")
 print(f"Number of validation samples: {len(valid_dataset)}")
 print(f"Number of test samples: {len(test_dataset)}")
 
+# =============================================================================
+# مرحله 5: بارگذاری صحیح مدل، تعریف تابع هزینه و بهینه‌ساز
+# =============================================================================
 
-model = torch.load(PRUNED_MODEL_PATH, map_location=DEVICE)
+# --- بارگذاری صحیح مدل از یک فایل چک‌پوینت (دیکشنری) ---
+
+# 1. ابتدا یک نمونه خالی از معماری مدل می‌سازیم
+model = ResNet_pruned(Bottleneck_pruned, [3, 4, 6, 3])
+
+# 2. فایل چک‌پوینت را که یک دیکشنری است، بارگذاری می‌کنیم
+checkpoint = torch.load(PRUNED_MODEL_PATH, map_location=DEVICE)
+
+# 3. وزن‌ها را از دیکشنری استخراج کرده و در مدل لود می‌کنیم
+try:
+    model.load_state_dict(checkpoint['model_state_dict'])
+except KeyError:
+    print("خطا: کلید 'model_state_dict' در فایل چک‌پوینت یافت نشد.")
+    print("کلیدهای موجود در فایل:", checkpoint.keys())
+    raise
+
+# 4. مدل را به دستگاه (GPU یا CPU) منتقل می‌کنیم
 model.to(DEVICE)
+
+print("✅ مدل با موفقیت بارگذاری شد.")
 
 # تابع هزینه برای دسته‌بندی دودویی
 criterion = nn.BCEWithLogitsLoss()
@@ -182,6 +208,9 @@ criterion = nn.BCEWithLogitsLoss()
 # بهینه‌ساز Adam
 optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
+# =============================================================================
+# مرحله 6: حلقه آموزش و اعتبارسنجی
+# =============================================================================
 best_val_acc = 0.0
 
 for epoch in range(NUM_EPOCHS):
@@ -234,7 +263,6 @@ for epoch in range(NUM_EPOCHS):
           f"Train Loss: {epoch_loss:.4f}, Train Acc: {epoch_acc:.2f}% | "
           f"Val Loss: {epoch_val_loss:.4f}, Val Acc: {epoch_val_acc:.2f}%")
 
-    # ذخیره بهترین مدل بر اساس دقت اعتبارسنجی
     if epoch_val_acc > best_val_acc:
         best_val_acc = epoch_val_acc
         torch.save(model.state_dict(), '/kaggle/working/best_finetuned_pruned_model.pth')
@@ -242,6 +270,9 @@ for epoch in range(NUM_EPOCHS):
 
 print("\nFinished Training.")
 
+# =============================================================================
+# مرحله 7: ارزیابی نهایی روی داده‌های تست
+# =============================================================================
 model.load_state_dict(torch.load('/kaggle/working/best_finetuned_pruned_model.pth'))
 model.eval()
 
@@ -258,7 +289,6 @@ with torch.no_grad():
         all_preds.extend(predicted.cpu().numpy())
         all_labels.extend(labels.numpy())
 
-# محاسبه معیارهای نهایی
 all_preds = np.array(all_preds).flatten()
 all_labels = np.array(all_labels)
 
