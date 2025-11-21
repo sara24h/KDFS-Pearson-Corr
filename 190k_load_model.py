@@ -6,7 +6,7 @@ sys.path.append('/kaggle/working')
 from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
 from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal
 
-checkpoint_path = '/kaggle/input/190k-pearson-seed2025-data/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt'
+checkpoint_path = '/kaggle/input/190k-pearson-pruned/pytorch/default/1/190k_pearson_pruned.pt'
 
 print("="*70)
 print("مرحله 1: لود مدل Student Sparse")
