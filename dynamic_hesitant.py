@@ -139,10 +139,11 @@ class FuzzyHesitantEnsemble(nn.Module):
       
         for i in list(active_model_indices):
             x_n = self.normalizations(x, i)
-            with torch.no_grad():
-                out = self.models[i](x_n)
-                if isinstance(out, (tuple, list)):
-                    out = out[0]
+            # FIX: Removed torch.no_grad() to allow gradients to flow for training the hesitant_fuzzy network.
+            # The base models' parameters are already frozen by setting requires_grad=False.
+            out = self.models[i](x_n)
+            if isinstance(out, (tuple, list)):
+                out = out[0]
             outputs[:, i] = out
       
         final_output = (outputs * final_weights.unsqueeze(-1)).sum(dim=1)
