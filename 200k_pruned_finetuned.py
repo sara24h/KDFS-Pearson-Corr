@@ -24,26 +24,20 @@ parser.add_argument('--learning_rate', type=float, default=1e-4, help='Initial l
 parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for regularization')
 parser.add_argument('--dropout_prob', type=float, default=0.5, help='Dropout probability')
 parser.add_argument('--patience', type=int, default=5, help='Patience for Early Stopping')
+parser.add_argument('--mean', type=float, nargs='+', default=[0.4668,0.3816,0.3414], help='Mean values for normalization')
+parser.add_argument('--std', type=float, nargs='+', default=[0.2410,0.2161,0.2081], help='Std values for normalization')
 
-# آرگومان‌های نرمال‌سازی
-parser.add_argument('--mean', type=float, nargs='+', default=[0.5207, 0.4258, 0.3806], help='Mean values for normalization')
-parser.add_argument('--std', type=float, nargs='+', default=[0.2490, 0.2239, 0.2212], help='Std values for normalization')
+parser.add_argument('--freeze_strategy', type=str, default='up_to_l4', 
+                    choices=['none', 'fc_only', 'up_to_l3', 'up_to_l4', 'from_l3'], 
+                    help="Strategy for freezing layers: 'none' (train all), 'fc_only' (freeze all but fc), 'up_to_l3' (freeze up to layer 3), 'up_to_l4' (freeze all but fc), 'from_l3' (train layer 3, 4 and fc)")
 
-# آرگومان استراتژی انجماد لایه‌ها
-parser.add_argument('--freeze_strategy', type=str, default='up_to_l4', choices=['none', 'fc_only', 'up_to_l3', 'up_to_l4'],
-                    help="Strategy for freezing layers: 'none' (train all), 'fc_only' (freeze all but fc), 'up_to_l3' (freeze up to layer 3), 'up_to_l4' (freeze all but fc)")
 
 args = parser.parse_args()
 
-# استفاده از آرگومان‌های خوانده شده
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 print(f"Hyperparameters: {vars(args)}")
 
-
-# =============================================================================
-# مرحله 2: تعریف معماری مدل هرس‌شده
-# =============================================================================
 class Bottleneck_pruned(nn.Module):
     expansion = 4
     def __init__(self, in_channels, out_channels, conv1_channels, conv2_channels, conv3_channels, stride=1, downsample=None):
@@ -85,7 +79,43 @@ class ResNet_pruned(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         self.dropout = nn.Dropout(p=dropout_prob)
-        remaining_filters = [12, 12, 64, 11, 10, 59, 9, 11, 49, 23, 21, 86, 22, 17, 86, 23, 17, 66, 21, 14, 56, 20, 48, 105, 54, 14, 95, 35, 11, 77, 42, 12, 50, 41, 7, 35, 28, 3, 41, 37, 55, 55, 78, 5, 67, 52, 16, 89]
+        
+        remaining_filters = [
+            # layer1.0
+            7, 5, 21,
+            # layer1.1
+            3, 4, 18,
+            # layer1.2
+            5, 7, 14,
+            # layer2.0
+            8, 12, 30,
+            # layer2.1
+            17, 9, 30,
+            # layer2.2
+            11, 9, 23,
+            # layer2.3
+            8, 7, 24,
+            # layer3.0
+            8, 9, 28,
+            # layer3.1
+            26, 8, 29,
+            # layer3.2
+            8, 5, 14,
+            # layer3.3
+            9, 7, 15,
+            # layer3.4
+            4, 3, 9,
+            # layer3.5
+            8, 2, 7,
+            # layer4.0
+            9, 9, 18,
+            # layer4.1
+            22, 3, 15,
+            # layer4.2
+            7, 5, 20,
+        ]
+        # =======================================================================
+        
         filter_iter = iter(remaining_filters)
         layer1_out_channels = 64 * block.expansion
         layer2_out_channels = 128 * block.expansion
@@ -117,9 +147,6 @@ class ResNet_pruned(nn.Module):
         x = self.avgpool(x); x = torch.flatten(x, 1); x = self.dropout(x); x = self.fc(x)
         return x
 
-# =============================================================================
-# مرحله 3: آماده‌سازی داده‌ها (DataLoaders)
-# =============================================================================
 train_transforms = transforms.Compose([
     transforms.Resize((256, 256)), transforms.RandomResizedCrop(256),
     transforms.RandomHorizontalFlip(), transforms.RandomRotation(15),
@@ -142,16 +169,12 @@ print(f"Number of training samples: {len(train_dataset)}")
 print(f"Number of validation samples: {len(valid_dataset)}")
 print(f"Number of test samples: {len(test_dataset)}")
 
-# =============================================================================
-# مرحله 4: بارگذاری مدل، انجماد لایه‌ها، تعریف تابع هزینه و بهینه‌ساز
-# =============================================================================
 model = ResNet_pruned(Bottleneck_pruned, [3, 4, 6, 3], dropout_prob=args.dropout_prob)
 checkpoint = torch.load(args.pruned_model_path, map_location=DEVICE)
 model.load_state_dict(checkpoint['model_state_dict'], strict=True)
 model.to(DEVICE)
 print("✅ مدل با موفقیت بارگذاری شد.")
 
-# --- تغییر کلیدی ۱: استخراج ماسک‌ها از چک‌پوینت اصلی ---
 try:
     masks = checkpoint['masks']
     print("✅ ماسک‌ها با موفقیت از چک‌پوینت اصلی استخراج شدند.")
@@ -159,13 +182,14 @@ except KeyError:
     print("⚠️  هشدار: کلید 'masks' در چک‌پوینت اصلی یافت نشد. ماسک‌ها ذخیره نخواهند شد.")
     masks = None # یا می‌توانید یک دیکشنری خالی ایجاد کنید
 
-# --- منطق انجماد لایه‌ها بر اساس استراتژی انتخاب شده ---
 if args.freeze_strategy == 'fc_only':
     layers_to_freeze = ['conv1', 'bn1', 'layer1', 'layer2', 'layer3', 'layer4']
 elif args.freeze_strategy == 'up_to_l3':
     layers_to_freeze = ['conv1', 'bn1', 'layer1', 'layer2', 'layer3']
 elif args.freeze_strategy == 'up_to_l4':
     layers_to_freeze = ['conv1', 'bn1', 'layer1', 'layer2', 'layer3', 'layer4']
+elif args.freeze_strategy == 'from_l3': # <--- این بخش جدید اضافه شد
+    layers_to_freeze = ['conv1', 'bn1', 'layer1', 'layer2']
 else: # 'none'
     layers_to_freeze = []
 
@@ -183,9 +207,6 @@ optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr
 criterion = nn.BCEWithLogitsLoss()
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3, verbose=True)
 
-# =============================================================================
-# مرحله 5: حلقه آموزش و اعتبارسنجی
-# =============================================================================
 best_val_acc = 0.0
 epochs_no_improve = 0
 for epoch in range(args.num_epochs):
