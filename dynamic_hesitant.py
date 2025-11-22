@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms, datasets
 import os
@@ -15,6 +15,7 @@ import argparse
 import shutil
 import json
 import random
+from sklearn.model_selection import train_test_split
 
 warnings.filterwarnings("ignore")
 
@@ -34,7 +35,81 @@ def worker_init_fn(worker_id):
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
-# ====================== DDP SETUP ======================
+# ====================== DATASET SPLIT FUNCTIONS ======================
+def create_reproducible_split(dataset, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=42):
+    """
+    Create reproducible train/val/test splits from a dataset
+    """
+    assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "Ratios must sum to 1.0"
+    
+    # Get all indices
+    num_samples = len(dataset)
+    indices = list(range(num_samples))
+    
+    # Get labels for stratified split
+    labels = [dataset.samples[i][1] for i in indices]
+    
+    # First split: separate test set
+    train_val_indices, test_indices = train_test_split(
+        indices, 
+        test_size=test_ratio, 
+        random_state=seed,
+        stratify=labels
+    )
+    
+    # Second split: separate train and val
+    train_val_labels = [labels[i] for i in train_val_indices]
+    val_size = val_ratio / (train_ratio + val_ratio)
+    
+    train_indices, val_indices = train_test_split(
+        train_val_indices,
+        test_size=val_size,
+        random_state=seed,
+        stratify=train_val_labels
+    )
+    
+    return train_indices, val_indices, test_indices
+
+def prepare_real_fake_dataset(base_dir, seed=42):
+    """
+    Prepare real-and-fake-face-detection dataset with reproducible splits
+    Expected structure:
+    base_dir/
+        real_and_fake_face/
+            training_fake/
+            training_real/
+    """
+    real_fake_dir = os.path.join(base_dir, 'real_and_fake_face')
+    
+    if not os.path.exists(real_fake_dir):
+        raise FileNotFoundError(f"Directory not found: {real_fake_dir}")
+    
+    # Create temporary full dataset
+    temp_transform = transforms.Compose([transforms.ToTensor()])
+    full_dataset = datasets.ImageFolder(real_fake_dir, transform=temp_transform)
+    
+    print(f"\n[Dataset Info]")
+    print(f"Total samples: {len(full_dataset)}")
+    print(f"Classes: {full_dataset.classes}")
+    print(f"Class to index: {full_dataset.class_to_idx}")
+    
+    # Create reproducible splits
+    train_indices, val_indices, test_indices = create_reproducible_split(
+        full_dataset, 
+        train_ratio=0.7, 
+        val_ratio=0.15, 
+        test_ratio=0.15, 
+        seed=seed
+    )
+    
+    print(f"\n[Split Statistics]")
+    print(f"Train: {len(train_indices)} samples ({len(train_indices)/len(full_dataset)*100:.1f}%)")
+    print(f"Valid: {len(val_indices)} samples ({len(val_indices)/len(full_dataset)*100:.1f}%)")
+    print(f"Test:  {len(test_indices)} samples ({len(test_indices)/len(full_dataset)*100:.1f}%)")
+    
+    return full_dataset, train_indices, val_indices, test_indices
+
+# =======================================================
 def setup_ddp():
     dist.init_process_group(backend='nccl')
     rank = int(os.environ['RANK'])
@@ -47,32 +122,6 @@ def cleanup_ddp():
     if dist.is_initialized():
         dist.destroy_process_group()
 
-# ====================== DATASET SELECTION ======================
-DATASET_CONFIGS = {
-    'wild': {
-        'name': 'Wild Deepfake Dataset (20k)',
-        'default_path': '/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k',
-        'structure': 'train/valid/test with real/fake subdirs',
-        'classes': ['real', 'fake'],
-        'class_to_idx': {'real': 0, 'fake': 1}
-    },
-    'real_fake_face': {
-        'name': 'Real and Fake Face Detection',
-        'default_path': '/kaggle/input/real-and-fake-face-prepared',
-        'structure': 'train/valid/test with real/fake subdirs',
-        'classes': ['fake', 'real'],
-        'class_to_idx': {'fake': 0, 'real': 1}
-    }
-}
-
-def get_dataset_info(dataset_name: str) -> Dict[str, Any]:
-    """دریافت اطلاعات دیتاست"""
-    if dataset_name not in DATASET_CONFIGS:
-        available = ', '.join(DATASET_CONFIGS.keys())
-        raise ValueError(f"Invalid dataset: {dataset_name}. Available: {available}")
-    return DATASET_CONFIGS[dataset_name]
-
-# ====================== MODEL CLASSES ======================
 class HesitantFuzzyMembership(nn.Module):
     def __init__(self, input_dim: int, num_models: int, num_memberships: int = 3, dropout: float = 0.3):
         super().__init__()
@@ -182,8 +231,7 @@ class FuzzyHesitantEnsemble(nn.Module):
         if return_details:
             return final_output, final_weights, all_memberships, outputs
         return final_output, final_weights
-
-# ====================== MODEL LOADING ======================
+      
 def load_pruned_models(model_paths: List[str], device: torch.device, rank: int) -> List[nn.Module]:
     try:
         from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
@@ -227,16 +275,15 @@ def load_pruned_models(model_paths: List[str], device: torch.device, rank: int) 
   
     return models
 
-# ====================== DATALOADER ======================
 def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size: int, 
-                           dataset_name: str, num_workers: int = 2):
+                          num_workers: int = 2, dataset_type: str = 'wild'):
+    """
+    Create dataloaders for either 'wild' (pre-split) or 'real_fake' (needs splitting) datasets
+    """
     if rank == 0:
-        dataset_info = get_dataset_info(dataset_name)
         print("="*70)
-        print(f"Creating DataLoaders: {dataset_info['name']}")
+        print(f"Creating DataLoaders with DDP (Dataset: {dataset_type})")
         print("="*70)
-        print(f"Dataset: {dataset_name}")
-        print(f"Base directory: {base_dir}")
     
     train_transform = transforms.Compose([
         transforms.Resize((256, 256)),
@@ -251,48 +298,113 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
         transforms.ToTensor(),
     ])
     
-    splits = ['train', 'valid', 'test']
-    datasets_dict = {}
-    
-    for split in splits:
-        path = os.path.join(base_dir, split)
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Folder not found: {path}")
-      
+    if dataset_type == 'wild':
+        # Original wild dataset (already split)
+        splits = ['train', 'valid', 'test']
+        datasets_dict = {}
+        
+        for split in splits:
+            path = os.path.join(base_dir, split)
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Folder not found: {path}")
+          
+            if rank == 0:
+                print(f"{split.capitalize():5}: {path}")
+          
+            transform = train_transform if split == 'train' else val_test_transform
+            datasets_dict[split] = datasets.ImageFolder(path, transform=transform)
+        
         if rank == 0:
-            print(f"{split.capitalize():5}: {path}")
-      
-        transform = train_transform if split == 'train' else val_test_transform
-        datasets_dict[split] = datasets.ImageFolder(path, transform=transform)
-    
-    if rank == 0:
-        print(f"\nDataset Stats:")
+            print(f"\nDataset Stats:")
+            for split, ds in datasets_dict.items():
+                print(f" {split.capitalize():5}: {len(ds):,} images | Classes: {ds.classes}")
+            print(f" Class → Index: {datasets_dict['train'].class_to_idx}\n")
+        
+        # Create loaders
+        loaders = {}
         for split, ds in datasets_dict.items():
-            print(f" {split.capitalize():5}: {len(ds):,} images | Classes: {ds.classes}")
-        print(f" Class → Index: {datasets_dict['train'].class_to_idx}\n")
+            if split == 'train':
+                sampler = DistributedSampler(ds, num_replicas=world_size, rank=rank, shuffle=True)
+                loader = DataLoader(ds, batch_size=batch_size, sampler=sampler,
+                                  num_workers=num_workers, pin_memory=True, drop_last=True,
+                                  worker_init_fn=worker_init_fn)
+            else:
+                loader = DataLoader(ds, batch_size=batch_size, shuffle=False,
+                                  num_workers=num_workers, pin_memory=True, drop_last=False,
+                                  worker_init_fn=worker_init_fn)
+            loaders[split] = loader
+        
+        train_loader = loaders['train']
+        val_loader = loaders['valid']
+        test_loader = loaders['test']
     
-    loaders = {}
-    for split, ds in datasets_dict.items():
-        if split == 'train':
-            sampler = DistributedSampler(ds, num_replicas=world_size, rank=rank, shuffle=True)
-            loader = DataLoader(ds, batch_size=batch_size, sampler=sampler,
-                              num_workers=num_workers, pin_memory=True, drop_last=True,
-                              worker_init_fn=worker_init_fn)
-        else:
-            loader = DataLoader(ds, batch_size=batch_size, shuffle=False,
-                              num_workers=num_workers, pin_memory=True, drop_last=False,
-                              worker_init_fn=worker_init_fn)
-        loaders[split] = loader
+    elif dataset_type == 'real_fake':
+        # Real-fake dataset (needs splitting)
+        if rank == 0:
+            print(f"Processing real-fake dataset from: {base_dir}")
+        
+        # Only rank 0 does the split preparation to avoid race conditions
+        if rank == 0:
+            full_dataset, train_indices, val_indices, test_indices = prepare_real_fake_dataset(
+                base_dir, seed=42
+            )
+        
+        dist.barrier()  # Wait for rank 0 to finish
+        
+        # All ranks load the dataset
+        temp_transform = transforms.Compose([transforms.ToTensor()])
+        full_dataset = datasets.ImageFolder(
+            os.path.join(base_dir, 'real_and_fake_face'), 
+            transform=temp_transform
+        )
+        
+        # Recreate splits (deterministic with same seed)
+        train_indices, val_indices, test_indices = create_reproducible_split(
+            full_dataset, seed=42
+        )
+        
+        # Create subset datasets with proper transforms
+        class TransformSubset(Subset):
+            def __init__(self, dataset, indices, transform):
+                super().__init__(dataset, indices)
+                self.transform = transform
+            
+            def __getitem__(self, idx):
+                img, label = self.dataset.samples[self.indices[idx]]
+                img = self.dataset.loader(img)
+                if self.transform:
+                    img = self.transform(img)
+                return img, label
+        
+        train_dataset = TransformSubset(full_dataset, train_indices, train_transform)
+        val_dataset = TransformSubset(full_dataset, val_indices, val_test_transform)
+        test_dataset = TransformSubset(full_dataset, test_indices, val_test_transform)
+        
+        # Create loaders
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler,
+                                 num_workers=num_workers, pin_memory=True, drop_last=True,
+                                 worker_init_fn=worker_init_fn)
+        
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
+                               num_workers=num_workers, pin_memory=True, drop_last=False,
+                               worker_init_fn=worker_init_fn)
+        
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,
+                                num_workers=num_workers, pin_memory=True, drop_last=False,
+                                worker_init_fn=worker_init_fn)
+    
+    else:
+        raise ValueError(f"Unknown dataset_type: {dataset_type}. Use 'wild' or 'real_fake'")
     
     if rank == 0:
         print(f"DataLoaders ready! Batch size per GPU: {batch_size}")
         print(f" Effective batch size: {batch_size * world_size}")
-        print(f" Batches per GPU → Train: {len(loaders['train'])}, Val: {len(loaders['valid'])}, Test: {len(loaders['test'])}")
+        print(f" Batches per GPU → Train: {len(train_loader)}, Val: {len(val_loader)}, Test: {len(test_loader)}")
         print("="*70 + "\n")
   
-    return loaders['train'], loaders['valid'], loaders['test']
+    return train_loader, val_loader, test_loader
 
-# ====================== EVALUATION ======================
 @torch.no_grad()
 def evaluate_single_model(model: nn.Module, loader: DataLoader, device: torch.device, name: str, rank: int) -> float:
     model.eval()
@@ -315,59 +427,7 @@ def evaluate_single_model(model: nn.Module, loader: DataLoader, device: torch.de
         print(f" {name}: {acc:.2f}%")
   
     return acc
-
-@torch.no_grad()
-def evaluate_accuracy_ddp(model, loader, device, rank):
-    model.eval()
-    correct = total = 0
   
-    for images, labels in loader:
-        images, labels = images.to(device), labels.to(device).float()
-        outputs, _ = model(images)
-        pred = (outputs.squeeze(1) > 0).long()
-        total += labels.size(0)
-        correct += pred.eq(labels.long()).sum().item()
-  
-    acc = 100. * correct / total
-    return acc
-
-@torch.no_grad()
-def evaluate_ensemble_final_ddp(model, loader, device, name, model_names, rank):
-    model.eval()
-    all_preds, all_labels, all_weights, all_memberships = [], [], [], []
-    
-    iterator = tqdm(loader, desc=f"Evaluating {name}") if rank == 0 else loader
-    
-    for images, labels in iterator:
-        images, labels = images.to(device), labels.to(device)
-        outputs, weights, memberships, _ = model(images, return_details=True)
-        pred = (outputs.squeeze(1) > 0).long()
-        all_preds.extend(pred.cpu().numpy())
-        all_labels.extend(labels.cpu().numpy())
-        all_weights.append(weights.cpu().numpy())
-        all_memberships.append(memberships.cpu().numpy())
-    
-    acc = 100. * np.mean(np.array(all_preds) == np.array(all_labels))
-    avg_weights = np.concatenate(all_weights).mean(axis=0)
-    avg_memberships = np.concatenate(all_memberships).mean(axis=0)
-    
-    if rank == 0:
-        print(f"\n{name} Results → Accuracy: {acc:.2f}%")
-        print("\nFinal Hesitant Fuzzy Weights:")
-        for i, (w, name) in enumerate(zip(avg_weights, model_names)):
-            print(f" Model {i+1} ({name}): {w:.4f} ({w*100:.2f}%)")
-      
-        print("\nHesitant Membership Values per Model:")
-        for i, name in enumerate(model_names):
-            memberships = avg_memberships[i]
-            variance = memberships.var()
-            print(f" Model {i+1} ({name}):")
-            print(f" Memberships: {[f'{m:.3f}' for m in memberships]}")
-            print(f" Variance (Hesitancy): {variance:.4f}")
-  
-    return acc, avg_weights.tolist(), avg_memberships.tolist()
-
-# ====================== TRAINING ======================
 def train_hesitant_fuzzy_ddp(ensemble_model, train_loader, val_loader, num_epochs, lr, device, save_dir, rank, world_size):
     if rank == 0:
         os.makedirs(save_dir, exist_ok=True)
@@ -475,109 +535,150 @@ def train_hesitant_fuzzy_ddp(ensemble_model, train_loader, val_loader, num_epoch
   
     return best_val_acc, history
 
-# ====================== MAIN ======================
+@torch.no_grad()
+def evaluate_ensemble_final_ddp(model, loader, device, name, model_names, rank):
+    model.eval()
+    all_preds, all_labels, all_weights, all_memberships = [], [], [], []
+    
+    iterator = tqdm(loader, desc=f"Evaluating {name}") if rank == 0 else loader
+    
+    for images, labels in iterator:
+        images, labels = images.to(device), labels.to(device)
+        outputs, weights, memberships, _ = model(images, return_details=True)
+        pred = (outputs.squeeze(1) > 0).long()
+        
+        all_preds.extend(pred.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+        all_weights.append(weights.cpu().numpy())
+        all_memberships.append(memberships.cpu().numpy())
+    
+    acc = 100. * np.mean(np.array(all_preds) == np.array(all_labels))
+    avg_weights = np.concatenate(all_weights).mean(axis=0)
+    avg_memberships = np.concatenate(all_memberships).mean(axis=0)
+    
+    if rank == 0:
+        print(f"\n{name} Results → Accuracy: {acc:.2f}%")
+        print("\nFinal Hesitant Fuzzy Weights:")
+        for i, (w, name) in enumerate(zip(avg_weights, model_names)):
+            print(f" Model {i+1} ({name}): {w:.4f} ({w*100:.2f}%)")
+      
+        print("\nHesitant Membership Values per Model:")
+        for i, name in enumerate(model_names):
+            memberships = avg_memberships[i]
+            variance = memberships.var()
+            print(f" Model {i+1} ({name}):")
+            print(f"   Memberships: {[f'{m:.3f}' for m in memberships]}")
+            print(f"   Variance (Hesitancy): {variance:.4f}")
+  
+    return acc, avg_weights.tolist(), avg_memberships.tolist()
+
+@torch.no_grad()
+def evaluate_accuracy_ddp(model, loader, device, rank):
+    model.eval()
+    correct = total = 0
+  
+    for images, labels in loader:
+        images, labels = images.to(device), labels.to(device).float()
+        outputs, _ = model(images)
+        pred = (outputs.squeeze(1) > 0).long()
+        total += labels.size(0)
+        correct += pred.eq(labels.long()).sum().item()
+  
+    acc = 100. * correct / total
+    return acc
+  
 def main():
+    # ====================== SET SEED BEFORE DDP ======================
     SEED = 42
     set_seed(SEED)
     
     # Setup DDP
     rank, local_rank, world_size = setup_ddp()
     device = torch.device(f'cuda:{local_rank}')
+  
     is_main = (rank == 0)
     
-    parser = argparse.ArgumentParser(description="Train Fuzzy Hesitant Ensemble with DDP - Multi-Dataset Support")
-    
-    # Dataset selection
-    parser.add_argument('--dataset', type=str, default='wild', 
-                        choices=list(DATASET_CONFIGS.keys()),
-                        help='نام دیتاست (wild یا real_fake_face)')
-    parser.add_argument('--data_dir', type=str, default=None,
-                        help='مسیر دیتاست (اگر مشخص نشود از مسیر پیش‌فرض استفاده می‌شود)')
-    
-    # Training parameters
+    parser = argparse.ArgumentParser(description="Train Fuzzy Hesitant Ensemble with DDP")
     parser.add_argument('--epochs', type=int, default=30)
     parser.add_argument('--lr', type=float, default=0.0001)
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size per GPU')
-    parser.add_argument('--num_memberships', type=int, default=3)
-    parser.add_argument('--save_dir', type=str, default='/kaggle/working/checkpoints')
-    parser.add_argument('--seed', type=int, default=SEED)
+    parser.add_argument('--num_memberships', type=int, default=3, help='Number of membership values per model')
+    
+    # Dataset selection
+    parser.add_argument('--dataset', type=str, choices=['wild', 'real_fake'], required=True,
+                       help='Dataset type: "wild" or "real_fake"')
+    parser.add_argument('--data_dir', type=str, required=True,
+                       help='Base directory of dataset')
     
     # Model paths
-    parser.add_argument('--model_paths', type=str, nargs='+', default=None,
-                        help='مسیرهای فایل‌های مدل (حداقل یک مدل)')
-    parser.add_argument('--model_names', type=str, nargs='+', default=None,
-                        help='نام‌های مدل‌ها (باید با تعداد model_paths برابر باشد)')
+    parser.add_argument('--model_paths', type=str, nargs='+', required=True,
+                       help='Paths to pruned model checkpoints')
+    parser.add_argument('--model_names', type=str, nargs='+', required=True,
+                       help='Names for each model (must match number of model_paths)')
+    
+    # Normalization parameters (optional, will use defaults if not provided)
+    parser.add_argument('--means', type=str, nargs='+', default=None,
+                       help='Mean values for each model as "r,g,b" (e.g., "0.52,0.42,0.38")')
+    parser.add_argument('--stds', type=str, nargs='+', default=None,
+                       help='Std values for each model as "r,g,b" (e.g., "0.25,0.22,0.22")')
+    
+    parser.add_argument('--save_dir', type=str, default='/kaggle/working/checkpoints')
+    parser.add_argument('--seed', type=int, default=SEED, help='Random seed for reproducibility')
     
     args = parser.parse_args()
     
-    # Override seed if provided
+    # Validate model arguments
+    if len(args.model_names) != len(args.model_paths):
+        raise ValueError(f"Number of model_names ({len(args.model_names)}) must match model_paths ({len(args.model_paths)})")
+    
+    # Parse normalization parameters
+    if args.means is None:
+        # Default means
+        MEANS = [(0.5207, 0.4258, 0.3806), (0.4868, 0.3972, 0.3624), (0.4668, 0.3816, 0.3414)]
+        MEANS = MEANS[:len(args.model_paths)]
+    else:
+        if len(args.means) != len(args.model_paths):
+            raise ValueError(f"Number of means ({len(args.means)}) must match model_paths ({len(args.model_paths)})")
+        MEANS = [tuple(map(float, m.split(','))) for m in args.means]
+    
+    if args.stds is None:
+        # Default stds
+        STDS = [(0.2490, 0.2239, 0.2212), (0.2296, 0.2066, 0.2009), (0.2410, 0.2161, 0.2081)]
+        STDS = STDS[:len(args.model_paths)]
+    else:
+        if len(args.stds) != len(args.model_paths):
+            raise ValueError(f"Number of stds ({len(args.stds)}) must match model_paths ({len(args.model_paths)})")
+        STDS = [tuple(map(float, s.split(','))) for s in args.stds]
+    
+    # Override seed if provided via CLI
     if args.seed != SEED:
         set_seed(args.seed)
     
-    # Get dataset info
-    dataset_info = get_dataset_info(args.dataset)
-    data_dir = args.data_dir if args.data_dir else dataset_info['default_path']
-    
-    # مقادیر ثابت MEANS و STDS (برای همه حالت‌ها)
-    FIXED_MEANS = [(0.5207,0.4258,0.3806), (0.4868,0.3972,0.3624), (0.4668,0.3816,0.3414)]
-    FIXED_STDS = [(0.2490,0.2239,0.2212), (0.2296,0.2066,0.2009), (0.2410,0.2161,0.2081)]
-    
-    # Setup model configurations
-    if args.model_paths is not None:
-        MODEL_PATHS = args.model_paths
-        
-        # Model names
-        if args.model_names is not None:
-            if len(args.model_names) != len(MODEL_PATHS):
-                raise ValueError(f"تعداد model_names ({len(args.model_names)}) باید با model_paths ({len(MODEL_PATHS)}) برابر باشد")
-            MODEL_NAMES = args.model_names
-        else:
-            # استخراج نام از مسیر فایل
-            MODEL_NAMES = [os.path.splitext(os.path.basename(p))[0] for p in MODEL_PATHS]
-        
-        MEANS = []
-        STDS = []
-        for i in range(len(MODEL_PATHS)):
-            MEANS.append(FIXED_MEANS[i % len(FIXED_MEANS)])
-            STDS.append(FIXED_STDS[i % len(FIXED_STDS)])
-        
-        if is_main and len(MODEL_PATHS) > len(FIXED_MEANS):
-            print(f"[INFO] تعداد مدل‌ها ({len(MODEL_PATHS)}) بیشتر از مقادیر ثابت ({len(FIXED_MEANS)}) است.")
-            print(f"[INFO] مقادیر MEANS/STDS به صورت چرخشی تکرار می‌شوند.")
-    else:
-        # مقادیر پیش‌فرض (مدل‌های قبلی)
-        MODEL_PATHS = [
-            '/kaggle/input/140k-pearson-pruned/pytorch/default/1/140k_pearson_pruned.pt',
-            '/kaggle/input/190k-pearson-pruned/pytorch/default/1/190k_pearson_pruned.pt',
-            '/kaggle/input/200k-pearson-pruned/pytorch/default/1/200k_kdfs_pruned.pt',
-        ]
-        MODEL_NAMES = ["140k_pearson", "190k_pearson", "200k_kdfs"]
-        MEANS = FIXED_MEANS
-        STDS = FIXED_STDS
-    
     if is_main:
-        print("="*70)
+        print(f"="*70)
         print(f"Multi-GPU Training with DDP | SEED: {args.seed}")
-        print("="*70)
-        print(f"Selected Dataset: {dataset_info['name']}")
-        print(f"Dataset ID: {args.dataset}")
-        print(f"Data Directory: {data_dir}")
+        print(f"="*70)
         print(f"World Size: {world_size} GPUs")
-        print(f"Batch size per GPU: {args.batch_size}")
-        print(f"Effective batch size: {args.batch_size * world_size}")
-        print(f"\nModels to Load: {len(MODEL_PATHS)}")
-        for i, (path, name) in enumerate(zip(MODEL_PATHS, MODEL_NAMES)):
-            print(f"  [{i+1}] {name}: {path}")
-        print("="*70 + "\n")
+        print(f"Rank: {rank} | Local Rank: {local_rank} | Device: {device}")
+        print(f"Batch size per GPU: {args.batch_size} | Effective batch size: {args.batch_size * world_size}")
+        print(f"Dataset: {args.dataset}")
+        print(f"Data directory: {args.data_dir}")
+        print(f"\nModels to load:")
+        for i, (path, name) in enumerate(zip(args.model_paths, args.model_names)):
+            print(f"  {i+1}. {name}: {path}")
+        print(f"="*70 + "\n")
     
-    base_models = load_pruned_models(MODEL_PATHS, device, rank)
-    
-    if len(base_models) != len(MODEL_PATHS):
+    # Load models
+    base_models = load_pruned_models(args.model_paths, device, rank)
+  
+    if len(base_models) != len(args.model_paths):
         if is_main:
-            print(f"[WARNING] Only {len(base_models)}/{len(MODEL_PATHS)} models loaded.")
+            print(f"[WARNING] Only {len(base_models)}/{len(args.model_paths)} models loaded. Adjusting parameters.")
         MEANS = MEANS[:len(base_models)]
         STDS = STDS[:len(base_models)]
-        MODEL_NAMES = MODEL_NAMES[:len(base_models)]
+        MODEL_NAMES = args.model_names[:len(base_models)]
+    else:
+        MODEL_NAMES = args.model_names
     
     # Create ensemble
     ensemble = FuzzyHesitantEnsemble(
@@ -587,79 +688,83 @@ def main():
         cum_weight_threshold=0.9,
         hesitancy_threshold=0.2
     ).to(device)
-    
+  
     ensemble = DDP(ensemble, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
-    
+  
     if is_main:
         hesitant_net = ensemble.module.hesitant_fuzzy
         trainable = sum(p.numel() for p in hesitant_net.parameters())
         total_params = sum(p.numel() for p in ensemble.parameters())
-        print(f"Total params: {total_params:,} | Trainable: {trainable:,}\n")
+        print(f"Total params: {total_params:,} | Trainable: {trainable:,} | Frozen: {total_params - trainable:,}\n")
     
-    # Create dataloaders
+    # Create dataloaders based on dataset type
     train_loader, val_loader, test_loader = create_dataloaders_ddp(
-        data_dir, args.batch_size, rank, world_size, args.dataset
+        args.data_dir, args.batch_size, rank, world_size, dataset_type=args.dataset
     )
-    
+  
     # Evaluate individual models
     if is_main:
         print("\n" + "="*70)
-        print("EVALUATING INDIVIDUAL MODELS (Before Training)")
+        print("EVALUATING INDIVIDUAL MODELS ON TEST SET (Before Training)")
         print("="*70)
         individual_accs = []
         for i, model in enumerate(base_models):
             acc = evaluate_single_model(model, test_loader, device, f"Model {i+1} ({MODEL_NAMES[i]})", rank)
             individual_accs.append(acc)
-        
         best_single = max(individual_accs)
         best_idx = individual_accs.index(best_single)
         print(f"\nBest Single Model: Model {best_idx+1} ({MODEL_NAMES[best_idx]}) → {best_single:.2f}%")
-    
+      
     dist.barrier()
     
-    # Train
+    # Train ensemble
     best_val_acc, history = train_hesitant_fuzzy_ddp(
         ensemble, train_loader, val_loader,
         args.epochs, args.lr, device, args.save_dir, rank, world_size
     )
-    
-    # Load best model
+  
+    # Load best checkpoint
     ckpt_path = os.path.join(args.save_dir, 'best_hesitant_fuzzy.pt')
+  
     if os.path.exists(ckpt_path):
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         ensemble.module.hesitant_fuzzy.load_state_dict(ckpt['hesitant_state_dict'])
         if is_main:
-            print("Best model loaded.\n")
-    
+            print("Best hesitant fuzzy network loaded.\n")
+  
     dist.barrier()
-    
+  
     # Final evaluation
     if is_main:
         print("\n" + "="*70)
-        print("FINAL EVALUATION")
+        print("EVALUATING FUZZY HESITANT ENSEMBLE")
         print("="*70)
-        
         ensemble_test_acc, ensemble_weights, membership_values = evaluate_ensemble_final_ddp(
             ensemble, test_loader, device, "Test", MODEL_NAMES, rank
         )
         
         print("\n" + "="*70)
-        print("RESULTS SUMMARY")
+        print("FINAL COMPARISON")
         print("="*70)
-        print(f"Dataset: {dataset_info['name']}")
-        print(f"Best Single Model: {best_single:.2f}%")
-        print(f"Hesitant Ensemble: {ensemble_test_acc:.2f}%")
-        print(f"Improvement: {ensemble_test_acc - best_single:+.2f}%")
+        print(f"Best Single Model Acc : {best_single:.2f}%")
+        print(f"Hesitant Ensemble Acc : {ensemble_test_acc:.2f}%")
+        improvement = ensemble_test_acc - best_single
+        print(f"Improvement           : {improvement:+.2f}%")
         
-        # Save results with seed
+        # Save results
         results = {
             "method": "Fuzzy Hesitant Sets (DDP)",
-            "seed": args.seed,
             "dataset": args.dataset,
+            "data_dir": args.data_dir,
+            "seed": args.seed,
             "num_gpus": world_size,
             "num_memberships": args.num_memberships,
+            "model_paths": args.model_paths,
             "model_names": MODEL_NAMES,
-            "model_paths": MODEL_PATHS,
+            "normalization": {
+                "means": [list(m) for m in MEANS],
+                "stds": [list(s) for s in STDS]
+            },
             "individual_accuracies": {MODEL_NAMES[i]: acc for i, acc in enumerate(individual_accs)},
             "best_single": {"name": MODEL_NAMES[best_idx], "acc": best_single},
             "ensemble": {
@@ -667,28 +772,28 @@ def main():
                 "weights": ensemble_weights,
                 "membership_values": membership_values
             },
-            "improvement": ensemble_test_acc - best_single
+            "improvement": improvement,
+            "training_history": history
         }
         
         result_path = os.path.join(args.save_dir, 'hesitant_fuzzy_ddp_results.json')
-        
+      
         with open(result_path, 'w') as f:
             json.dump(results, f, indent=2)
         print(f"\nResults saved to: {result_path}")
-        
+      
         final_model_path = os.path.join(args.save_dir, 'hesitant_fuzzy_ddp_final.pt')
         torch.save({
             'hesitant_state_dict': ensemble.module.hesitant_fuzzy.state_dict(),
             'results': results,
             'args': vars(args)
         }, final_model_path)
-        
+      
         print(f"Final model saved: {final_model_path}")
         print("="*70)
-        print("Training completed successfully!")
-        print("="*70)
+        print("All done!")
     
     cleanup_ddp()
-
+  
 if __name__ == "__main__":
     main()
