@@ -75,14 +75,27 @@ def prepare_real_fake_dataset(base_dir, seed=42):
     Prepare real-and-fake-face-detection dataset with reproducible splits
     Expected structure:
     base_dir/
+        training_fake/
+        training_real/
+    OR
+    base_dir/
         real_and_fake_face/
             training_fake/
             training_real/
     """
-    real_fake_dir = os.path.join(base_dir, 'real_and_fake_face')
-    
-    if not os.path.exists(real_fake_dir):
-        raise FileNotFoundError(f"Directory not found: {real_fake_dir}")
+    # Check if base_dir directly contains training folders
+    if os.path.exists(os.path.join(base_dir, 'training_fake')) and \
+       os.path.exists(os.path.join(base_dir, 'training_real')):
+        real_fake_dir = base_dir
+    # Check if there's a nested real_and_fake_face folder
+    elif os.path.exists(os.path.join(base_dir, 'real_and_fake_face')):
+        real_fake_dir = os.path.join(base_dir, 'real_and_fake_face')
+    else:
+        raise FileNotFoundError(
+            f"Could not find training_fake/training_real in:\n"
+            f"  - {base_dir}\n"
+            f"  - {os.path.join(base_dir, 'real_and_fake_face')}"
+        )
     
     # Create temporary full dataset
     temp_transform = transforms.Compose([transforms.ToTensor()])
@@ -351,12 +364,18 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
         
         dist.barrier()  # Wait for rank 0 to finish
         
+        # Determine the correct directory path
+        if os.path.exists(os.path.join(base_dir, 'training_fake')) and \
+           os.path.exists(os.path.join(base_dir, 'training_real')):
+            dataset_dir = base_dir
+        elif os.path.exists(os.path.join(base_dir, 'real_and_fake_face')):
+            dataset_dir = os.path.join(base_dir, 'real_and_fake_face')
+        else:
+            raise FileNotFoundError(f"Could not find training folders in {base_dir}")
+        
         # All ranks load the dataset
         temp_transform = transforms.Compose([transforms.ToTensor()])
-        full_dataset = datasets.ImageFolder(
-            os.path.join(base_dir, 'real_and_fake_face'), 
-            transform=temp_transform
-        )
+        full_dataset = datasets.ImageFolder(dataset_dir, transform=temp_transform)
         
         # Recreate splits (deterministic with same seed)
         train_indices, val_indices, test_indices = create_reproducible_split(
