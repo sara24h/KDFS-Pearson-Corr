@@ -214,8 +214,6 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
         transforms.ToTensor(),
     ])
     
-    # *** تغییر کلیدی: حذف نرمال‌سازی از DataLoader ***
-    # نرمال‌سازی در داخل توابع ارزیابی انجام می‌شود
     val_test_transform = transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.ToTensor(),
@@ -271,44 +269,6 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
     return loaders['train'], loaders['valid'], loaders['test']
 
 @torch.no_grad()
-def evaluate_single_model(model: nn.Module, loader: DataLoader, device: torch.device, 
-                          name: str, rank: int, world_size: int, model_idx: int, 
-                          means: List[Tuple[float]], stds: List[Tuple[float]]) -> float:
-    """ارزیابی یک مدل با استفاده از همان نرمال‌سازی انسامبل"""
-    model.eval()
-    correct = total = 0
-  
-    iterator = tqdm(loader, desc=f"Evaluating {name}") if rank == 0 else loader
-
-    temp_normalizer = MultiModelNormalization(means, stds).to(device)
-
-    for images, labels in iterator:
-        images, labels = images.to(device), labels.to(device).float()
-        
-        # استفاده از نرمال‌ساز برای نرمال‌سازی تصاویر بر اساس مدل مربوطه
-        images_normalized = temp_normalizer(images, model_idx)
-        
-        out = model(images_normalized)
-        if isinstance(out, (tuple, list)):
-            out = out[0]
-        pred = (out.squeeze(1) > 0).long()
-        total += labels.size(0)
-        correct += pred.eq(labels.long()).sum().item()
-    
-    # جمع‌آوری نتایج از همه GPU‌ها
-    correct_tensor = torch.tensor(correct, dtype=torch.float32).to(device)
-    total_tensor = torch.tensor(total, dtype=torch.float32).to(device)
-    
-    dist.all_reduce(correct_tensor, op=dist.ReduceOp.SUM)
-    dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
-    
-    acc = 100. * correct_tensor.item() / total_tensor.item()
-  
-    if rank == 0:
-        print(f" {name}: {acc:.2f}%")
-  
-    return acc
-  
 def train_hesitant_fuzzy_ddp(ensemble_model, train_loader, val_loader, num_epochs, lr, 
                               device, save_dir, rank, world_size):
     if rank == 0:
@@ -421,7 +381,6 @@ def train_hesitant_fuzzy_ddp(ensemble_model, train_loader, val_loader, num_epoch
 
 @torch.no_grad()
 def evaluate_ensemble_final_ddp(model, loader, device, name, model_names, rank, world_size):
-    """ارزیابی نهایی ensemble با جمع‌آوری نتایج از همه GPU‌ها"""
     model.eval()
     
     all_preds = []
@@ -441,22 +400,18 @@ def evaluate_ensemble_final_ddp(model, loader, device, name, model_names, rank, 
         all_weights.append(weights)
         all_memberships.append(memberships)
     
-    # ترکیب batch‌ها
     all_preds = torch.cat(all_preds)
     all_labels = torch.cat(all_labels)
     all_weights = torch.cat(all_weights, dim=0)
     all_memberships = torch.cat(all_memberships, dim=0)
     
-    # جمع‌آوری از همه GPU‌ها
     gathered_preds = [torch.zeros_like(all_preds) for _ in range(world_size)]
     gathered_labels = [torch.zeros_like(all_labels) for _ in range(world_size)]
-    
-    dist.all_gather(gathered_preds, all_preds)
-    dist.all_gather(gathered_labels, all_labels)
-    
     gathered_weights = [torch.zeros_like(all_weights) for _ in range(world_size)]
     gathered_memberships = [torch.zeros_like(all_memberships) for _ in range(world_size)]
     
+    dist.all_gather(gathered_preds, all_preds)
+    dist.all_gather(gathered_labels, all_labels)
     dist.all_gather(gathered_weights, all_weights)
     dist.all_gather(gathered_memberships, all_memberships)
     
@@ -465,7 +420,6 @@ def evaluate_ensemble_final_ddp(model, loader, device, name, model_names, rank, 
     avg_memberships_list = None
     
     if rank == 0:
-        # ترکیب نتایج از همه GPU‌ها
         all_preds_final = torch.cat(gathered_preds).cpu().numpy()
         all_labels_final = torch.cat(gathered_labels).cpu().numpy()
         all_weights_final = torch.cat(gathered_weights, dim=0).cpu().numpy()
@@ -496,7 +450,6 @@ def evaluate_ensemble_final_ddp(model, loader, device, name, model_names, rank, 
 
 @torch.no_grad()
 def evaluate_accuracy_ddp(model, loader, device, rank, world_size):
-    """ارزیابی accuracy با جمع‌آوری از همه GPU‌ها"""
     model.eval()
     correct = total = 0
   
@@ -507,7 +460,6 @@ def evaluate_accuracy_ddp(model, loader, device, rank, world_size):
         total += labels.size(0)
         correct += pred.eq(labels.long()).sum().item()
     
-    # جمع‌آوری از همه GPU‌ها
     correct_tensor = torch.tensor(correct, dtype=torch.float32).to(device)
     total_tensor = torch.tensor(total, dtype=torch.float32).to(device)
     
@@ -518,11 +470,9 @@ def evaluate_accuracy_ddp(model, loader, device, rank, world_size):
     return acc
   
 def main():
-    # ====================== SET SEED BEFORE DDP ======================
     SEED = 42
     set_seed(SEED)
     
-    # Setup DDP
     rank, local_rank, world_size = setup_ddp()
     device = torch.device(f'cuda:{local_rank}')
   
@@ -535,12 +485,12 @@ def main():
     parser.add_argument('--num_memberships', type=int, default=3, help='Number of membership values per model')
     parser.add_argument('--data_dir', type=str, default='/kaggle/input/20k-wild-deepfake-dataset/wild-dataset_20k')
     parser.add_argument('--save_dir', type=str, default='/kaggle/working/checkpoints')
-    parser.add_argument('--seed', type=int, default=SEED, help='Random seed for reproducibility')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--num_workers', type=int, default=2, help='Number of data loading workers')
     
     args = parser.parse_args()
     
-    # Override seed if provided via CLI
+    # Override seed if provided
     if args.seed != SEED:
         set_seed(args.seed)
     
@@ -555,13 +505,12 @@ def main():
     
     # Models
     MODEL_PATHS = [
-        '/kaggle/input/140k-pruned-fintuned-/pytorch/default/1/best_model (1).pth',
-        '/kaggle/input/190k-pearson-pruned/pytorch/default/1/190k_pearson_pruned.pt',
-        '/kaggle/input/200k-pearson-pruned/pytorch/default/1/200k_kdfs_pruned.pt',
+        '/kaggle/input/140k-pearson-seed2025/pytorch/default/1/140k_final.pt',
+        '/kaggle/input/190k-pearson-seed2025/pytorch/default/1/190k_final.pt',
+        '/kaggle/input/200k-pearson-seed456/pytorch/default/1/200k_final.pt',
     ]
   
     MODEL_NAMES = ["140k_pearson", "190k_pearson", "200k_kdfs"]
-
     MEANS = [(0.5207,0.4258,0.3806), (0.4868,0.3972,0.3624), (0.4668,0.3816,0.3414)]
     STDS = [(0.2490,0.2239,0.2212), (0.2296,0.2066,0.2009), (0.2410,0.2161,0.2081)]
   
@@ -594,30 +543,7 @@ def main():
         args.data_dir, args.batch_size, rank, world_size, args.num_workers
     )
   
-    # همگام‌سازی قبل از evaluation
-    dist.barrier()
-    
-    individual_accs = []
-    if is_main:
-        print("\n" + "="*70)
-        print("EVALUATING INDIVIDUAL MODELS ON TEST SET (Before Training)")
-        print("="*70)
-    
-    # ارزیابی هر مدل به صورت جداگانه
-    for i, model in enumerate(base_models):
-        # *** تغییر کلیدی: ارسال لیست کامل MEANS و STDS به تابع ارزیابی ***
-        acc = evaluate_single_model(model, test_loader, device, 
-                                    f"Model {i+1} ({MODEL_NAMES[i]})", rank, world_size, i, MEANS, STDS)
-        individual_accs.append(acc)
-    
-    if is_main:
-        best_single = max(individual_accs)
-        best_idx = individual_accs.index(best_single)
-        print(f"\nBest Single Model: Model {best_idx+1} ({MODEL_NAMES[best_idx]}) → {best_single:.2f}%")
-    else:
-        best_single = None
-        best_idx = None
-      
+    # همگام‌سازی قبل از آموزش
     dist.barrier()
     
     # آموزش ensemble
@@ -628,13 +554,11 @@ def main():
   
     # بارگذاری بهترین مدل
     ckpt_path = os.path.join(args.save_dir, 'best_hesitant_fuzzy.pt')
-  
     if os.path.exists(ckpt_path):
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         ensemble.module.hesitant_fuzzy.load_state_dict(ckpt['hesitant_state_dict'])
         if is_main:
             print("✓ Best hesitant fuzzy network loaded.\n")
-  
     dist.barrier()
   
     if is_main:
@@ -649,32 +573,24 @@ def main():
     # ذخیره نتایج فقط در rank 0
     if is_main:
         print("\n" + "="*70)
-        print("FINAL COMPARISON")
+        print("FINAL RESULTS")
         print("="*70)
-        print(f"Best Single Model Acc : {best_single:.2f}%")
-        print(f"Hesitant Ensemble Acc : {ensemble_test_acc:.2f}%")
-        improvement = ensemble_test_acc - best_single
-        print(f"Improvement           : {improvement:+.2f}%")
+        print(f"Hesitant Ensemble Test Acc : {ensemble_test_acc:.2f}%")
         
-        # ذخیره نتایج با seed
         results = {
-            "method": "Fuzzy Hesitant Sets (DDP) - FAIR COMPARISON",
+            "method": "Fuzzy Hesitant Sets (DDP) - Ensemble Only",
             "seed": args.seed,
             "num_gpus": world_size,
             "num_memberships": args.num_memberships,
-            "individual_accuracies": {MODEL_NAMES[i]: acc for i, acc in enumerate(individual_accs)},
-            "best_single": {"name": MODEL_NAMES[best_idx], "acc": best_single},
             "ensemble": {
-                "acc": ensemble_test_acc,
+                "test_acc": ensemble_test_acc,
                 "weights": ensemble_weights,
                 "membership_values": membership_values
             },
-            "improvement": improvement,
             "training_history": history
         }
         
-        result_path = '/kaggle/working/hesitant_fuzzy_ddp_fair_comparison_results.json'
-      
+        result_path = '/kaggle/working/hesitant_fuzzy_ddp_ensemble_only_results.json'
         try:
             with open(result_path, 'w') as f:
                 json.dump(results, f, indent=2)
@@ -682,8 +598,7 @@ def main():
         except Exception as e:
             print(f"\n[ERROR] Failed to save results: {e}")
       
-        final_model_path = '/kaggle/working/hesitant_fuzzy_ddp_fair_comparison_final.pt'
-        
+        final_model_path = '/kaggle/working/hesitant_fuzzy_ddp_ensemble_only_final.pt'
         try:
             torch.save({
                 'hesitant_state_dict': ensemble.module.hesitant_fuzzy.state_dict(),
@@ -701,7 +616,6 @@ def main():
         print("="*70)
     
     dist.barrier()
-    
     cleanup_ddp()
   
 if __name__ == "__main__":
