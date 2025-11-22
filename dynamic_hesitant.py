@@ -190,6 +190,7 @@ def load_pruned_models(model_paths: List[str], device: torch.device, rank: int) 
     if rank == 0:
         print(f"All {len(models)} models loaded!\n")
     return models
+    
 def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size: int, num_workers: int = 2):
     if rank == 0:
         print("="*70)
@@ -256,7 +257,7 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
         print(f" Batches per GPU → Train: {len(loaders['train'])}, Val: {len(loaders['valid'])}, Test: {len(loaders['test'])}")
         print("="*70 + "\n")
     return loaders['train'], loaders['valid'], loaders['test']
-@torch.no_grad()
+
 def train_hesitant_fuzzy_ddp(ensemble_model, train_loader, val_loader, num_epochs, lr,
                               device, save_dir, rank, world_size):
     if rank == 0:
