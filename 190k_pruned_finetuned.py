@@ -37,15 +37,10 @@ parser.add_argument('--freeze_strategy', type=str, default='up_to_l3', choices=[
 
 args = parser.parse_args()
 
-# استفاده از آرگومان‌های خوانده شده
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 print(f"Hyperparameters: {vars(args)}")
 
-
-# =============================================================================
-# مرحله 2: تعریف معماری مدل هرس‌شده
-# =============================================================================
 class Bottleneck_pruned(nn.Module):
     expansion = 4
     def __init__(self, in_channels, out_channels, conv1_channels, conv2_channels, conv3_channels, stride=1, downsample=None):
@@ -87,7 +82,42 @@ class ResNet_pruned(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         self.dropout = nn.Dropout(p=dropout_prob)
-        remaining_filters = [12, 12, 64, 11, 10, 59, 9, 11, 49, 23, 21, 86, 22, 17, 86, 23, 17, 66, 21, 14, 56, 20, 48, 105, 54, 14, 95, 35, 11, 77, 42, 12, 50, 41, 7, 35, 28, 3, 41, 37, 55, 55, 78, 5, 67, 52, 16, 89]
+
+        remaining_filters = [
+            # layer1.0
+            15, 9, 69,
+            # layer1.1
+            11, 9, 70,
+            # layer1.2
+            7, 4, 39,
+            # layer2.0
+            26, 28, 93,
+            # layer2.1
+            29, 14, 103,
+            # layer2.2
+            25, 12, 72,
+            # layer2.3
+            20, 13, 58,
+            # layer3.0
+            38, 30, 132,
+            # layer3.1
+            59, 21, 134,
+            # layer3.2
+            35, 13, 107,
+            # layer3.3
+            29, 10, 95,
+            # layer3.4
+            24, 8, 71,
+            # layer3.5
+            29, 8, 79,
+            # layer4.0
+            21, 21, 111,
+            # layer4.1
+            62, 4, 137,
+            # layer4.2
+            44, 3, 108,
+        ]
+        
         filter_iter = iter(remaining_filters)
         layer1_out_channels = 64 * block.expansion
         layer2_out_channels = 128 * block.expansion
@@ -119,9 +149,7 @@ class ResNet_pruned(nn.Module):
         x = self.avgpool(x); x = torch.flatten(x, 1); x = self.dropout(x); x = self.fc(x)
         return x
 
-# =============================================================================
-# مرحله 3: آماده‌سازی داده‌ها (DataLoaders)
-# =============================================================================
+
 train_transforms = transforms.Compose([
     transforms.Resize((256, 256)), transforms.RandomResizedCrop(256),
     transforms.RandomHorizontalFlip(), transforms.RandomRotation(15),
@@ -144,9 +172,6 @@ print(f"Number of training samples: {len(train_dataset)}")
 print(f"Number of validation samples: {len(valid_dataset)}")
 print(f"Number of test samples: {len(test_dataset)}")
 
-# =============================================================================
-# مرحله 4: بارگذاری مدل، انجماد لایه‌ها، تعریف تابع هزینه و بهینه‌ساز
-# =============================================================================
 model = ResNet_pruned(Bottleneck_pruned, [3, 4, 6, 3], dropout_prob=args.dropout_prob)
 checkpoint = torch.load(args.pruned_model_path, map_location=DEVICE)
 model.load_state_dict(checkpoint['model_state_dict'], strict=True)
@@ -161,7 +186,6 @@ except KeyError:
     print("⚠️  هشدار: کلید 'masks' در چک‌پوینت اصلی یافت نشد. ماسک‌ها ذخیره نخواهند شد.")
     masks = None # یا می‌توانید یک دیکشنری خالی ایجاد کنید
 
-# --- منطق انجماد لایه‌ها بر اساس استراتژی انتخاب شده ---
 if args.freeze_strategy == 'fc_only':
     layers_to_freeze = ['conv1', 'bn1', 'layer1', 'layer2', 'layer3', 'layer4']
 elif args.freeze_strategy == 'up_to_l3':
@@ -185,9 +209,6 @@ optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr
 criterion = nn.BCEWithLogitsLoss()
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3, verbose=True)
 
-# =============================================================================
-# مرحله 5: حلقه آموزش و اعتبارسنجی
-# =============================================================================
 best_val_acc = 0.0
 epochs_no_improve = 0
 for epoch in range(args.num_epochs):
