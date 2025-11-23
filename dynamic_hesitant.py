@@ -122,6 +122,58 @@ def prepare_real_fake_dataset(base_dir, seed=42):
     
     return full_dataset, train_indices, val_indices, test_indices
 
+def prepare_hard_fake_real_dataset(base_dir, seed=42):
+    """
+    Prepare hardfakevsrealfaces dataset with reproducible splits
+    Expected structure:
+    base_dir/
+        fake/
+        real/
+    OR
+    base_dir/
+        hardfakevsrealfaces/
+            fake/
+            real/
+    """
+    # Check if base_dir directly contains fake/real folders
+    if os.path.exists(os.path.join(base_dir, 'fake')) and \
+       os.path.exists(os.path.join(base_dir, 'real')):
+        dataset_dir = base_dir
+    # Check if there's a nested hardfakevsrealfaces folder
+    elif os.path.exists(os.path.join(base_dir, 'hardfakevsrealfaces')):
+        dataset_dir = os.path.join(base_dir, 'hardfakevsrealfaces')
+    else:
+        raise FileNotFoundError(
+            f"Could not find fake/real folders in:\n"
+            f"  - {base_dir}\n"
+            f"  - {os.path.join(base_dir, 'hardfakevsrealfaces')}"
+        )
+    
+    # Create temporary full dataset
+    temp_transform = transforms.Compose([transforms.ToTensor()])
+    full_dataset = datasets.ImageFolder(dataset_dir, transform=temp_transform)
+    
+    print(f"\n[Dataset Info - HardFakeVsReal]")
+    print(f"Total samples: {len(full_dataset)}")
+    print(f"Classes: {full_dataset.classes}")
+    print(f"Class to index: {full_dataset.class_to_idx}")
+    
+    # Create reproducible splits
+    train_indices, val_indices, test_indices = create_reproducible_split(
+        full_dataset, 
+        train_ratio=0.7, 
+        val_ratio=0.15, 
+        test_ratio=0.15, 
+        seed=seed
+    )
+    
+    print(f"\n[Split Statistics]")
+    print(f"Train: {len(train_indices)} samples ({len(train_indices)/len(full_dataset)*100:.1f}%)")
+    print(f"Valid: {len(val_indices)} samples ({len(val_indices)/len(full_dataset)*100:.1f}%)")
+    print(f"Test:  {len(test_indices)} samples ({len(test_indices)/len(full_dataset)*100:.1f}%)")
+    
+    return full_dataset, train_indices, val_indices, test_indices
+
 # =======================================================
 def setup_ddp():
     dist.init_process_group(backend='nccl')
@@ -288,10 +340,23 @@ def load_pruned_models(model_paths: List[str], device: torch.device, rank: int) 
   
     return models
 
+class TransformSubset(Subset):
+    """Subset with custom transform applied"""
+    def __init__(self, dataset, indices, transform):
+        super().__init__(dataset, indices)
+        self.transform = transform
+    
+    def __getitem__(self, idx):
+        img, label = self.dataset.samples[self.indices[idx]]
+        img = self.dataset.loader(img)
+        if self.transform:
+            img = self.transform(img)
+        return img, label
+
 def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size: int, 
                           num_workers: int = 2, dataset_type: str = 'wild'):
     """
-    Create dataloaders for either 'wild' (pre-split) or 'real_fake' (needs splitting) datasets
+    Create dataloaders for 'wild', 'real_fake', or 'hard_fake_real' datasets
     """
     if rank == 0:
         print("="*70)
@@ -383,18 +448,56 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
         )
         
         # Create subset datasets with proper transforms
-        class TransformSubset(Subset):
-            def __init__(self, dataset, indices, transform):
-                super().__init__(dataset, indices)
-                self.transform = transform
-            
-            def __getitem__(self, idx):
-                img, label = self.dataset.samples[self.indices[idx]]
-                img = self.dataset.loader(img)
-                if self.transform:
-                    img = self.transform(img)
-                return img, label
+        train_dataset = TransformSubset(full_dataset, train_indices, train_transform)
+        val_dataset = TransformSubset(full_dataset, val_indices, val_test_transform)
+        test_dataset = TransformSubset(full_dataset, test_indices, val_test_transform)
         
+        # Create loaders
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler,
+                                 num_workers=num_workers, pin_memory=True, drop_last=True,
+                                 worker_init_fn=worker_init_fn)
+        
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
+                               num_workers=num_workers, pin_memory=True, drop_last=False,
+                               worker_init_fn=worker_init_fn)
+        
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,
+                                num_workers=num_workers, pin_memory=True, drop_last=False,
+                                worker_init_fn=worker_init_fn)
+    
+    elif dataset_type == 'hard_fake_real':
+        # Hard fake vs real dataset (needs splitting)
+        if rank == 0:
+            print(f"Processing hardfakevsrealfaces dataset from: {base_dir}")
+        
+        # Only rank 0 does the split preparation
+        if rank == 0:
+            full_dataset, train_indices, val_indices, test_indices = prepare_hard_fake_real_dataset(
+                base_dir, seed=42
+            )
+        
+        dist.barrier()  # Wait for rank 0 to finish
+        
+        # Determine the correct directory path
+        if os.path.exists(os.path.join(base_dir, 'fake')) and \
+           os.path.exists(os.path.join(base_dir, 'real')):
+            dataset_dir = base_dir
+        elif os.path.exists(os.path.join(base_dir, 'hardfakevsrealfaces')):
+            dataset_dir = os.path.join(base_dir, 'hardfakevsrealfaces')
+        else:
+            raise FileNotFoundError(f"Could not find fake/real folders in {base_dir}")
+        
+        # All ranks load the dataset
+        temp_transform = transforms.Compose([transforms.ToTensor()])
+        full_dataset = datasets.ImageFolder(dataset_dir, transform=temp_transform)
+        
+        # Recreate splits (deterministic with same seed)
+        train_indices, val_indices, test_indices = create_reproducible_split(
+            full_dataset, seed=42
+        )
+        
+        # Create subset datasets with proper transforms
         train_dataset = TransformSubset(full_dataset, train_indices, train_transform)
         val_dataset = TransformSubset(full_dataset, val_indices, val_test_transform)
         test_dataset = TransformSubset(full_dataset, test_indices, val_test_transform)
@@ -414,7 +517,7 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
                                 worker_init_fn=worker_init_fn)
     
     else:
-        raise ValueError(f"Unknown dataset_type: {dataset_type}. Use 'wild' or 'real_fake'")
+        raise ValueError(f"Unknown dataset_type: {dataset_type}. Use 'wild', 'real_fake', or 'hard_fake_real'")
     
     if rank == 0:
         print(f"DataLoaders ready! Batch size per GPU: {batch_size}")
@@ -624,8 +727,8 @@ def main():
     parser.add_argument('--num_memberships', type=int, default=3, help='Number of membership values per model')
     
     # Dataset selection
-    parser.add_argument('--dataset', type=str, choices=['wild', 'real_fake'], required=True,
-                       help='Dataset type: "wild" or "real_fake"')
+    parser.add_argument('--dataset', type=str, choices=['wild', 'real_fake', 'hard_fake_real'], required=True,
+                       help='Dataset type: "wild", "real_fake", or "hard_fake_real"')
     parser.add_argument('--data_dir', type=str, required=True,
                        help='Base directory of dataset')
     
@@ -634,12 +737,6 @@ def main():
                        help='Paths to pruned model checkpoints')
     parser.add_argument('--model_names', type=str, nargs='+', required=True,
                        help='Names for each model (must match number of model_paths)')
-    
-    # Normalization parameters (optional, will use defaults if not provided)
-    parser.add_argument('--means', type=str, nargs='+', default=None,
-                       help='Mean values for each model as "r,g,b" (e.g., "0.52,0.42,0.38")')
-    parser.add_argument('--stds', type=str, nargs='+', default=None,
-                       help='Std values for each model as "r,g,b" (e.g., "0.25,0.22,0.22")')
     
     parser.add_argument('--save_dir', type=str, default='/kaggle/working/checkpoints')
     parser.add_argument('--seed', type=int, default=SEED, help='Random seed for reproducibility')
@@ -650,24 +747,13 @@ def main():
     if len(args.model_names) != len(args.model_paths):
         raise ValueError(f"Number of model_names ({len(args.model_names)}) must match model_paths ({len(args.model_paths)})")
     
-    # Parse normalization parameters
-    if args.means is None:
-        # Default means
-        MEANS = [(0.5207, 0.4258, 0.3806), (0.4868, 0.3972, 0.3624), (0.4668, 0.3816, 0.3414)]
-        MEANS = MEANS[:len(args.model_paths)]
-    else:
-        if len(args.means) != len(args.model_paths):
-            raise ValueError(f"Number of means ({len(args.means)}) must match model_paths ({len(args.model_paths)})")
-        MEANS = [tuple(map(float, m.split(','))) for m in args.means]
+    # Use default normalization parameters (fixed for all datasets)
+    MEANS = [(0.5207, 0.4258, 0.3806), (0.4868, 0.3972, 0.3624), (0.4668, 0.3816, 0.3414)]
+    STDS = [(0.2490, 0.2239, 0.2212), (0.2296, 0.2066, 0.2009), (0.2410, 0.2161, 0.2081)]
     
-    if args.stds is None:
-        # Default stds
-        STDS = [(0.2490, 0.2239, 0.2212), (0.2296, 0.2066, 0.2009), (0.2410, 0.2161, 0.2081)]
-        STDS = STDS[:len(args.model_paths)]
-    else:
-        if len(args.stds) != len(args.model_paths):
-            raise ValueError(f"Number of stds ({len(args.stds)}) must match model_paths ({len(args.model_paths)})")
-        STDS = [tuple(map(float, s.split(','))) for s in args.stds]
+    # Adjust to number of models
+    MEANS = MEANS[:len(args.model_paths)]
+    STDS = STDS[:len(args.model_paths)]
     
     # Override seed if provided via CLI
     if args.seed != SEED:
@@ -682,6 +768,9 @@ def main():
         print(f"Batch size per GPU: {args.batch_size} | Effective batch size: {args.batch_size * world_size}")
         print(f"Dataset: {args.dataset}")
         print(f"Data directory: {args.data_dir}")
+        print(f"\nUsing default normalization parameters:")
+        print(f"  MEANS: {MEANS}")
+        print(f"  STDS:  {STDS}")
         print(f"\nModels to load:")
         for i, (path, name) in enumerate(zip(args.model_paths, args.model_names)):
             print(f"  {i+1}. {name}: {path}")
