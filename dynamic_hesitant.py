@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms, datasets
 import os
@@ -16,7 +16,69 @@ import shutil
 import json
 import random
 from sklearn.model_selection import train_test_split
+from PIL import Image
+
 warnings.filterwarnings("ignore")
+
+# [NEW/CHANGED FOR UADFV]
+# Custom Dataset class for UADFV to handle its specific nested folder structure
+class UADFVDataset(Dataset):
+    """
+    Custom Dataset for UADFV.
+    Structure:
+    UADFV/
+    ├── fake/
+    │   └── frames/
+    │       ├── 0000_fake/
+    │       │   ├── frame_001.png
+    │       │   └── ...
+    │       └── ...
+    └── real/
+        └── frames/
+            ├── 0000/
+            │   ├── frame_001.png
+            │   └── ...
+            └── ...
+    """
+    def __init__(self, root_dir, transform=None):
+        self.root_dir = root_dir
+        self.transform = transform
+        self.samples = []
+        self.class_to_idx = {'fake': 0, 'real': 1}
+        self.classes = list(self.class_to_idx.keys())
+
+        # Load fake images
+        fake_frames_dir = os.path.join(self.root_dir, 'fake', 'frames')
+        if os.path.exists(fake_frames_dir):
+            for subdir in os.listdir(fake_frames_dir):
+                subdir_path = os.path.join(fake_frames_dir, subdir)
+                if os.path.isdir(subdir_path):
+                    for img_file in os.listdir(subdir_path):
+                        img_path = os.path.join(subdir_path, img_file)
+                        if img_file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                            self.samples.append((img_path, self.class_to_idx['fake']))
+        
+        # Load real images
+        real_frames_dir = os.path.join(self.root_dir, 'real', 'frames')
+        if os.path.exists(real_frames_dir):
+            for subdir in os.listdir(real_frames_dir):
+                subdir_path = os.path.join(real_frames_dir, subdir)
+                if os.path.isdir(subdir_path):
+                    for img_file in os.listdir(subdir_path):
+                        img_path = os.path.join(subdir_path, img_file)
+                        if img_file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                            self.samples.append((img_path, self.class_to_idx['real']))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        img_path, label = self.samples[idx]
+        image = Image.open(img_path).convert('RGB')
+        if self.transform:
+            image = self.transform(image)
+        return image, label
+
 # ====================== SEED SETUP ======================
 def set_seed(seed: int = 42):
     random.seed(seed)
@@ -32,6 +94,7 @@ def worker_init_fn(worker_id):
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+
 # ====================== DATASET SPLIT FUNCTIONS ======================
 def create_reproducible_split(dataset, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=42):
     """
@@ -39,7 +102,6 @@ def create_reproducible_split(dataset, train_ratio=0.7, val_ratio=0.15, test_rat
     """
     assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "Ratios must sum to 1.0"
    
-    # Get all indices
     num_samples = len(dataset)
     indices = list(range(num_samples))
    
@@ -66,12 +128,11 @@ def create_reproducible_split(dataset, train_ratio=0.7, val_ratio=0.15, test_rat
     )
    
     return train_indices, val_indices, test_indices
+
 def prepare_real_fake_dataset(base_dir, seed=42):
- 
     if os.path.exists(os.path.join(base_dir, 'training_fake')) and \
        os.path.exists(os.path.join(base_dir, 'training_real')):
         real_fake_dir = base_dir
-    # Check if there's a nested real_and_fake_face folder
     elif os.path.exists(os.path.join(base_dir, 'real_and_fake_face')):
         real_fake_dir = os.path.join(base_dir, 'real_and_fake_face')
     else:
@@ -81,16 +142,14 @@ def prepare_real_fake_dataset(base_dir, seed=42):
             f" - {os.path.join(base_dir, 'real_and_fake_face')}"
         )
    
-    # Create temporary full dataset
     temp_transform = transforms.Compose([transforms.ToTensor()])
     full_dataset = datasets.ImageFolder(real_fake_dir, transform=temp_transform)
    
-    print(f"\n[Dataset Info]")
+    print(f"\n[Dataset Info - Real/Fake]")
     print(f"Total samples: {len(full_dataset)}")
     print(f"Classes: {full_dataset.classes}")
     print(f"Class to index: {full_dataset.class_to_idx}")
    
-    # Create reproducible splits
     train_indices, val_indices, test_indices = create_reproducible_split(
         full_dataset,
         train_ratio=0.7,
@@ -105,11 +164,11 @@ def prepare_real_fake_dataset(base_dir, seed=42):
     print(f"Test: {len(test_indices)} samples ({len(test_indices)/len(full_dataset)*100:.1f}%)")
    
     return full_dataset, train_indices, val_indices, test_indices
+
 def prepare_hard_fake_real_dataset(base_dir, seed=42):
     if os.path.exists(os.path.join(base_dir, 'fake')) and \
        os.path.exists(os.path.join(base_dir, 'real')):
         dataset_dir = base_dir
-    # Check if there's a nested hardfakevsrealfaces folder
     elif os.path.exists(os.path.join(base_dir, 'hardfakevsrealfaces')):
         dataset_dir = os.path.join(base_dir, 'hardfakevsrealfaces')
     else:
@@ -119,7 +178,6 @@ def prepare_hard_fake_real_dataset(base_dir, seed=42):
             f" - {os.path.join(base_dir, 'hardfakevsrealfaces')}"
         )
    
-    # Create temporary full dataset
     temp_transform = transforms.Compose([transforms.ToTensor()])
     full_dataset = datasets.ImageFolder(dataset_dir, transform=temp_transform)
    
@@ -128,7 +186,6 @@ def prepare_hard_fake_real_dataset(base_dir, seed=42):
     print(f"Classes: {full_dataset.classes}")
     print(f"Class to index: {full_dataset.class_to_idx}")
    
-    # Create reproducible splits
     train_indices, val_indices, test_indices = create_reproducible_split(
         full_dataset,
         train_ratio=0.7,
@@ -143,11 +200,11 @@ def prepare_hard_fake_real_dataset(base_dir, seed=42):
     print(f"Test: {len(test_indices)} samples ({len(test_indices)/len(full_dataset)*100:.1f}%)")
    
     return full_dataset, train_indices, val_indices, test_indices
+
 def prepare_deepflux_dataset(base_dir, seed=42):
     if os.path.exists(os.path.join(base_dir, 'Fake')) and \
        os.path.exists(os.path.join(base_dir, 'Real')):
         dataset_dir = base_dir
-    # Check if there's a nested DeepFLUX folder
     elif os.path.exists(os.path.join(base_dir, 'DeepFLUX')):
         dataset_dir = os.path.join(base_dir, 'DeepFLUX')
     else:
@@ -157,7 +214,6 @@ def prepare_deepflux_dataset(base_dir, seed=42):
             f" - {os.path.join(base_dir, 'DeepFLUX')}"
         )
    
-    # Create temporary full dataset
     temp_transform = transforms.Compose([transforms.ToTensor()])
     full_dataset = datasets.ImageFolder(dataset_dir, transform=temp_transform)
    
@@ -166,7 +222,6 @@ def prepare_deepflux_dataset(base_dir, seed=42):
     print(f"Classes: {full_dataset.classes}")
     print(f"Class to index: {full_dataset.class_to_idx}")
    
-    # Create reproducible splits
     train_indices, val_indices, test_indices = create_reproducible_split(
         full_dataset,
         train_ratio=0.7,
@@ -181,6 +236,39 @@ def prepare_deepflux_dataset(base_dir, seed=42):
     print(f"Test: {len(test_indices)} samples ({len(test_indices)/len(full_dataset)*100:.1f}%)")
    
     return full_dataset, train_indices, val_indices, test_indices
+
+# [NEW/CHANGED FOR UADFV]
+def prepare_uadfV_dataset(base_dir, seed=42):
+    """
+    Prepares the UADFV dataset for splitting.
+    Assumes the base_dir is the root of the UADFV folder.
+    """
+    if not os.path.exists(base_dir):
+        raise FileNotFoundError(f"UADFV dataset directory not found: {base_dir}")
+
+    temp_transform = transforms.Compose([transforms.ToTensor()])
+    full_dataset = UADFVDataset(base_dir, transform=temp_transform)
+
+    print(f"\n[Dataset Info - UADFV]")
+    print(f"Total samples: {len(full_dataset)}")
+    print(f"Classes: {full_dataset.classes}")
+    print(f"Class to index: {full_dataset.class_to_idx}")
+
+    train_indices, val_indices, test_indices = create_reproducible_split(
+        full_dataset,
+        train_ratio=0.7,
+        val_ratio=0.15,
+        test_ratio=0.15,
+        seed=seed
+    )
+
+    print(f"\n[Split Statistics]")
+    print(f"Train: {len(train_indices)} samples ({len(train_indices)/len(full_dataset)*100:.1f}%)")
+    print(f"Valid: {len(val_indices)} samples ({len(val_indices)/len(full_dataset)*100:.1f}%)")
+    print(f"Test: {len(test_indices)} samples ({len(test_indices)/len(full_dataset)*100:.1f}%)")
+
+    return full_dataset, train_indices, val_indices, test_indices
+
 # =======================================================
 def setup_ddp():
     dist.init_process_group(backend='nccl')
@@ -193,6 +281,7 @@ def setup_ddp():
 def cleanup_ddp():
     if dist.is_initialized():
         dist.destroy_process_group()
+
 class HesitantFuzzyMembership(nn.Module):
     def __init__(self, input_dim: int, num_models: int, num_memberships: int = 3, dropout: float = 0.3):
         super().__init__()
@@ -345,6 +434,7 @@ def load_pruned_models(model_paths: List[str], device: torch.device, rank: int) 
         print(f"All {len(models)} models loaded!\n")
  
     return models
+
 class TransformSubset(Subset):
     def __init__(self, dataset, indices, transform):
         super().__init__(dataset, indices)
@@ -356,6 +446,7 @@ class TransformSubset(Subset):
         if self.transform:
             img = self.transform(img)
         return img, label
+
 def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size: int,
                           num_workers: int = 2, dataset_type: str = 'wild'):
   
@@ -380,7 +471,6 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
     ])
    
     if dataset_type == 'wild':
-        # Original wild dataset (already split)
         splits = ['train', 'valid', 'test']
         datasets_dict = {}
        
@@ -401,7 +491,6 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
                 print(f" {split.capitalize():5}: {len(ds):,} images | Classes: {ds.classes}")
             print(f" Class → Index: {datasets_dict['train'].class_to_idx}\n")
        
-        # Create loaders
         loaders = {}
         for split, ds in datasets_dict.items():
             if split == 'train':
@@ -420,19 +509,16 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
         test_loader = loaders['test']
    
     elif dataset_type == 'real_fake':
-        # Real-fake dataset (needs splitting)
         if rank == 0:
             print(f"Processing real-fake dataset from: {base_dir}")
        
-        # Only rank 0 does the split preparation to avoid race conditions
         if rank == 0:
             full_dataset, train_indices, val_indices, test_indices = prepare_real_fake_dataset(
                 base_dir, seed=42
             )
        
-        dist.barrier() # Wait for rank 0 to finish
+        dist.barrier()
        
-        # Determine the correct directory path
         if os.path.exists(os.path.join(base_dir, 'training_fake')) and \
            os.path.exists(os.path.join(base_dir, 'training_real')):
             dataset_dir = base_dir
@@ -441,21 +527,17 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
         else:
             raise FileNotFoundError(f"Could not find training folders in {base_dir}")
        
-        # All ranks load the dataset
         temp_transform = transforms.Compose([transforms.ToTensor()])
         full_dataset = datasets.ImageFolder(dataset_dir, transform=temp_transform)
        
-        # Recreate splits (deterministic with same seed)
         train_indices, val_indices, test_indices = create_reproducible_split(
             full_dataset, seed=42
         )
        
-        # Create subset datasets with proper transforms
         train_dataset = TransformSubset(full_dataset, train_indices, train_transform)
         val_dataset = TransformSubset(full_dataset, val_indices, val_test_transform)
         test_dataset = TransformSubset(full_dataset, test_indices, val_test_transform)
        
-        # Create loaders
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
         train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler,
                                  num_workers=num_workers, pin_memory=True, drop_last=True,
@@ -468,21 +550,18 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,
                                 num_workers=num_workers, pin_memory=True, drop_last=False,
                                 worker_init_fn=worker_init_fn)
-   
+
     elif dataset_type == 'hard_fake_real':
-        # Hard fake vs real dataset (needs splitting)
         if rank == 0:
             print(f"Processing hardfakevsrealfaces dataset from: {base_dir}")
        
-        # Only rank 0 does the split preparation
         if rank == 0:
             full_dataset, train_indices, val_indices, test_indices = prepare_hard_fake_real_dataset(
                 base_dir, seed=42
             )
        
-        dist.barrier() # Wait for rank 0 to finish
+        dist.barrier()
        
-        # Determine the correct directory path
         if os.path.exists(os.path.join(base_dir, 'fake')) and \
            os.path.exists(os.path.join(base_dir, 'real')):
             dataset_dir = base_dir
@@ -491,21 +570,17 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
         else:
             raise FileNotFoundError(f"Could not find fake/real folders in {base_dir}")
        
-        # All ranks load the dataset
         temp_transform = transforms.Compose([transforms.ToTensor()])
         full_dataset = datasets.ImageFolder(dataset_dir, transform=temp_transform)
        
-        # Recreate splits (deterministic with same seed)
         train_indices, val_indices, test_indices = create_reproducible_split(
             full_dataset, seed=42
         )
        
-        # Create subset datasets with proper transforms
         train_dataset = TransformSubset(full_dataset, train_indices, train_transform)
         val_dataset = TransformSubset(full_dataset, val_indices, val_test_transform)
         test_dataset = TransformSubset(full_dataset, test_indices, val_test_transform)
        
-        # Create loaders
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
         train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler,
                                  num_workers=num_workers, pin_memory=True, drop_last=True,
@@ -518,21 +593,18 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,
                                 num_workers=num_workers, pin_memory=True, drop_last=False,
                                 worker_init_fn=worker_init_fn)
-   
+
     elif dataset_type == 'deepflux':
-        # DeepFLUX dataset (needs splitting)
         if rank == 0:
             print(f"Processing DeepFLUX dataset from: {base_dir}")
        
-        # Only rank 0 does the split preparation
         if rank == 0:
             full_dataset, train_indices, val_indices, test_indices = prepare_deepflux_dataset(
                 base_dir, seed=42
             )
        
-        dist.barrier() # Wait for rank 0 to finish
+        dist.barrier()
        
-        # Determine the correct directory path
         if os.path.exists(os.path.join(base_dir, 'Fake')) and \
            os.path.exists(os.path.join(base_dir, 'Real')):
             dataset_dir = base_dir
@@ -541,21 +613,17 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
         else:
             raise FileNotFoundError(f"Could not find Fake/Real folders in {base_dir}")
        
-        # All ranks load the dataset
         temp_transform = transforms.Compose([transforms.ToTensor()])
         full_dataset = datasets.ImageFolder(dataset_dir, transform=temp_transform)
        
-        # Recreate splits (deterministic with same seed)
         train_indices, val_indices, test_indices = create_reproducible_split(
             full_dataset, seed=42
         )
        
-        # Create subset datasets with proper transforms
         train_dataset = TransformSubset(full_dataset, train_indices, train_transform)
         val_dataset = TransformSubset(full_dataset, val_indices, val_test_transform)
         test_dataset = TransformSubset(full_dataset, test_indices, val_test_transform)
        
-        # Create loaders
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
         train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler,
                                  num_workers=num_workers, pin_memory=True, drop_last=True,
@@ -568,9 +636,55 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,
                                 num_workers=num_workers, pin_memory=True, drop_last=False,
                                 worker_init_fn=worker_init_fn)
-   
+
+    # [NEW/CHANGED FOR UADFV]
+    elif dataset_type == 'uadfV':
+        if rank == 0:
+            print(f"Processing UADFV dataset from: {base_dir}")
+        
+        # Only rank 0 does the split preparation to avoid race conditions
+        if rank == 0:
+            full_dataset, train_indices, val_indices, test_indices = prepare_uadfV_dataset(
+                base_dir, seed=42
+            )
+
+        dist.barrier() # Wait for rank 0 to finish
+
+        # All ranks load the dataset using the custom class
+        temp_transform = transforms.Compose([transforms.ToTensor()])
+        full_dataset = UADFVDataset(base_dir, transform=temp_transform)
+
+        # Recreate splits (deterministic with same seed)
+        train_indices, val_indices, test_indices = create_reproducible_split(
+            full_dataset, seed=42
+        )
+
+        # Create subset datasets with proper transforms
+        train_dataset = Subset(full_dataset, train_indices)
+        val_dataset = Subset(full_dataset, val_indices)
+        test_dataset = Subset(full_dataset, test_indices)
+
+        # Apply transforms to the subsets
+        train_dataset.dataset.transform = train_transform
+        val_dataset.dataset.transform = val_test_transform
+        test_dataset.dataset.transform = val_test_transform
+
+        # Create loaders
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler,
+                                 num_workers=num_workers, pin_memory=True, drop_last=True,
+                                 worker_init_fn=worker_init_fn)
+        
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
+                               num_workers=num_workers, pin_memory=True, drop_last=False,
+                               worker_init_fn=worker_init_fn)
+        
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,
+                                num_workers=num_workers, pin_memory=True, drop_last=False,
+                                worker_init_fn=worker_init_fn)
+
     else:
-        raise ValueError(f"Unknown dataset_type: {dataset_type}. Use 'wild', 'real_fake', or 'hard_fake_real'")
+        raise ValueError(f"Unknown dataset_type: {dataset_type}. Use 'wild', 'real_fake', 'hard_fake_real', 'deepflux', or 'uadfV'")
    
     if rank == 0:
         print(f"DataLoaders ready! Batch size per GPU: {batch_size}")
@@ -579,6 +693,7 @@ def create_dataloaders_ddp(base_dir: str, batch_size: int, rank: int, world_size
         print("="*70 + "\n")
  
     return train_loader, val_loader, test_loader
+
 @torch.no_grad()
 def evaluate_single_model(model: nn.Module, loader: DataLoader, device: torch.device, name: str, rank: int) -> float:
     model.eval()
@@ -654,7 +769,6 @@ def train_hesitant_fuzzy_ddp(ensemble_model, train_loader, val_loader, num_epoch
                 avg_loss = train_loss / train_total
                 iterator.set_postfix({'loss': f'{avg_loss:.4f}', 'acc': f'{current_acc:.2f}%'})
        
-        # Gather metrics from all GPUs
         train_loss_tensor = torch.tensor(train_loss).to(device)
         train_correct_tensor = torch.tensor(train_correct).to(device)
         train_total_tensor = torch.tensor(train_total).to(device)
@@ -708,6 +822,7 @@ def train_hesitant_fuzzy_ddp(ensemble_model, train_loader, val_loader, num_epoch
         print(f"\nTraining completed! Best Val Acc: {best_val_acc:.2f}%")
  
     return best_val_acc, history
+
 @torch.no_grad()
 def evaluate_ensemble_final_ddp(model, loader, device, name, model_names, rank):
     model.eval()
@@ -744,6 +859,7 @@ def evaluate_ensemble_final_ddp(model, loader, device, name, model_names, rank):
             print(f" Variance (Hesitancy): {variance:.4f}")
  
     return acc, avg_weights.tolist(), avg_memberships.tolist()
+
 @torch.no_grad()
 def evaluate_accuracy_ddp(model, loader, device, rank):
     model.eval()
@@ -760,11 +876,9 @@ def evaluate_accuracy_ddp(model, loader, device, rank):
     return acc
  
 def main():
-    # ====================== SET SEED BEFORE DDP ======================
     SEED = 42
     set_seed(SEED)
    
-    # Setup DDP
     rank, local_rank, world_size = setup_ddp()
     device = torch.device(f'cuda:{local_rank}')
  
@@ -776,13 +890,12 @@ def main():
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size per GPU')
     parser.add_argument('--num_memberships', type=int, default=3, help='Number of membership values per model')
    
-    # Dataset selection
-    parser.add_argument('--dataset', type=str, choices=['wild', 'real_fake', 'hard_fake_real', 'deepflux'], required=True,
-                       help='Dataset type: "wild", "real_fake", "hard_fake_real", or "deepflux"')
+    # [NEW/CHANGED FOR UADFV]
+    parser.add_argument('--dataset', type=str, choices=['wild', 'real_fake', 'hard_fake_real', 'deepflux', 'uadfV'], required=True,
+                       help='Dataset type: "wild", "real_fake", "hard_fake_real", "deepflux", or "uadfV"')
     parser.add_argument('--data_dir', type=str, required=True,
                        help='Base directory of dataset')
    
-    # Model paths
     parser.add_argument('--model_paths', type=str, nargs='+', required=True,
                        help='Paths to pruned model checkpoints')
     parser.add_argument('--model_names', type=str, nargs='+', required=True,
@@ -793,19 +906,15 @@ def main():
    
     args = parser.parse_args()
    
-    # Validate model arguments
     if len(args.model_names) != len(args.model_paths):
         raise ValueError(f"Number of model_names ({len(args.model_names)}) must match model_paths ({len(args.model_paths)})")
    
-    # Use default normalization parameters (fixed for all datasets)
     MEANS = [(0.5207, 0.4258, 0.3806), (0.4868, 0.3972, 0.3624), (0.4668, 0.3816, 0.3414)]
     STDS = [(0.2490, 0.2239, 0.2212), (0.2296, 0.2066, 0.2009), (0.2410, 0.2161, 0.2081)]
    
-    # Adjust to number of models
     MEANS = MEANS[:len(args.model_paths)]
     STDS = STDS[:len(args.model_paths)]
    
-    # Override seed if provided via CLI
     if args.seed != SEED:
         set_seed(args.seed)
    
@@ -826,7 +935,6 @@ def main():
             print(f" {i+1}. {name}: {path}")
         print(f"="*70 + "\n")
    
-    # Load models
     base_models = load_pruned_models(args.model_paths, device, rank)
  
     if len(base_models) != len(args.model_paths):
@@ -838,7 +946,6 @@ def main():
     else:
         MODEL_NAMES = args.model_names
    
-    # Create ensemble
     ensemble = FuzzyHesitantEnsemble(
         base_models, MEANS, STDS,
         num_memberships=args.num_memberships,
@@ -855,12 +962,10 @@ def main():
         total_params = sum(p.numel() for p in ensemble.parameters())
         print(f"Total params: {total_params:,} | Trainable: {trainable:,} | Frozen: {total_params - trainable:,}\n")
    
-    # Create dataloaders based on dataset type
     train_loader, val_loader, test_loader = create_dataloaders_ddp(
         args.data_dir, args.batch_size, rank, world_size, dataset_type=args.dataset
     )
  
-    # Evaluate individual models
     if is_main:
         print("\n" + "="*70)
         print("EVALUATING INDIVIDUAL MODELS ON TEST SET (Before Training)")
@@ -875,13 +980,11 @@ def main():
      
     dist.barrier()
    
-    # Train ensemble
     best_val_acc, history = train_hesitant_fuzzy_ddp(
         ensemble, train_loader, val_loader,
         args.epochs, args.lr, device, args.save_dir, rank, world_size
     )
  
-    # Load best checkpoint
     ckpt_path = os.path.join(args.save_dir, 'best_hesitant_fuzzy.pt')
  
     if os.path.exists(ckpt_path):
@@ -892,7 +995,6 @@ def main():
  
     dist.barrier()
  
-    # Final evaluation
     if is_main:
         print("\n" + "="*70)
         print("EVALUATING FUZZY HESITANT ENSEMBLE")
@@ -909,7 +1011,6 @@ def main():
         improvement = ensemble_test_acc - best_single
         print(f"Improvement : {improvement:+.2f}%")
        
-        # Save results
         results = {
             "method": "Fuzzy Hesitant Sets (DDP)",
             "dataset": args.dataset,
