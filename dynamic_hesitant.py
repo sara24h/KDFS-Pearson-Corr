@@ -20,26 +20,8 @@ from PIL import Image
 
 warnings.filterwarnings("ignore")
 
-# [NEW/CHANGED FOR UADFV]
-# Custom Dataset class for UADFV to handle its specific nested folder structure
 class UADFVDataset(Dataset):
-    """
-    Custom Dataset for UADFV.
-    Structure:
-    UADFV/
-    ├── fake/
-    │   └── frames/
-    │       ├── 0000_fake/
-    │       │   ├── frame_001.png
-    │       │   └── ...
-    │       └── ...
-    └── real/
-        └── frames/
-            ├── 0000/
-            │   ├── frame_001.png
-            │   └── ...
-            └── ...
-    """
+
     def __init__(self, root_dir, transform=None):
         self.root_dir = root_dir
         self.transform = transform
@@ -826,39 +808,73 @@ def train_hesitant_fuzzy_ddp(ensemble_model, train_loader, val_loader, num_epoch
 @torch.no_grad()
 def evaluate_ensemble_final_ddp(model, loader, device, name, model_names, rank):
     model.eval()
-    all_preds, all_labels, all_weights, all_memberships = [], [], [], []
-   
-    iterator = tqdm(loader, desc=f"Evaluating {name}") if rank == 0 else loader
-   
+    
+    all_preds = []
+    all_labels = []
+    all_weights = []
+    all_memberships = []
+    
+    activation_counts = torch.zeros(len(model_names), device=device)  
+    total_samples = 0
+
+    iterator = tqdm(loader, desc=f"Evaluating {name}", leave=True) if rank == 0 else loader
+
     for images, labels in iterator:
-        images, labels = images.to(device), labels.to(device)
+        images = images.to(device)
+        labels = labels.to(device)
+
         outputs, weights, memberships, _ = model(images, return_details=True)
         pred = (outputs.squeeze(1) > 0).long()
-       
+
+        # جمع‌آوری برای دقت
         all_preds.extend(pred.cpu().numpy())
         all_labels.extend(labels.cpu().numpy())
-        all_weights.append(weights.cpu().numpy())
-        all_memberships.append(memberships.cpu().numpy())
-   
+        all_weights.append(weights.cpu())
+        all_memberships.append(memberships.cpu())
+
+        # شمارش مدل‌هایی که واقعاً فعال بودند (وزن > 1e-4)
+        active_per_model = (weights > 1e-4).sum(dim=0).float()
+        activation_counts += active_per_model
+        total_samples += images.size(0)
+
+    dist.all_reduce(activation_counts, op=dist.ReduceOp.SUM)
+    
+    total_samples_tensor = torch.tensor(total_samples, device=device)
+    dist.all_reduce(total_samples_tensor, op=dist.ReduceOp.SUM)
+    total_samples = total_samples_tensor.item()
+
+    all_weights = torch.cat(all_weights).cpu().numpy()
+    all_memberships = torch.cat(all_memberships).cpu().numpy()
+    activation_counts = activation_counts.cpu().numpy()
+
     acc = 100. * np.mean(np.array(all_preds) == np.array(all_labels))
-    avg_weights = np.concatenate(all_weights).mean(axis=0)
-    avg_memberships = np.concatenate(all_memberships).mean(axis=0)
-   
+    avg_weights = all_weights.mean(axis=0)
+    activation_percentages = (activation_counts / total_samples) * 100
+
     if rank == 0:
-        print(f"\n{name} Results → Accuracy: {acc:.2f}%")
-        print("\nFinal Hesitant Fuzzy Weights:")
+        print(f"\n{'='*70}")
+        print(f"{name.upper()} SET RESULTS")
+        print(f"{'='*70}")
+        print(f" → Accuracy: {acc:.3f}%")
+        print(f" → Total Samples: {total_samples:,}")
+
+        print(f"\nAverage Model Weights:")
         for i, (w, name) in enumerate(zip(avg_weights, model_names)):
-            print(f" Model {i+1} ({name}): {w:.4f} ({w*100:.2f}%)")
-     
-        print("\nHesitant Membership Values per Model:")
+            print(f"   {i+1:2d}. {name:<25}: {w:6.4f} ({w*100:5.2f}%)")
+
+        print(f"\nActivation Frequency :")
+        for i, (perc, count, name) in enumerate(zip(activation_percentages, activation_counts, model_names)):
+            print(f"   {i+1:2d}. {name:<25}: {perc:6.2f}% active  ({int(count):,} / {total_samples:,} sample)")
+
+        print(f"\nHesitant Membership Values:")
         for i, name in enumerate(model_names):
-            memberships = avg_memberships[i]
-            variance = memberships.var()
-            print(f" Model {i+1} ({name}):")
-            print(f" Memberships: {[f'{m:.3f}' for m in memberships]}")
-            print(f" Variance (Hesitancy): {variance:.4f}")
- 
-    return acc, avg_weights.tolist(), avg_memberships.tolist()
+            mems = all_memberships[:, i].mean(axis=0) 
+            var = all_memberships[:, i].var(axis=0).mean() 
+            print(f"   {i+1:2d}. {name:<25}: μ = [{', '.join([f'{m:.3f}' for m in mems])}]  |  Hesitancy = {var:.4f}")
+
+        print(f"{'='*70}")
+
+    return acc, avg_weights.tolist(), all_memberships.mean(axis=0).tolist(), activation_percentages.tolist()
 
 @torch.no_grad()
 def evaluate_accuracy_ddp(model, loader, device, rank):
