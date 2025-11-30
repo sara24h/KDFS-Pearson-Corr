@@ -51,10 +51,7 @@ class SoftMaskedConv2d(nn.Module):
 
     def init_mask(self):
         self.mask_weight = nn.Parameter(torch.Tensor(self.out_channels, 2, 1, 1))
-    # اطمینان از اینکه در ابتدا همه فیلترها نگه داشته می‌شوند
-        with torch.no_grad():
-            self.mask_weight[:, 0, :, :] = -1.0  # logit for prune
-            self.mask_weight[:, 1, :, :] =  1.0  # logit for keep
+        nn.init.kaiming_normal_(self.mask_weight)
 
     def compute_mask(self, ticket):
         if ticket:
