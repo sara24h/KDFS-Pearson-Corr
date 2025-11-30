@@ -90,7 +90,7 @@ def compute_filter_correlation(filters, mask_weight, gumbel_temperature=1.0):
     if mask_probs.shape[0] != correlation_scores.shape[0]:
         warnings.warn("Shape mismatch between mask_probs and correlation_scores.")
 
-    correlation_loss = torch.mean(correlation_scores * mask_probs)
+    correlation_loss = torch.mean(correlation_scores * mask_probs*5)
     
     return correlation_loss
 
