@@ -22,6 +22,7 @@ from model.teacher.Mobilenetv2 import MobileNetV2_deepfake
 from model.teacher.GoogleNet import GoogLeNet_deepfake
 from torch import amp
 from utils.loss import compute_filter_correlation
+import torch.nn.functional as F
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
@@ -477,9 +478,20 @@ class TrainDDP:
                         for m in self.student.module.mask_modules:
                             if isinstance(m, SoftMaskedConv2d):
                                 filters = m.weight
-                                mask_weight = m.mask_weight
-                                gumbel_temp = self.student.module.gumbel_temperature
-                                corr_loss, _ = compute_filter_correlation(filters, mask_weight)
+                                if hasattr(m, 'continuous_mask') and m.continuous_mask is not None:
+                                    continuous_mask = m.continuous_mask
+                                #mask_weight = m.mask_weight
+                                #gumbel_temp = self.student.module.gumbel_temperature
+                                else:
+           
+                                    soft_mask = F.gumbel_softmax(
+                                        logits=m.mask_weight, 
+                                        tau=self.student.module.gumbel_temperature, 
+                                        hard=False, 
+                                        dim=1
+                                    )
+                                    continuous_mask = soft_mask[:, 1, :, :].unsqueeze(1)
+                                corr_loss, _ = compute_filter_correlation(filters, continuous_mask)
                                 total_corr_loss += corr_loss.item()
                                 num_layers += 1
                     
