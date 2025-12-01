@@ -51,7 +51,8 @@ class SoftMaskedConv2d(nn.Module):
 
     def init_mask(self):
         self.mask_weight = nn.Parameter(torch.Tensor(self.out_channels, 2, 1, 1))
-        nn.init.kaiming_normal_(self.mask_weight)
+        nn.init.constant_(self.mask_weight, 0.0)
+        nn.init.constant_(self.mask_weight[:, 0, :, :], 1.0) 
 
     def compute_mask(self, ticket):
         if ticket:
