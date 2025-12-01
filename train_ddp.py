@@ -583,8 +583,8 @@ class TrainDDP:
                 )
             
             # Existing layer-wise correlation logging
-                #self.student.eval()
-                #self.student.module.ticket = True
+                self.student.eval()
+                self.student.module.ticket = True
                 layer_corrs = []
                 with torch.no_grad():
                     for m in self.student.module.mask_modules:
@@ -595,8 +595,8 @@ class TrainDDP:
                             _, mean_upper = compute_filter_correlation(filters, mask_weight, gumbel_temp)
                             layer_corrs.append(round(mean_upper, 4))
                 self.logger.info(f"[Layer-wise Mean |Upper Triangular| Correlation] Epoch {epoch}: {layer_corrs}")
-                #self.student.train()
-                #self.student.module.ticket = False
+                self.student.train()
+                self.student.module.ticket = False
         
      
             # Validation
