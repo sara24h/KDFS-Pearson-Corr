@@ -466,6 +466,7 @@ class TrainDDP:
                             )
 
                         mask_loss = self.mask_loss(self.student.module)
+                        raw_corr_loss = mask_loss.item()
 
                         total_loss = (
                             ori_loss
@@ -499,6 +500,8 @@ class TrainDDP:
                             self.coef_rcloss * reduced_rc_loss.item() / len(feature_list_student), n
                         )
                         meter_maskloss.update(self.coef_maskloss * reduced_mask_loss.item(), n)
+                        self.writer.add_scalar("train/loss/raw_corr_loss", raw_corr_loss, global_step=epoch)
+                        self.logger.info(f"[Train] Epoch {epoch} Raw_Correlation_Loss (1/L Σ L_corr,l): {raw_corr_loss:.8f}")
                         meter_loss.update(reduced_total_loss.item(), n)
                         meter_top1.update(reduced_prec1.item(), n)
 
