@@ -21,6 +21,7 @@ from model.teacher.ResNet import ResNet_50_hardfakevsreal
 from model.teacher.Mobilenetv2 import MobileNetV2_deepfake
 from model.teacher.GoogleNet import GoogLeNet_deepfake
 from torch import amp
+from utils.loss import compute_filter_correlation
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
