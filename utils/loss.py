@@ -82,11 +82,10 @@ def compute_filter_correlation(filters, continuous_mask=None):
     else:
         # اگر ماسک نداریم، میانگین ساده
         correlation_loss = torch.mean(correlation_scores)
-    
-    # برای لاگینگ: میانگین قدرمطلق همبستگی‌های بالامثلثی
+
     triu_indices = torch.triu_indices(num_filters, num_filters, offset=1, device=device)
     upper_corr_values = corr_matrix[triu_indices[0], triu_indices[1]]
-    mean_abs_corr = torch.upper_corr_values.mean().item()
+    mean_abs_corr = upper_corr_values.mean().item()
     
     return correlation_loss, mean_abs_corr
 
