@@ -34,53 +34,61 @@ def compute_filter_correlation(filters, mask_weight, gumbel_temperature=1.0):
         warnings.warn("Mask weights contain NaN.")
     if torch.isinf(mask_weight).any():
         warnings.warn("Mask weights contain Inf values.")
-   
+    
     num_filters = filters.shape[0]
-   
     if num_filters < 2:
-        print('less then 2 filters')
-   
-    filters_flat = filters.view(num_filters, -1)
-    variance = torch.var(filters_flat, dim=1)
-    zero_variance_indices = torch.where(variance == 0)[0]
-    if len(zero_variance_indices) > 0:
-        warnings.warn(f"{len(zero_variance_indices)} filters have zero variance.")
-   
-    mean = torch.mean(filters_flat, dim=1, keepdim=True)
+        return torch.tensor(0.0, device=filters.device, requires_grad=True)
+    
+    filters_flat = filters.view(num_filters, -1)  # (C, W)
+    W = filters_flat.shape[1]
+
+    # محاسبه میانگین و مرکز کردن
+    mean = filters_flat.mean(dim=1, keepdim=True)
     centered = filters_flat - mean
-    std = torch.std(filters_flat, dim=1, keepdim=True)
-    #epsilon = 1e-4
-    filters_normalized = centered / (std)
-    #norm = torch.norm(filters_normalized, dim=1, keepdim=True)
-    #filters_normalized = filters_normalized / (norm + epsilon)
-   
+
+    # محاسبه واریانس biased (تقسیم بر W)
+    variance = (centered ** 2).mean(dim=1, keepdim=True)
+    std = torch.sqrt(variance + 1e-8)  # epsilon برای جلوگیری از تقسیم بر صفر
+
+    # نرمال‌سازی
+    filters_normalized = centered / std
+
+    # 🔍 بررسی صریح NaN و Inf (همانطور که تو خواستی)
     if torch.isnan(filters_normalized).any():
         warnings.warn("Normalized filters contain NaN.")
     if torch.isinf(filters_normalized).any():
         warnings.warn("Normalized filters contain Inf values.")
-   
-    corr_matrix = torch.matmul(filters_normalized, filters_normalized.t())
-   
+    
+    # ماتریس همبستگی پیرسون (biased): 1/W * sum(z_i * z_j)
+    corr_matrix = torch.matmul(filters_normalized, filters_normalized.t()) / W
+
     if torch.isnan(corr_matrix).any():
         warnings.warn("Correlation matrix contains NaN values.")
     if torch.isinf(corr_matrix).any():
         warnings.warn("Correlation matrix contains Inf values.")
-    mask = ~torch.eye(num_filters, num_filters, device=filters.device).bool()
-   
-    correlation_scores = torch.sum((corr_matrix * mask.float())**2, dim=1)
-    correlation_scores = correlation_scores / (num_filters - 1)
-   
+
+    # کلیپ برای اطمینان از بازه معتبر (اختیاری ولی توصیه‌شده)
+    corr_matrix = torch.clamp(corr_matrix, -1.0, 1.0)
+
+    # حذف قطر اصلی
+    mask = ~torch.eye(num_filters, dtype=torch.bool, device=filters.device)
+    off_diag_corrs = corr_matrix[mask].view(num_filters, num_filters - 1)
+    correlation_scores = (off_diag_corrs ** 2).mean(dim=1)
+
     if torch.isnan(correlation_scores).any():
         warnings.warn("Correlation scores contain NaN values.")
     if torch.isinf(correlation_scores).any():
         warnings.warn("Correlation scores contain Inf values.")
-    mask_probs = F.gumbel_softmax(logits=mask_weight, tau=gumbel_temperature, hard=False, dim=1)[:, 1, :, :]
+
+    # احتمال نگه‌داشتن از mask
+    mask_probs = F.gumbel_softmax(logits=mask_weight, tau=gumbel_temperature, hard=False, dim=1)[:, 1]
     mask_probs = mask_probs.squeeze(-1).squeeze(-1)
-   
+
     if mask_probs.shape[0] != correlation_scores.shape[0]:
         warnings.warn("Shape mismatch between mask_probs and correlation_scores.")
+        return torch.tensor(0.0, device=filters.device, requires_grad=True)
+
     correlation_loss = torch.mean(correlation_scores * mask_probs)
-   
     return correlation_loss
     
 class MaskLoss(nn.Module):
