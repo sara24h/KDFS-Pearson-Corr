@@ -21,7 +21,9 @@ from model.teacher.ResNet import ResNet_50_hardfakevsreal
 from model.teacher.Mobilenetv2 import MobileNetV2_deepfake
 from model.teacher.GoogleNet import GoogLeNet_deepfake
 from torch import amp
+
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
 class TrainDDP:
     def __init__(self, args):
         self.args = args
@@ -54,6 +56,8 @@ class TrainDDP:
         self.world_size = 0
         self.local_rank = -1
         self.rank = -1
+
+
         if self.dataset_mode == "rvf10k":
             self.args.dataset_type = "rvf10k"
             self.num_classes = 1
@@ -76,15 +80,19 @@ class TrainDDP:
             self.image_size = 256
         else:
             raise ValueError("dataset_mode must be 'hardfake', 'rvf10k', '140k', '200k', '190k', or '330k'")
+
         self.arch = args.arch.lower().replace('_', '')
+
         if self.arch not in ['resnet50', 'mobilenetv2','googlenet']:
             raise ValueError(f"Unsupported architecture: '{args.arch}'. It must be 'resnet50' or 'MobileNetV2'.")
+
     def dist_init(self):
         dist.init_process_group("nccl")
         self.world_size = dist.get_world_size()
         self.rank = dist.get_rank()
         self.local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(self.local_rank)
+
     def result_init(self):
         if self.rank == 0:
             if not os.path.exists(self.result_dir):
@@ -99,6 +107,7 @@ class TrainDDP:
                 self.args, os.path.join(self.result_dir, "train_config.txt")
             )
             self.logger.info("--------- Train -----------")
+
     def setup_seed(self):
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
         torch.use_deterministic_algorithms(True)
@@ -113,9 +122,11 @@ class TrainDDP:
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
             torch.backends.cudnn.enabled = True
+
     def dataload(self):
         if self.dataset_mode not in ['hardfake', 'rvf10k', '140k', '200k', '190k', '330k']:
             raise ValueError("dataset_mode must be 'hardfake', 'rvf10k', '140k', '200k', '190k', or '330k'")
+
         rvf10k_train_csv = None
         rvf10k_valid_csv = None
         rvf10k_root_dir = None
@@ -129,6 +140,8 @@ class TrainDDP:
         realfake200k_root_dir = None
         realfake190k_root_dir = None
         realfake330k_root_dir = None
+
+
         if self.dataset_mode == 'rvf10k':
             rvf10k_train_csv = os.path.join(self.dataset_dir, 'train.csv')
             rvf10k_valid_csv = os.path.join(self.dataset_dir, 'valid.csv')
@@ -170,10 +183,13 @@ class TrainDDP:
             realfake330k_root_dir = self.dataset_dir
             if self.rank == 0 and not os.path.exists(realfake330k_root_dir):
                 raise FileNotFoundError(f"330k dataset directory not found: {realfake330k_root_dir}")
+
         if self.rank == 0:
             self.logger.info(f"Loading dataset: {self.dataset_mode}")
+
         dataset_instance = Dataset_selector(
             dataset_mode=self.dataset_mode,
+
             rvf10k_train_csv=rvf10k_train_csv,
             rvf10k_valid_csv=rvf10k_valid_csv,
             rvf10k_root_dir=rvf10k_root_dir,
@@ -193,40 +209,47 @@ class TrainDDP:
             pin_memory=self.pin_memory,
             ddp=True
         )
+
         self.train_loader = dataset_instance.loader_train
         self.val_loader = dataset_instance.loader_val
         self.test_loader = dataset_instance.loader_test
         if self.rank == 0:
             self.logger.info("Dataset has been loaded!")
+
     def build_model(self):
         if self.rank == 0:
             self.logger.info("==> Building model..")
             self.logger.info("Loading teacher model")
+
         if self.arch == 'resnet50':
             teacher_model = ResNet_50_hardfakevsreal()
         elif self.arch == 'mobilenetv2':
             # Use the standard MobileNetV2 architecture for the teacher
             teacher_model = MobileNetV2_deepfake()
+
         elif self.arch == 'googlenet':
             # Use the standard MobileNetV2 architecture for the teacher
             teacher_model = GoogLeNet_deepfake()
         else:
             raise ValueError(f"Unsupported architecture: {self.arch}")
+
         # --- FIX 1: Robustly load teacher weights ---
         # This code removes the 'module.' prefix added by DDP
         ckpt_teacher = torch.load(self.teacher_ckpt_path, map_location="cpu")
         # Handle different checkpoint saving conventions
         state_dict = ckpt_teacher.get('config_state_dict', ckpt_teacher.get('student', ckpt_teacher))
+
         if list(state_dict.keys())[0].startswith('module.'):
             from collections import OrderedDict
             new_state_dict = OrderedDict()
             for k, v in state_dict.items():
-                name = k.replace('module.', '', 1) # remove `module.`
+                name = k.replace('module.', '', 1)  # remove `module.`
                 new_state_dict[name] = v
             state_dict = new_state_dict
-       
+        
         teacher_model.load_state_dict(state_dict, strict=True)
         self.teacher = teacher_model.cuda()
+
         if self.rank == 0:
             self.logger.info("Testing teacher model on validation batch...")
             with torch.no_grad():
@@ -238,11 +261,13 @@ class TrainDDP:
                     preds = (torch.sigmoid(logits) > 0.5).float()
                     correct += (preds == targets).sum().item()
                     total += images.size(0)
-                    break
+                    break 
                 accuracy = 100. * correct / total
                 self.logger.info(f"Teacher accuracy on validation batch: {accuracy:.2f}%")
+
         if self.rank == 0:
             self.logger.info("Building student model")
+
         # Select the correct sparse student model class
         if self.arch == 'resnet50':
             StudentModelClass = ResNet_50_sparse_rvf10k if self.dataset_mode != "hardfake" else ResNet_50_sparse_hardfakevsreal
@@ -252,30 +277,37 @@ class TrainDDP:
             StudentModelClass =GoogLeNet_sparse_deepfake
         else:
             raise ValueError(f"Unsupported architecture for student: {self.arch}")
+
         # Instantiate the student model
         self.student = StudentModelClass(
             gumbel_start_temperature=self.gumbel_start_temperature,
             gumbel_end_temperature=self.gumbel_end_temperature,
             num_epochs=self.num_epochs,
         )
+
         self.student.dataset_type = self.args.dataset_type
+
         if self.arch == 'mobilenetv2':
             num_ftrs = self.student.classifier.in_features
             self.student.classifier = nn.Linear(num_ftrs, 1)
+
         elif self.arch == 'googlenet':
+
             num_ftrs = self.student.fc.in_features
             self.student.fc = nn.Linear(num_ftrs, 1)
         else:
             num_ftrs = self.student.fc.in_features
             self.student.fc = nn.Linear(num_ftrs, 1)
-           
+            
         self.student = self.student.cuda()
         self.student = DDP(self.student, device_ids=[self.local_rank])
+
     def define_loss(self):
         self.ori_loss = nn.BCEWithLogitsLoss().cuda()
         self.kd_loss = loss.KDLoss().cuda()
         self.rc_loss = loss.RCLoss().cuda()
         self.mask_loss = loss.MaskLoss().cuda()
+
     def define_optim(self):
         weight_params = map(
             lambda a: a[1],
@@ -291,10 +323,12 @@ class TrainDDP:
                 self.student.module.named_parameters(),
             ),
         )
+
         self.optim_weight = torch.optim.Adamax(
             weight_params, lr=self.lr, weight_decay=self.weight_decay, eps=1e-7
         )
         self.optim_mask = torch.optim.Adamax(mask_params, lr=self.lr, eps=1e-7)
+
         self.scheduler_student_weight = scheduler.CosineAnnealingLRWarmup(
             self.optim_weight,
             T_max=self.lr_decay_T_max,
@@ -311,6 +345,7 @@ class TrainDDP:
             warmup_steps=self.warmup_steps,
             warmup_start_lr=self.warmup_start_lr,
         )
+
     def resume_student_ckpt(self):
         if not os.path.exists(self.resume):
             raise FileNotFoundError(f"Checkpoint file not found: {self.resume}")
@@ -328,11 +363,13 @@ class TrainDDP:
         )
         if self.rank == 0:
             self.logger.info("=> Continue from epoch {}...".format(self.start_epoch + 1))
+
     def save_student_ckpt(self, is_best, epoch):
         if self.rank == 0:
             folder = os.path.join(self.result_dir, "student_model")
             if not os.path.exists(folder):
                 os.makedirs(folder)
+
             ckpt_student = {}
             ckpt_student["best_prec1"] = self.best_prec1
             ckpt_student["start_epoch"] = epoch
@@ -341,25 +378,31 @@ class TrainDDP:
             ckpt_student["optim_mask"] = self.optim_mask.state_dict()
             ckpt_student["scheduler_student_weight"] = self.scheduler_student_weight.state_dict()
             ckpt_student["scheduler_student_mask"] = self.scheduler_student_mask.state_dict()
+
             if is_best:
                 torch.save(
                     ckpt_student,
                     os.path.join(folder, self.arch + "_sparse_best.pt"),
                 )
             torch.save(ckpt_student, os.path.join(folder, self.arch + "_sparse_last.pt"))
+
     def reduce_tensor(self, tensor):
         rt = tensor.clone()
         dist.all_reduce(rt, op=dist.ReduceOp.SUM)
         rt /= self.world_size
         return rt
+
     def train(self):
         if self.rank == 0:
             self.logger.info(f"Starting training from epoch: {self.start_epoch + 1}")
+
         torch.cuda.empty_cache()
         self.teacher.eval()
         scaler = GradScaler()
+
         if self.resume:
             self.resume_student_ckpt()
+
         if self.rank == 0:
             meter_oriloss = meter.AverageMeter("OriLoss", ":.4e")
             meter_kdloss = meter.AverageMeter("KDLoss", ":.4e")
@@ -367,6 +410,7 @@ class TrainDDP:
             meter_maskloss = meter.AverageMeter("MaskLoss", ":.6e")
             meter_loss = meter.AverageMeter("Loss", ":.4e")
             meter_top1 = meter.AverageMeter("Acc@1", ":6.2f")
+
         for epoch in range(self.start_epoch + 1, self.num_epochs + 1):
             self.train_loader.sampler.set_epoch(epoch)
             self.student.train()
@@ -383,6 +427,7 @@ class TrainDDP:
                     if epoch > 1
                     else self.warmup_start_lr
                 )
+
             self.student.module.update_gumbel_temperature(epoch)
             with tqdm(total=len(self.train_loader), ncols=100, disable=self.rank != 0) as _tqdm:
                 if self.rank == 0:
@@ -392,41 +437,51 @@ class TrainDDP:
                     self.optim_mask.zero_grad()
                     images = images.cuda()
                     targets = targets.cuda().float()
+
                     if torch.isnan(images).any() or torch.isinf(images).any() or torch.isnan(targets).any() or torch.isinf(targets).any():
                         if self.rank == 0:
                             self.logger.warning("Invalid input detected (NaN or Inf)")
                         continue
+
                     with autocast():
                         logits_student, feature_list_student = self.student(images)
                         logits_student = logits_student.squeeze(1)
                         with torch.no_grad():
                             logits_teacher, feature_list_teacher = self.teacher(images)
                             logits_teacher = logits_teacher.squeeze(1)
+
                         ori_loss = self.ori_loss(logits_student, targets)
+
                         kd_loss = (self.target_temperature**2) * self.kd_loss(
                             logits_teacher,
                             logits_student,
                             self.target_temperature
                         )
+
                         rc_loss = torch.tensor(0.0, device=images.device, dtype=torch.float32)
                         for i in range(len(feature_list_student)):
                             rc_loss = rc_loss + self.rc_loss(
                                 feature_list_student[i], feature_list_teacher[i]
                             )
+
                         mask_loss = self.mask_loss(self.student.module)
+
                         total_loss = (
                             ori_loss
                             + self.coef_kdloss * kd_loss
                             + self.coef_rcloss * rc_loss / len(feature_list_student)
                             + self.coef_maskloss * mask_loss
                         )
+
                     scaler.scale(total_loss).backward()
                     scaler.step(self.optim_weight)
                     scaler.step(self.optim_mask)
                     scaler.update()
+
                     preds = (torch.sigmoid(logits_student) > 0.5).float()
                     correct = (preds == targets).sum().item()
                     prec1 = 100. * correct / images.size(0)
+
                     dist.barrier()
                     reduced_ori_loss = self.reduce_tensor(ori_loss)
                     reduced_kd_loss = self.reduce_tensor(kd_loss)
@@ -434,6 +489,7 @@ class TrainDDP:
                     reduced_mask_loss = self.reduce_tensor(mask_loss)
                     reduced_total_loss = self.reduce_tensor(total_loss)
                     reduced_prec1 = self.reduce_tensor(torch.tensor(prec1).cuda())
+
                     if self.rank == 0:
                         n = images.size(0)
                         meter_oriloss.update(reduced_ori_loss.item(), n)
@@ -444,14 +500,18 @@ class TrainDDP:
                         meter_maskloss.update(self.coef_maskloss * reduced_mask_loss.item(), n)
                         meter_loss.update(reduced_total_loss.item(), n)
                         meter_top1.update(reduced_prec1.item(), n)
+
                         _tqdm.set_postfix(
                             loss="{:.4f}".format(meter_loss.avg),
                             train_acc="{:.4f}".format(meter_top1.avg),
                         )
                         _tqdm.update(1)
+
                     time.sleep(0.01)
+
             self.scheduler_student_weight.step()
             self.scheduler_student_mask.step()
+
             if self.rank == 0:
                 Flops = self.student.module.get_flops()
                 self.writer.add_scalar("train/loss/ori_loss", meter_oriloss.avg, global_step=epoch)
@@ -463,6 +523,7 @@ class TrainDDP:
                 self.writer.add_scalar("train/lr/lr", lr, global_step=epoch)
                 self.writer.add_scalar("train/temperature/gumbel_temperature", self.student.module.gumbel_temperature, global_step=epoch)
                 self.writer.add_scalar("train/Flops", Flops, global_step=epoch)
+
                 self.logger.info(
                     "[Train] "
                     "Epoch {0} : "
@@ -485,33 +546,18 @@ class TrainDDP:
                         train_acc=meter_top1.avg,
                     )
                 )
+
                 masks = []
                 for _, m in enumerate(self.student.module.mask_modules):
                     masks.append(round(m.mask.mean().item(), 2))
                 self.logger.info("[Train mask avg] Epoch {0} : ".format(epoch) + str(masks))
-                layer_sums = []
-                for layer_idx, m in enumerate(self.student.module.mask_modules):
-                    if isinstance(m, SoftMaskedConv2d):
-                        filters = m.weight
-                        num_filters = filters.shape[0]
-                        if num_filters < 2:
-                            layer_sums.append(0.0)
-                            continue
-                        filters_flat = filters.view(num_filters, -1)
-                        mean = torch.mean(filters_flat, dim=1, keepdim=True)
-                        centered = filters_flat - mean
-                        std = torch.std(filters_flat, dim=1, keepdim=True) + 1e-8
-                        filters_normalized = centered / std
-                        corr_matrix = torch.matmul(filters_normalized, filters_normalized.t())
-                        upper_tri = torch.triu(corr_matrix, diagonal=1)
-                        upper_sum = torch.sum(upper_tri).item()
-                        layer_sums.append(upper_sum)
-                self.logger.info("[Train correlation upper sum] Epoch {0} : ".format(epoch) + str(layer_sums))
+
                 self.logger.info(
                     "[Train model Flops] Epoch {0} : ".format(epoch)
                     + str(Flops.item() / (10**6))
                     + "M"
                 )
+
             # Validation
             if self.rank == 0:
                 self.student.eval()
@@ -523,9 +569,11 @@ class TrainDDP:
                         for images, targets in self.val_loader:
                             images = images.cuda()
                             targets = targets.cuda().float()
+
                             if torch.isnan(images).any() or torch.isinf(images).any() or torch.isnan(targets).any() or torch.isinf(targets).any():
                                 self.logger.warning("Invalid input detected in validation (NaN or Inf)")
                                 continue
+
                             logits_student, _ = self.student(images)
                             logits_student = logits_student.squeeze(1)
                             preds = (torch.sigmoid(logits_student) > 0.5).float()
@@ -533,14 +581,17 @@ class TrainDDP:
                             prec1 = 100. * correct / images.size(0)
                             n = images.size(0)
                             meter_top1.update(prec1, n)
+
                             _tqdm.set_postfix(
                                 val_acc="{:.4f}".format(meter_top1.avg),
                             )
                             _tqdm.update(1)
                             time.sleep(0.01)
+
                 Flops = self.student.module.get_flops()
                 self.writer.add_scalar("val/acc/top1", meter_top1.avg, global_step=epoch)
                 self.writer.add_scalar("val/Flops", Flops, global_step=epoch)
+
                 self.logger.info(
                     "[Val] "
                     "Epoch {0} : "
@@ -549,25 +600,31 @@ class TrainDDP:
                         val_acc=meter_top1.avg,
                     )
                 )
+
                 masks = []
                 for _, m in enumerate(self.student.module.mask_modules):
                     masks.append(round(m.mask.mean().item(), 2))
                 self.logger.info("[Val mask avg] Epoch {0} : ".format(epoch) + str(masks))
+
                 self.logger.info(
                     "[Val model Flops] Epoch {0} : ".format(epoch)
                     + str(Flops.item() / (10**6))
                     + "M"
                 )
+
                 if self.best_prec1 < meter_top1.avg:
                     self.best_prec1 = meter_top1.avg
                     self.save_student_ckpt(True, epoch)
                 else:
                     self.save_student_ckpt(False, epoch)
+
                 self.logger.info(
                     " => Best top1 accuracy on validation before finetune : " + str(self.best_prec1)
                 )
+
         if self.rank == 0:
             self.logger.info("Train finished!")
+
     def main(self):
         self.dist_init()
         self.result_init()
