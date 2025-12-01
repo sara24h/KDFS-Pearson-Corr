@@ -479,7 +479,7 @@ class TrainDDP:
                                 filters = m.weight
                                 mask_weight = m.mask_weight
                                 gumbel_temp = self.student.module.gumbel_temperature
-                                corr_loss, _ = compute_filter_correlation(filters, mask_weight, gumbel_temp)
+                                corr_loss, _ = compute_filter_correlation(filters, mask_weight)
                                 total_corr_loss += corr_loss.item()
                                 num_layers += 1
                     
