@@ -464,7 +464,7 @@ class TrainDDP:
                                 feature_list_student[i], feature_list_teacher[i]
                             )
 
-                        mask_loss = self.mask_loss(self.student.module)
+                        mask_loss, avg_self_correlation = self.mask_loss(self.student.module)
 
                         total_loss = (
                             ori_loss
@@ -524,6 +524,15 @@ class TrainDDP:
                 self.writer.add_scalar("train/temperature/gumbel_temperature", self.student.module.gumbel_temperature, global_step=epoch)
                 self.writer.add_scalar("train/Flops", Flops, global_step=epoch)
 
+                self.logger.info(
+                    "[Self-Correlation] "
+                    "Epoch {0} : "
+                    "Avg Correlation {self_corr:.4f}".format(
+                        epoch,
+                        self_corr=avg_self_correlation.item()
+                    )
+                )
+                self.writer.add_scalar("train/self_correlation", avg_self_correlation.item(), global_step=epoch)
                 self.logger.info(
                     "[Train] "
                     "Epoch {0} : "
