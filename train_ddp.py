@@ -433,7 +433,8 @@ class TrainDDP:
             with tqdm(total=len(self.train_loader), ncols=100, disable=self.rank != 0) as _tqdm:
                 if self.rank == 0:
                     _tqdm.set_description("epoch: {}/{}".format(epoch, self.num_epochs))
-                for images, targets in self.train_loader:
+                    
+                for step, (images, targets) in enumerate(self.train_loader):
                     self.optim_weight.zero_grad()
                     self.optim_mask.zero_grad()
                     images = images.cuda()
