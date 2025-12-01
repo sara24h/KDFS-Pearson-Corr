@@ -29,6 +29,8 @@ class RCLoss(nn.Module):
 
 import warnings
 
+import warnings
+
 def compute_filter_correlation(filters, mask_weight, gumbel_temperature=1.0):
 
     if torch.isnan(filters).any():
@@ -69,6 +71,9 @@ def compute_filter_correlation(filters, mask_weight, gumbel_temperature=1.0):
     
     corr_matrix = torch.matmul(filters_normalized, filters_normalized.t())
     
+    self_correlation = torch.diag(corr_matrix)
+  
+    
     if torch.isnan(corr_matrix).any():
         warnings.warn("Correlation matrix contains NaN values.")
     if torch.isinf(corr_matrix).any():
@@ -91,8 +96,9 @@ def compute_filter_correlation(filters, mask_weight, gumbel_temperature=1.0):
         warnings.warn("Shape mismatch between mask_probs and correlation_scores.")
 
     correlation_loss = torch.mean(correlation_scores * mask_probs)
-    
-    return correlation_loss
+ 
+    return correlation_loss, self_correlation
+  
 
 class MaskLoss(nn.Module):
     def __init__(self):
