@@ -592,8 +592,8 @@ class TrainDDP:
                             filters = m.weight.data
                             mask_weight = m.mask_weight.data
                             gumbel_temp = self.student.module.gumbel_temperature
-                            _, mean_upper = compute_filter_correlation(filters, mask_weight, gumbel_temp)
-                            layer_corrs.append(round(mean_upper, 4))
+                            _, mean_abs_corr = compute_filter_correlation(filters, continuous_mask=None)
+                            layer_corrs.append(round(mean_abs_corr, 4))
                 self.logger.info(f"[Layer-wise Mean |Upper Triangular| Correlation] Epoch {epoch}: {layer_corrs}")
                 self.student.train()
                 self.student.module.ticket = False
