@@ -396,14 +396,12 @@ class TrainDDP:
     def train(self):
         if self.rank == 0:
             self.logger.info(f"Starting training from epoch: {self.start_epoch + 1}")
-
         torch.cuda.empty_cache()
         self.teacher.eval()
         scaler = GradScaler()
-
         if self.resume:
             self.resume_student_ckpt()
-
+    
         if self.rank == 0:
             meter_oriloss = meter.AverageMeter("OriLoss", ":.4e")
             meter_kdloss = meter.AverageMeter("KDLoss", ":.4e")
@@ -411,11 +409,14 @@ class TrainDDP:
             meter_maskloss = meter.AverageMeter("MaskLoss", ":.6e")
             meter_loss = meter.AverageMeter("Loss", ":.4e")
             meter_top1 = meter.AverageMeter("Acc@1", ":6.2f")
-
+        # NEW: Add meter for average correlation across layers
+            meter_avg_corr = meter.AverageMeter("Corr Loss", ":.6f")
+    
         for epoch in range(self.start_epoch + 1, self.num_epochs + 1):
             self.train_loader.sampler.set_epoch(epoch)
             self.student.train()
             self.student.module.ticket = False
+        
             if self.rank == 0:
                 meter_oriloss.reset()
                 meter_kdloss.reset()
@@ -423,68 +424,83 @@ class TrainDDP:
                 meter_maskloss.reset()
                 meter_loss.reset()
                 meter_top1.reset()
+                meter_avg_corr.reset()  # NEW: Reset correlation meter
                 lr = (
                     self.optim_weight.state_dict()["param_groups"][0]["lr"]
                     if epoch > 1
                     else self.warmup_start_lr
                 )
-
+        
             self.student.module.update_gumbel_temperature(epoch)
+        
             with tqdm(total=len(self.train_loader), ncols=100, disable=self.rank != 0) as _tqdm:
                 if self.rank == 0:
                     _tqdm.set_description("epoch: {}/{}".format(epoch, self.num_epochs))
-                    
-                for step, (images, targets) in enumerate(self.train_loader):
+            
+                for images, targets in self.train_loader:
                     self.optim_weight.zero_grad()
                     self.optim_mask.zero_grad()
                     images = images.cuda()
                     targets = targets.cuda().float()
-
+                
                     if torch.isnan(images).any() or torch.isinf(images).any() or torch.isnan(targets).any() or torch.isinf(targets).any():
                         if self.rank == 0:
                             self.logger.warning("Invalid input detected (NaN or Inf)")
                         continue
-
+                
                     with autocast():
                         logits_student, feature_list_student = self.student(images)
                         logits_student = logits_student.squeeze(1)
+                    
                         with torch.no_grad():
                             logits_teacher, feature_list_teacher = self.teacher(images)
                             logits_teacher = logits_teacher.squeeze(1)
-
+                    
                         ori_loss = self.ori_loss(logits_student, targets)
-
                         kd_loss = (self.target_temperature**2) * self.kd_loss(
                             logits_teacher,
                             logits_student,
                             self.target_temperature
                         )
-
+                    
                         rc_loss = torch.tensor(0.0, device=images.device, dtype=torch.float32)
                         for i in range(len(feature_list_student)):
                             rc_loss = rc_loss + self.rc_loss(
                                 feature_list_student[i], feature_list_teacher[i]
                             )
-
+                    
                         mask_loss = self.mask_loss(self.student.module)
-                        raw_corr_loss = mask_loss.item()
-
+                    
+                    # NEW: Compute average correlation WITHOUT lambda coefficient
+                        total_corr_loss = 0.0
+                        num_layers = 0
+                        for m in self.student.module.mask_modules:
+                            if isinstance(m, SoftMaskedConv2d):
+                                filters = m.weight
+                                mask_weight = m.mask_weight
+                                gumbel_temp = self.student.module.gumbel_temperature
+                                corr_loss, _ = compute_filter_correlation(filters, mask_weight, gumbel_temp)
+                                total_corr_loss += corr_loss.item()
+                                num_layers += 1
+                    
+                        avg_corr_loss = total_corr_loss / num_layers if num_layers > 0 else 0.0
+                    
                         total_loss = (
                             ori_loss
                             + self.coef_kdloss * kd_loss
                             + self.coef_rcloss * rc_loss / len(feature_list_student)
                             + self.coef_maskloss * mask_loss
                         )
-
+                
                     scaler.scale(total_loss).backward()
                     scaler.step(self.optim_weight)
                     scaler.step(self.optim_mask)
                     scaler.update()
-
+                
                     preds = (torch.sigmoid(logits_student) > 0.5).float()
                     correct = (preds == targets).sum().item()
                     prec1 = 100. * correct / images.size(0)
-
+                
                     dist.barrier()
                     reduced_ori_loss = self.reduce_tensor(ori_loss)
                     reduced_kd_loss = self.reduce_tensor(kd_loss)
@@ -492,7 +508,9 @@ class TrainDDP:
                     reduced_mask_loss = self.reduce_tensor(mask_loss)
                     reduced_total_loss = self.reduce_tensor(total_loss)
                     reduced_prec1 = self.reduce_tensor(torch.tensor(prec1).cuda())
-
+                # NEW: Reduce average correlation across GPUs
+                    reduced_avg_corr = self.reduce_tensor(torch.tensor(avg_corr_loss).cuda())
+                
                     if self.rank == 0:
                         n = images.size(0)
                         meter_oriloss.update(reduced_ori_loss.item(), n)
@@ -501,23 +519,20 @@ class TrainDDP:
                             self.coef_rcloss * reduced_rc_loss.item() / len(feature_list_student), n
                         )
                         meter_maskloss.update(self.coef_maskloss * reduced_mask_loss.item(), n)
-                        global_step = epoch * len(self.train_loader) + step
-                        self.writer.add_scalar("train/loss/raw_corr_loss", raw_corr_loss, global_step)
-                        
                         meter_loss.update(reduced_total_loss.item(), n)
                         meter_top1.update(reduced_prec1.item(), n)
-
+                        meter_avg_corr.update(reduced_avg_corr.item(), n)  # NEW: Update correlation meter
+                    
                         _tqdm.set_postfix(
                             loss="{:.4f}".format(meter_loss.avg),
                             train_acc="{:.4f}".format(meter_top1.avg),
                         )
                         _tqdm.update(1)
-
                     time.sleep(0.01)
-
+        
             self.scheduler_student_weight.step()
             self.scheduler_student_mask.step()
-
+        
             if self.rank == 0:
                 Flops = self.student.module.get_flops()
                 self.writer.add_scalar("train/loss/ori_loss", meter_oriloss.avg, global_step=epoch)
@@ -529,7 +544,9 @@ class TrainDDP:
                 self.writer.add_scalar("train/lr/lr", lr, global_step=epoch)
                 self.writer.add_scalar("train/temperature/gumbel_temperature", self.student.module.gumbel_temperature, global_step=epoch)
                 self.writer.add_scalar("train/Flops", Flops, global_step=epoch)
-
+            # NEW: Log average correlation metric
+                self.writer.add_scalar("train/avg_correlation_loss", meter_avg_corr.avg, global_step=epoch)
+            
                 self.logger.info(
                     "[Train] "
                     "Epoch {0} : "
@@ -540,7 +557,8 @@ class TrainDDP:
                     "RCLoss {rc_loss:.4f} "
                     "MaskLoss {mask_loss:.6f} "
                     "TotalLoss {total_loss:.4f} "
-                    "Train_Acc {train_acc:.2f}".format(
+                    "Train_Acc {train_acc:.2f} "
+                    "AvgCorrLoss {avg_corr:.6f}".format(  # NEW: Add to log
                         epoch,
                         gumbel_temperature=self.student.module.gumbel_temperature,
                         lr=lr,
@@ -550,23 +568,23 @@ class TrainDDP:
                         mask_loss=meter_maskloss.avg,
                         total_loss=meter_loss.avg,
                         train_acc=meter_top1.avg,
+                        avg_corr=meter_avg_corr.avg  # NEW
                     )
                 )
-
+            
                 masks = []
                 for _, m in enumerate(self.student.module.mask_modules):
                     masks.append(round(m.mask.mean().item(), 2))
                 self.logger.info("[Train mask avg] Epoch {0} : ".format(epoch) + str(masks))
-
                 self.logger.info(
                     "[Train model Flops] Epoch {0} : ".format(epoch)
                     + str(Flops.item() / (10**6))
                     + "M"
-                ) 
-  
-         
+                )
+            
+            # Existing layer-wise correlation logging
                 self.student.eval()
-                self.student.module.ticket = True  
+                self.student.module.ticket = True
                 layer_corrs = []
                 with torch.no_grad():
                     for m in self.student.module.mask_modules:
@@ -579,12 +597,8 @@ class TrainDDP:
                 self.logger.info(f"[Layer-wise Mean |Upper Triangular| Correlation] Epoch {epoch}: {layer_corrs}")
                 self.student.train()
                 self.student.module.ticket = False
-                
-            if self.rank == 0:
-    # محاسبه میانگین واقعی Raw Correlation Loss در کل epoch
-                avg_raw_corr_loss = meter_maskloss.avg / self.coef_maskloss  # چون mask_loss با coef ضرب شده
-                self.logger.info(f"[Train] Epoch {epoch} Final Raw_Correlation_Loss (epoch avg): {avg_raw_corr_loss:.8f}")
-
+        
+     
             # Validation
             if self.rank == 0:
                 self.student.eval()
