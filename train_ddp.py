@@ -406,11 +406,11 @@ class TrainDDP:
             meter_oriloss = meter.AverageMeter("OriLoss", ":.4e")
             meter_kdloss = meter.AverageMeter("KDLoss", ":.4e")
             meter_rcloss = meter.AverageMeter("RCLoss", ":.4e")
-            meter_maskloss = meter.AverageMeter("MaskLoss", ":.6e")
+            meter_maskloss = meter.AverageMeter("CorrLoss", ":.6e")
             meter_loss = meter.AverageMeter("Loss", ":.4e")
             meter_top1 = meter.AverageMeter("Acc@1", ":6.2f")
         # NEW: Add meter for average correlation across layers
-            meter_avg_corr = meter.AverageMeter("Corr Loss", ":.6f")
+            meter_avg_corr = meter.AverageMeter("Avg Corr Loss", ":.6f")
     
         for epoch in range(self.start_epoch + 1, self.num_epochs + 1):
             self.train_loader.sampler.set_epoch(epoch)
@@ -538,7 +538,7 @@ class TrainDDP:
                 self.writer.add_scalar("train/loss/ori_loss", meter_oriloss.avg, global_step=epoch)
                 self.writer.add_scalar("train/loss/kd_loss", meter_kdloss.avg, global_step=epoch)
                 self.writer.add_scalar("train/loss/rc_loss", meter_rcloss.avg, global_step=epoch)
-                self.writer.add_scalar("train/loss/mask_loss", meter_maskloss.avg, global_step=epoch)
+                self.writer.add_scalar("train/loss/corr_loss", meter_maskloss.avg, global_step=epoch)
                 self.writer.add_scalar("train/loss/total_loss", meter_loss.avg, global_step=epoch)
                 self.writer.add_scalar("train/acc/top1", meter_top1.avg, global_step=epoch)
                 self.writer.add_scalar("train/lr/lr", lr, global_step=epoch)
@@ -555,7 +555,7 @@ class TrainDDP:
                     "OriLoss {ori_loss:.4f} "
                     "KDLoss {kd_loss:.4f} "
                     "RCLoss {rc_loss:.4f} "
-                    "MaskLoss {mask_loss:.6f} "
+                    "MaskLoss {corr_loss:.6f} "
                     "TotalLoss {total_loss:.4f} "
                     "Train_Acc {train_acc:.2f} "
                     "AvgCorrLoss {avg_corr:.6f}".format(  # NEW: Add to log
