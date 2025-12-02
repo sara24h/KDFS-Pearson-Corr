@@ -137,11 +137,11 @@ class Test:
         try:
             normalized_arch = self.arch.replace('_', '').lower()
             
-            if self.arch == 'resnet50':
+            if normalized_arch == 'resnet50':
                 student_model_class = ResNet_50_sparse_hardfakevsreal
-            elif self.arch == 'mobilenetv2':
+            elif normalized_arch == 'mobilenetv2':
                 student_model_class = MobileNetV2_sparse_deepfake
-            elif self.arch == 'googlenet':
+            elif normalized_arch == 'googlenet':
                 student_model_class = GoogLeNet_sparse_deepfake
             else:
                 raise ValueError(f"Unsupported architecture: '{self.arch}'. Supported: resnet50, mobilenetv2, googlenet")
