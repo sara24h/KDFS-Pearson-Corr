@@ -58,7 +58,7 @@ class SoftMaskedConv2d(nn.Module):
     
     # سپس به کانال "نگه داشتن" (اندیس 1) یک مقدار مثبت اضافه می‌کنیم
     # این کار باعث می‌شود لاگیت "نگه داشتن" از "حذف" بالاتر برود
-        self.mask_weight.data[:, 1, :, :] += 1.0    
+        self.mask_weight.data[:, 1, :, :] +=0.1    
 
     def compute_mask(self, ticket):
         if ticket:
