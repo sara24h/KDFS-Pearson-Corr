@@ -135,7 +135,8 @@ class Test:
     def build_model(self):
         print("==> Building student model..")
         try:
-
+            normalized_arch = self.arch.replace('_', '').lower()
+            
             if self.arch == 'resnet50':
                 student_model_class = ResNet_50_sparse_hardfakevsreal
             elif self.arch == 'mobilenetv2':
