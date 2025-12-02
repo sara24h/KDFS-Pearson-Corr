@@ -21,7 +21,7 @@ class Test:
         self.args = args
         self.dataset_dir = args.dataset_dir
         self.num_workers = args.num_workers
-        self.pin_memory = self.pin_memory
+        self.pin_memory = args.pin_memory
         self.arch = args.arch.lower()
         self.device = args.device
         self.test_batch_size = args.test_batch_size
