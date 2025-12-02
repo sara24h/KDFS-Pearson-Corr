@@ -12,8 +12,6 @@ import glob
 from utils import meter
 from get_flops_and_params import get_flops_and_params
 from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal
-from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
-from model.student.GoogleNet_sparse import GoogLeNet_sparse_deepfake
 from data.dataset import Dataset_selector
 
 class Test:
@@ -22,19 +20,20 @@ class Test:
         self.dataset_dir = args.dataset_dir
         self.num_workers = args.num_workers
         self.pin_memory = args.pin_memory
-        self.arch = args.arch.lower()
+        self.arch = args.arch  # Expected to be 'ResNet_50'
         self.device = args.device
         self.test_batch_size = args.test_batch_size
         self.sparsed_student_ckpt_path = args.sparsed_student_ckpt_path
-        self.dataset_mode = args.dataset_mode
+        self.dataset_mode = args.dataset_mode  # 'hardfake', 'rvf10k', '140k', '200k', '190k', '330k'
 
+        # Verify CUDA availability
         if self.device == 'cuda' and not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available! Please check GPU setup.")
 
     def dataload(self):
         print("==> Loading test dataset..")
         try:
-
+            # Verify dataset paths
             if self.dataset_mode == 'hardfake':
                 csv_path = os.path.join(self.dataset_dir, 'data.csv')
                 if not os.path.exists(csv_path):
@@ -52,10 +51,14 @@ class Test:
                 test_csv = os.path.join(self.dataset_dir, 'test_labels.csv')
                 if not os.path.exists(test_csv):
                     raise FileNotFoundError(f"CSV file not found: {test_csv}")
-            elif self.dataset_mode in ['190k', '330k']:
+            elif self.dataset_mode == '190k':
+                if not os.path.exists(self.dataset_dir):
+                    raise FileNotFoundError(f"Dataset directory not found: {self.dataset_dir}")
+            elif self.dataset_mode == '330k':
                 if not os.path.exists(self.dataset_dir):
                     raise FileNotFoundError(f"Dataset directory not found: {self.dataset_dir}")
 
+            # Initialize dataset based on mode
             if self.dataset_mode == 'hardfake':
                 dataset = Dataset_selector(
                     dataset_mode='hardfake',
@@ -93,6 +96,9 @@ class Test:
                     ddp=False
                 )
             elif self.dataset_mode == '200k':
+                test_csv = os.path.join(self.dataset_dir, 'test_labels.csv')
+                if not os.path.exists(test_csv):
+                    raise FileNotFoundError(f"CSV file not found: {test_csv}")
                 dataset = Dataset_selector(
                 dataset_mode='200k',
                 realfake200k_train_csv=os.path.join(self.dataset_dir, 'train_labels.csv'),
@@ -135,25 +141,13 @@ class Test:
     def build_model(self):
         print("==> Building student model..")
         try:
-            normalized_arch = self.arch.replace('_', '').lower()
-            
-            if normalized_arch == 'resnet50':
-                student_model_class = ResNet_50_sparse_hardfakevsreal
-            elif normalized_arch == 'mobilenetv2':
-                student_model_class = MobileNetV2_sparse_deepfake
-            elif normalized_arch == 'googlenet':
-                student_model_class = GoogLeNet_sparse_deepfake
-            else:
-                raise ValueError(f"Unsupported architecture: '{self.arch}'. Supported: resnet50, mobilenetv2, googlenet")
-
-            print(f"Loading sparse student model for dataset mode: {self.dataset_mode} and architecture: {self.arch}")
-            self.student = student_model_class()
-            
+            print(f"Loading sparse student model for dataset mode: {self.dataset_mode}")
+            self.student = ResNet_50_sparse_hardfakevsreal()
+            # Load checkpoint
             if not os.path.exists(self.sparsed_student_ckpt_path):
                 raise FileNotFoundError(f"Checkpoint file not found: {self.sparsed_student_ckpt_path}")
             ckpt_student = torch.load(self.sparsed_student_ckpt_path, map_location="cpu", weights_only=True)
             state_dict = ckpt_student["student"] if "student" in ckpt_student else ckpt_student
-            
             try:
                 self.student.load_state_dict(state_dict, strict=True)
             except RuntimeError as e:
@@ -172,7 +166,7 @@ class Test:
         meter_top1 = meter.AverageMeter("Acc@1", ":6.2f")
 
         self.student.eval()
-        self.student.ticket = True
+        self.student.ticket = True  # Enable ticket mode for sparse model
         try:
             with torch.no_grad():
                 with tqdm(total=len(self.test_loader), ncols=100, desc="Test") as _tqdm:
@@ -194,32 +188,25 @@ class Test:
 
             print(f"[Test] Dataset: {self.dataset_mode}, Prec@1: {meter_top1.avg:.2f}%")
 
-            model_flops_tensor = self.student.get_flops()
-
+            # Calculate FLOPs and parameters
             (
-                flops_baseline,
-                _,  # نادیده گرفتن FLOPs از thop
-                _,  # نادیده گرفتن درصد کاهش از thop
-                params_baseline,
-                params,
-                params_reduction,
+                Flops_baseline,
+                Flops,
+                Flops_reduction,
+                Params_baseline,
+                Params,
+                Params_reduction,
+                
             ) = get_flops_and_params(self.dataset_mode, self.sparsed_student_ckpt_path)
-
-            model_flops_m = model_flops_tensor.item() / (10**6)
-            actual_flops_reduction = (
-                (flops_baseline - model_flops_m) / flops_baseline * 100.0
-            )
-            
             print(
-                f"Params_baseline: {params_baseline:.2f}M, Params: {params:.2f}M, "
-                f"Params reduction: {params_reduction:.2f}%"
+                f"Params_baseline: {Params_baseline:.2f}M, Params: {Params:.2f}M, "
+                f"Params reduction: {Params_reduction:.2f}%"
             )
             print(
-                f"Flops_baseline: {flops_baseline:.2f}M, Flops: {model_flops_m:.2f}M, "
-                f"Flops reduction: {actual_flops_reduction:.2f}%"
+                f"Flops_baseline: {Flops_baseline:.2f}M, Flops: {Flops:.2f}M, "
+                f"Flops reduction: {Flops_reduction:.2f}%"
             )
-
-
+           
         except Exception as e:
             print(f"Error during testing: {str(e)}")
             raise
