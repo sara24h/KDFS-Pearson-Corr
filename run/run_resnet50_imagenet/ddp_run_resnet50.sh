@@ -37,7 +37,7 @@ num_epochs=${NUM_EPOCHS:-6}
 resume=${RESUME:-}
 finetune_student_ckpt_path=${FINETUNE_STUDENT_CKPT_PATH:-}
 
-# <-- ADD THIS: Add default values for the new threshold-based loss arguments
+# Add default values for the new threshold-based loss arguments
 use_threshold_loss=${USE_THRESHOLD_LOSS:-true}
 threshold_value=${THRESHOLD_VALUE:-0.7}
 
@@ -108,7 +108,6 @@ while [[ $# -gt 0 ]]; do
         --num_epochs) num_epochs="$2"; shift 2 ;;
         --resume) resume="$2"; shift 2 ;;
         --finetune_student_ckpt_path) finetune_student_ckpt_path="$2"; shift 2 ;;
-        # <-- ADD THIS: Add cases for the new arguments
         --use_threshold_loss) use_threshold_loss="$2"; shift 2 ;;
         --threshold_value) threshold_value="$2"; shift 2 ;;
         --ddp) ddp_flag="--ddp"; shift ;;
@@ -134,13 +133,8 @@ if [ -n "$resume" ] && [ ! -f "$resume" ]; then
     exit 1
 fi
 
-# ... (کدهای قبلی اسکریپت شما تا اینجا بدون تغییر باقی می‌مانند) ...
-
 # Print arguments for debugging
 echo "Running torchrun with arguments:"
-
-# --- این بخش را به طور کامل با کد زیر جایگزین کنید ---
-# ساختار صحیح if/elif/fi بدون تکرار
 
 if [ "$PHASE" = "train" ]; then
     echo "Starting training phase..."
@@ -174,7 +168,6 @@ if [ "$PHASE" = "train" ]; then
         --threshold_value "$threshold_value" \
         $( [ -n "$resume" ] && echo "--resume $resume" ) \
         $ddp_flag
-
 elif [ "$PHASE" = "finetune" ]; then
     echo "Starting finetune phase..."
     student_ckpt_path="${finetune_student_ckpt_path:-$result_dir/student_model/${arch}_sparse_last.pt}"
