@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# Default values
 arch=${ARCH:-ResNet_50}
 result_dir=${RESULT_DIR:-/kaggle/working/results/run_resnet50_imagenet_prune1}
 teacher_ckpt_path=${TEACHER_CKPT_PATH:-/kaggle/working/KDFS-Pearson-Corr/teacher_dir/teacher_model_best.pth}
@@ -137,38 +136,38 @@ fi
 
 # Print arguments for debugging
 echo "Running torchrun with arguments:"
+
 if [ "$PHASE" = "train" ]; then
-    echo "torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson-Corr/main.py \
+    torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson-Corr/main.py \
         --phase train \
-        --arch $arch \
+        --arch "$arch" \
         --device cuda \
-        --result_dir $result_dir \
-        --teacher_ckpt_path $teacher_ckpt_path \
-        --num_workers $num_workers \
+        --result_dir "$result_dir" \
+        --teacher_ckpt_path "$teacher_ckpt_path" \
+        --num_workers "$num_workers" \
         $pin_memory_flag \
-        --seed $seed \
-        --num_epochs $num_epochs \
-        --lr $lr \
-        --warmup_steps $warmup_steps \
-        --warmup_start_lr $warmup_start_lr \
-        --lr_decay_T_max $lr_decay_T_max \
-        --lr_decay_eta_min $lr_decay_eta_min \
-        --weight_decay $weight_decay \
-        --train_batch_size $train_batch_size \
-        --eval_batch_size $eval_batch_size \
-        --target_temperature $target_temperature \
-        --gumbel_start_temperature $gumbel_start_temperature \
-        --gumbel_end_temperature $gumbel_end_temperature \
-        --coef_kdloss $coef_kdloss \
-        --coef_rcloss $coef_rcloss \
-        --coef_maskloss $coef_maskloss \
-        --dataset_mode $dataset_mode \
-        --dataset_dir $dataset_dir \
-        # <-- ADD THIS: Add new arguments to the echo command
-        --use_threshold_loss $use_threshold_loss \
-        --threshold_value $threshold_value \
+        --seed "$seed" \
+        --num_epochs "$num_epochs" \
+        --lr "$lr" \
+        --warmup_steps "$warmup_steps" \
+        --warmup_start_lr "$warmup_start_lr" \
+        --lr_decay_T_max "$lr_decay_T_max" \
+        --lr_decay_eta_min "$lr_decay_eta_min" \
+        --weight_decay "$weight_decay" \
+        --train_batch_size "$train_batch_size" \
+        --eval_batch_size "$eval_batch_size" \
+        --target_temperature "$target_temperature" \
+        --gumbel_start_temperature "$gumbel_start_temperature" \
+        --gumbel_end_temperature "$gumbel_end_temperature" \
+        --coef_kdloss "$coef_kdloss" \
+        --coef_rcloss "$coef_rcloss" \
+        --coef_maskloss "$coef_maskloss" \
+        --dataset_mode "$dataset_mode" \
+        --dataset_dir "$dataset_dir" \
+        --use_threshold_loss "$use_threshold_loss" \
+        --threshold_value "$threshold_value" \
         $( [ -n "$resume" ] && echo "--resume $resume" ) \
-        $ddp_flag"
+        $ddp_flag
 fi
 
 if [ "$PHASE" = "train" ]; then
