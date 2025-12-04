@@ -26,7 +26,7 @@ class RCLoss(nn.Module):
 
 import warnings
 
-def compute_filter_correlation(filters):
+def compute_filter_correlation(filters, mask_weight, gumbel_temperature=1.0):
     device = filters.device
     num_filters = filters.shape[0]
     if num_filters < 2:
@@ -48,93 +48,50 @@ def compute_filter_correlation(filters):
     upper_corr_values = corr_matrix[triu_indices[0], triu_indices[1]]
     mean_upper_corr = upper_corr_values.mean().item()  
 
-    return corr_matrix, mean_upper_corr
+    mask = ~torch.eye(num_filters, dtype=torch.bool, device=device)
+    off_diag_corrs = corr_matrix[mask].view(num_filters, num_filters - 1)
+    correlation_scores = (off_diag_corrs ** 2).mean(dim=1)
 
-# SIMPLIFIED ThresholdLoss - ONLY FIXED THRESHOLD
-class ThresholdLoss(nn.Module):
-    def __init__(self, threshold_value=0.7):
-        """
-        Initialize threshold-based regularization loss with a fixed threshold.
-        
-        Args:
-            threshold_value (float): Fixed threshold value for all layers.
-        """
-        super(ThresholdLoss, self).__init__()
-        self.register_buffer('threshold', torch.tensor(threshold_value))
+    mask_probs = F.gumbel_softmax(logits=mask_weight, tau=gumbel_temperature, hard=False, dim=1)[:, 1]
+    mask_probs = mask_probs.squeeze(-1).squeeze(-1)
+
+    if mask_probs.shape[0] != correlation_scores.shape[0]:
+        return torch.tensor(0.0, device=device, requires_grad=True), mean_upper_corr
+
+    correlation_loss = torch.mean(correlation_scores * mask_probs)
+    return correlation_loss, mean_upper_corr
     
+class MaskLoss(nn.Module):
+    def __init__(self):
+        super(MaskLoss, self).__init__()
+   
     def forward(self, model):
-        total_loss = 0.0
+        total_pruning_loss = 0.0
         num_layers = 0
         device = next(model.parameters()).device
-        
+       
         for m in model.mask_modules:
             if isinstance(m, SoftMaskedConv2d):
                 filters = m.weight
-                corr_matrix, _ = compute_filter_correlation(filters)
-                
-                # Get the fixed threshold
-                threshold = self.threshold
-                
-                # Calculate max correlation for each filter (excluding self-correlation)
-                num_filters = filters.shape[0]
-                mask = ~torch.eye(num_filters, dtype=torch.bool, device=device)
-                max_corrs, _ = torch.max(corr_matrix[mask].view(num_filters, num_filters - 1), dim=1)
-                
-                # Apply threshold and ReLU
-                thresholded_corrs = F.relu(max_corrs - threshold)
-                
-                # Square the thresholded correlations
-                squared_corrs = thresholded_corrs ** 2
-                
-                # Average across filters
-                layer_loss = torch.mean(squared_corrs)
-                
-                total_loss += layer_loss
+                mask_weight = m.mask_weight
+                gumbel_temperature = m.gumbel_temperature
+                pruning_loss, _ = compute_filter_correlation(filters, mask_weight, gumbel_temperature)
+                total_pruning_loss += pruning_loss
                 num_layers += 1
-        
+       
         if num_layers == 0:
             warnings.warn("No maskable layers found in the model.")
             return torch.tensor(0.0, device=device, requires_grad=True)
         
-        # Average across layers
-        total_loss = total_loss / num_layers
+        total_loss = total_pruning_loss / num_layers
         return total_loss
-
-# SIMPLIFIED MaskLoss - ONLY FIXED THRESHOLD
-class MaskLoss(nn.Module):
-    def __init__(self, use_threshold=False, threshold_value=0.7):
-        """
-        Initialize mask loss with optional fixed threshold-based regularization.
-        
-        Args:
-            use_threshold (bool): Whether to use threshold-based regularization.
-            threshold_value (float): Fixed threshold value.
-        """
-        super(MaskLoss, self).__init__()
-        self.use_threshold = use_threshold
-        
-        if use_threshold:
-            self.threshold_loss = ThresholdLoss(threshold_value)
-   
-    def forward(self, model):
-        device = next(model.parameters()).device
-       
-        if self.use_threshold:
-            # Use threshold-based regularization
-            return self.threshold_loss(model)
-        else:
-            # Original implementation (if you still want to keep it as an option)
-            # Note: The original compute_filter_correlation signature is different.
-            # You might need to adjust this part if you intend to use it.
-            # For now, I'll assume you only use the threshold method.
-            warnings.warn("Original MaskLoss implementation is not fully compatible. Using threshold loss.")
-            return self.threshold_loss(model) # Fallback to threshold loss
 
 class CrossEntropyLabelSmooth(nn.Module):
     def __init__(self, num_classes, epsilon):
         super(CrossEntropyLabelSmooth, self).__init__()
         self.num_classes = num_classes
-        self.epsilon = epsilon
+        # یک اشتباه تایپی کوچک در کد شما وجود داشت که اصلاح شد
+        self.epsilon = epsilon 
         self.logsoftmax = nn.LogSoftmax(dim=1)
     def forward(self, inputs, targets):
         log_probs = self.logsoftmax(inputs)
@@ -142,3 +99,48 @@ class CrossEntropyLabelSmooth(nn.Module):
         targets = (1 - self.epsilon) * targets + self.epsilon / self.num_classes
         loss = (-targets * log_probs).mean(0).sum()
         return loss
+
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+# <<<<<<<<<<<<<<<<<<<<<<<< کلاس جدید برای کنترل نرخ هرس <<<<<<<<<<<<<<<<<<<<<<
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+class TargetSparsityLoss(nn.Module):
+ 
+    def __init__(self, target_retention_ratio=0.8, coef_sparse=100.0):
+        """
+        Args:
+            target_retention_ratio (float): میانگین هدف برای احتمال حفظ فیلترها.
+                                           مثلاً 0.8 برای حفظ 80% فیلترها (یعنی 20% هرس).
+            coef_sparse (float): ضریب این تابع زیان. هرچه بالاتر باشد، فشار برای رسیدن
+                                 به نرخ هدف بیشتر است.
+        """
+        super().__init__()
+        self.target_retention_ratio = target_retention_ratio
+        self.coef_sparse = coef_sparse
+
+    def forward(self, model):
+        total_retention_rate = 0.0
+        num_layers = 0
+        device = next(model.parameters()).device
+
+        for m in model.mask_modules:
+            if isinstance(m, SoftMaskedConv2d):
+                # احتمال حفظ فیلتر (برگ دوم Gumbel-Softmax)
+                # m.mask_weight شامل logits برای Gumbel-Softmax است
+                mask_probs = F.gumbel_softmax(m.mask_weight, tau=m.gumbel_temperature, hard=False)[:, 1]
+                
+                # میانگین احتمال حفظ فیلترها در این لایه
+                layer_retention_rate = mask_probs.mean()
+                total_retention_rate += layer_retention_rate
+                num_layers += 1
+        
+        if num_layers == 0:
+            return torch.tensor(0.0, device=device, requires_grad=True)
+        
+        # میانگین کل احتمالات حفظ فیلتر در تمام لایه‌ها
+        current_avg_retention = total_retention_rate / num_layers
+        
+        # زیان مربوط به فاصله از نرخ هدف
+        sparsity_loss = (current_avg_retention - self.target_retention_ratio).pow(2)
+        
+        return self.coef_sparse * sparsity_loss
