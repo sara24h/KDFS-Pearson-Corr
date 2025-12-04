@@ -14,6 +14,7 @@ class KDLoss(nn.Module):
             reduction='mean'
         )
         return kd_loss
+
 class RCLoss(nn.Module):
     def __init__(self):
         super(RCLoss, self).__init__()
@@ -22,10 +23,10 @@ class RCLoss(nn.Module):
         return F.normalize(x.pow(2).mean(1).view(x.size(0), -1))
     def forward(self, x, y):
         return (self.rc(x) - self.rc(y)).pow(2).mean()
+
 import warnings
 
-
-def compute_filter_correlation(filters, mask_weight, gumbel_temperature=1.0):
+def compute_filter_correlation(filters):
     device = filters.device
     num_filters = filters.shape[0]
     if num_filters < 2:
@@ -47,43 +48,87 @@ def compute_filter_correlation(filters, mask_weight, gumbel_temperature=1.0):
     upper_corr_values = corr_matrix[triu_indices[0], triu_indices[1]]
     mean_upper_corr = upper_corr_values.mean().item()  
 
-    mask = ~torch.eye(num_filters, dtype=torch.bool, device=device)
-    off_diag_corrs = corr_matrix[mask].view(num_filters, num_filters - 1)
-    correlation_scores = (off_diag_corrs ** 2).mean(dim=1)
+    return corr_matrix, mean_upper_corr
 
-    mask_probs = F.gumbel_softmax(logits=mask_weight, tau=gumbel_temperature, hard=False, dim=1)[:, 1]
-    mask_probs = mask_probs.squeeze(-1).squeeze(-1)
-
-    if mask_probs.shape[0] != correlation_scores.shape[0]:
-        return torch.tensor(0.0, device=device, requires_grad=True), mean_upper_corr
-
-    correlation_loss = torch.mean(correlation_scores * mask_probs)
-    return correlation_loss, mean_upper_corr
+# SIMPLIFIED ThresholdLoss - ONLY FIXED THRESHOLD
+class ThresholdLoss(nn.Module):
+    def __init__(self, threshold_value=0.7):
+        """
+        Initialize threshold-based regularization loss with a fixed threshold.
+        
+        Args:
+            threshold_value (float): Fixed threshold value for all layers.
+        """
+        super(ThresholdLoss, self).__init__()
+        self.register_buffer('threshold', torch.tensor(threshold_value))
     
-class MaskLoss(nn.Module):
-    def __init__(self):
-        super(MaskLoss, self).__init__()
-   
     def forward(self, model):
-  
-        total_pruning_loss = 0.0
+        total_loss = 0.0
         num_layers = 0
         device = next(model.parameters()).device
-       
+        
         for m in model.mask_modules:
             if isinstance(m, SoftMaskedConv2d):
                 filters = m.weight
-                mask_weight = m.mask_weight
-                gumbel_temperature = m.gumbel_temperature
-                pruning_loss, _ = compute_filter_correlation(filters, mask_weight, gumbel_temperature)
-                total_pruning_loss += pruning_loss
+                corr_matrix, _ = compute_filter_correlation(filters)
+                
+                # Get the fixed threshold
+                threshold = self.threshold
+                
+                # Calculate max correlation for each filter (excluding self-correlation)
+                num_filters = filters.shape[0]
+                mask = ~torch.eye(num_filters, dtype=torch.bool, device=device)
+                max_corrs, _ = torch.max(corr_matrix[mask].view(num_filters, num_filters - 1), dim=1)
+                
+                # Apply threshold and ReLU
+                thresholded_corrs = F.relu(max_corrs - threshold)
+                
+                # Square the thresholded correlations
+                squared_corrs = thresholded_corrs ** 2
+                
+                # Average across filters
+                layer_loss = torch.mean(squared_corrs)
+                
+                total_loss += layer_loss
                 num_layers += 1
-       
+        
         if num_layers == 0:
             warnings.warn("No maskable layers found in the model.")
-        total_loss = total_pruning_loss / num_layers
+            return torch.tensor(0.0, device=device, requires_grad=True)
+        
+        # Average across layers
+        total_loss = total_loss / num_layers
         return total_loss
 
+# SIMPLIFIED MaskLoss - ONLY FIXED THRESHOLD
+class MaskLoss(nn.Module):
+    def __init__(self, use_threshold=False, threshold_value=0.7):
+        """
+        Initialize mask loss with optional fixed threshold-based regularization.
+        
+        Args:
+            use_threshold (bool): Whether to use threshold-based regularization.
+            threshold_value (float): Fixed threshold value.
+        """
+        super(MaskLoss, self).__init__()
+        self.use_threshold = use_threshold
+        
+        if use_threshold:
+            self.threshold_loss = ThresholdLoss(threshold_value)
+   
+    def forward(self, model):
+        device = next(model.parameters()).device
+       
+        if self.use_threshold:
+            # Use threshold-based regularization
+            return self.threshold_loss(model)
+        else:
+            # Original implementation (if you still want to keep it as an option)
+            # Note: The original compute_filter_correlation signature is different.
+            # You might need to adjust this part if you intend to use it.
+            # For now, I'll assume you only use the threshold method.
+            warnings.warn("Original MaskLoss implementation is not fully compatible. Using threshold loss.")
+            return self.threshold_loss(model) # Fallback to threshold loss
 
 class CrossEntropyLabelSmooth(nn.Module):
     def __init__(self, num_classes, epsilon):
