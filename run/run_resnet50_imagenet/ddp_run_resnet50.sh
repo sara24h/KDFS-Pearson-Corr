@@ -134,11 +134,16 @@ if [ -n "$resume" ] && [ ! -f "$resume" ]; then
     exit 1
 fi
 
+# ... (کدهای قبلی اسکریپت شما تا اینجا بدون تغییر باقی می‌مانند) ...
+
 # Print arguments for debugging
 echo "Running torchrun with arguments:"
 
+# --- این بخش را به طور کامل با کد زیر جایگزین کنید ---
+# ساختار صحیح if/elif/fi بدون تکرار
 
 if [ "$PHASE" = "train" ]; then
+    echo "Starting training phase..."
     torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson-Corr/main.py \
         --phase train \
         --arch "$arch" \
@@ -169,71 +174,15 @@ if [ "$PHASE" = "train" ]; then
         --threshold_value "$threshold_value" \
         $( [ -n "$resume" ] && echo "--resume $resume" ) \
         $ddp_flag
-fi
 
-if [ "$PHASE" = "train" ]; then
-    torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson-Corr/main.py \
-        --phase train \
-        --arch "$arch" \
-        --device cuda \
-        --result_dir "$result_dir" \
-        --teacher_ckpt_path "$teacher_ckpt_path" \
-        --num_workers "$num_workers" \
-        $pin_memory_flag \
-        --seed "$seed" \
-        --num_epochs "$num_epochs" \
-        --lr "$lr" \
-        --warmup_steps "$warmup_steps" \
-        --warmup_start_lr "$warmup_start_lr" \
-        --lr_decay_T_max "$lr_decay_T_max" \
-        --lr_decay_eta_min "$lr_decay_eta_min" \
-        --weight_decay "$weight_decay" \
-        --train_batch_size "$train_batch_size" \
-        --eval_batch_size "$eval_batch_size" \
-        --target_temperature "$target_temperature" \
-        --gumbel_start_temperature "$gumbel_start_temperature" \
-        --gumbel_end_temperature "$gumbel_end_temperature" \
-        --coef_kdloss "$coef_kdloss" \
-        --coef_rcloss "$coef_rcloss" \
-        --coef_maskloss "$coef_maskloss" \
-        --dataset_mode "$dataset_mode" \
-        --dataset_dir "$dataset_dir" \
-        # <-- ADD THIS: Add new arguments to the torchrun command
-        --use_threshold_loss "$use_threshold_loss" \
-        --threshold_value "$threshold_value" \
-        $( [ -n "$resume" ] && echo "--resume $resume" ) \
-        $ddp_flag
 elif [ "$PHASE" = "finetune" ]; then
+    echo "Starting finetune phase..."
     student_ckpt_path="${finetune_student_ckpt_path:-$result_dir/student_model/${arch}_sparse_last.pt}"
     if [ ! -f "$student_ckpt_path" ]; then
         echo "Error: Student checkpoint not found at $student_ckpt_path"
         exit 1
     fi
 
-    echo "torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson-Corr/main.py \
-        --phase finetune \
-        --arch $arch \
-        --device cuda \
-        --result_dir $result_dir \
-        --teacher_ckpt_path $teacher_ckpt_path \
-        --finetune_student_ckpt_path $student_ckpt_path \
-        --num_workers $num_workers \
-        $pin_memory_flag \
-        --seed $seed \
-        --finetune_num_epochs $finetune_num_epochs \
-        --finetune_lr $finetune_lr \
-        --finetune_warmup_steps $finetune_warmup_steps \
-        --finetune_warmup_start_lr $finetune_warmup_start_lr \
-        --finetune_lr_decay_T_max $finetune_lr_decay_T_max \
-        --finetune_lr_decay_eta_min $finetune_lr_decay_eta_min \
-        --finetune_weight_decay $finetune_weight_decay \
-        --finetune_train_batch_size $finetune_train_batch_size \
-        --finetune_eval_batch_size $finetune_eval_batch_size \
-        --sparsed_student_ckpt_path $result_dir/student_model/finetune_${arch}_sparse_best.pt \
-        --dataset_mode $dataset_mode \
-        --dataset_dir $dataset_dir \
-        $( [ -n "$resume" ] && echo "--resume $resume" ) \
-        $ddp_flag"
     torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson-Corr/main.py \
         --phase finetune \
         --arch "$arch" \
