@@ -167,14 +167,24 @@ class TrainDDP:
 
         dataset_instance = Dataset_selector(
             dataset_mode=self.dataset_mode,
-            rvf10k_train_csv=rvf10k_train_csv, rvf10k_valid_csv=rvf10k_valid_csv, rvf10k_root_dir=rvf10k_root_dir,
-            realfake140k_train_csv=realfake140k_train_csv, realfake140k_valid_csv=realfake140k_valid_csv,
-            realfake140k_test_csv=realfake140k_test_csv, realfake140k_root_dir=realfake140k_root_dir,
-            realfake200k_train_csv=realfake200k_train_csv, realfake200k_val_csv=realfake200k_val_csv,
-            realfake200k_test_csv=realfake200k_test_csv, realfake200k_root_dir=realfake200k_root_dir,
-            realfake190k_root_dir=realfake190k_root_dir, realfake330k_root_dir=realfake330k_root_dir,
-            train_batch_size=self.train_batch_size, eval_batch_size=self.eval_batch_size,
-            num_workers=self.num_workers, pin_memory=self.pin_memory, ddp=True
+            rvf10k_train_csv=rvf10k_train_csv,
+            rvf10k_valid_csv=rvf10k_valid_csv,
+            rvf10k_root_dir=rvf10k_root_dir,
+            realfake140k_train_csv=realfake140k_train_csv,
+            realfake140k_valid_csv=realfake140k_valid_csv,
+            realfake140k_test_csv=realfake140k_test_csv,
+            realfake140k_root_dir=realfake140k_root_dir,
+            realfake200k_train_csv=realfake200k_train_csv,
+            realfake200k_val_csv=realfake200k_val_csv,
+            realfake200k_test_csv=realfake200k_test_csv,
+            realfake200k_root_dir=realfake200k_root_dir,
+            realfake190k_root_dir=realfake190k_root_dir,
+            realfake330k_root_dir=realfake330k_root_dir,
+            train_batch_size=self.train_batch_size,
+            eval_batch_size=self.eval_batch_size,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
+            ddp=True
         )
 
         self.train_loader = dataset_instance.loader_train
