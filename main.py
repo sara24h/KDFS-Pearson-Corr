@@ -40,6 +40,10 @@ def parse_args():
         choices=("train", "finetune", "test"),
         help="train, finetune or test",
     )
+
+    parser.add_argument('--use_threshold_loss', type=bool, default=True, help='Whether to use the new threshold-based loss.')
+    parser.add_argument('--threshold_value', type=float, default=0.7, help='The fixed threshold value for regularization.')
+
     parser.add_argument(
         "--dataset_mode",
         type=str,
