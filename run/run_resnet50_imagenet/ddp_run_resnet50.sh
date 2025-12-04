@@ -137,6 +137,7 @@ fi
 # Print arguments for debugging
 echo "Running torchrun with arguments:"
 
+
 if [ "$PHASE" = "train" ]; then
     torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson-Corr/main.py \
         --phase train \
