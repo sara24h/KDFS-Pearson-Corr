@@ -39,7 +39,7 @@ class TrainDDP:
         self.warmup_steps = args.warmup_steps
         self.warmup_start_lr = args.warmup_start_lr
         self.lr_decay_T_max = args.lr_decay_T_max
-        self.lr_decay_eta_min = self.lr_decay_eta_min
+        self.lr_decay_eta_min = args.lr_decay_eta_min
         self.weight_decay = args.weight_decay
         self.train_batch_size = args.train_batch_size
         self.eval_batch_size = args.eval_batch_size
