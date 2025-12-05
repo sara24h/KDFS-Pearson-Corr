@@ -379,7 +379,7 @@ class TrainDDP:
                                         m.weight, m.mask_weight,
                                         self.student.module.gumbel_temperature)
                                     total_corr += corr.item()
-                                    total_ret += ret.item()
+                                    total_ret += float(ret)
                                     n_layers += 1
                             avg_corr = total_corr / n_layers if n_layers > 0 else 0.0
                             avg_ret = total_ret / n_layers if n_layers > 0 else 0.0
