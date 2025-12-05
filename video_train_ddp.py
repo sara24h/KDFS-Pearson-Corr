@@ -332,7 +332,7 @@ class TrainDDP:
                         targets = targets.cuda(non_blocking=True).float()
 
                         batch_size, num_frames, C, H, W = videos.shape
-                        images = videos.view(-1, C, H, W)
+                        images = images.view(-1, C, H, W)
 
                         if torch.isnan(images).any() or torch.isinf(images).any() or \
                            torch.isnan(targets).any() or torch.isinf(targets).any():
@@ -434,7 +434,7 @@ class TrainDDP:
                             targets = targets.cuda(non_blocking=True).float()
     
                             batch_size, num_frames, C, H, W = images.shape
-                            images = images.view(-1, C,C, H, W)   # ← [B*T, C, H, W]
+                            images = images.view(-1, C, H, W)   # ← [B*T, C, H, W]
     
                             logits, _ = self.student(images)
                             logits = logits.squeeze(1)
