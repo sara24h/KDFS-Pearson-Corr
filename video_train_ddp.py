@@ -61,8 +61,7 @@ class TrainDDP:
         self.world_size = 0
         self.local_rank = -1
         self.rank = -1
-        self.use_threshold_loss = getattr(args, 'use_threshold_loss', True)
-        self.threshold_value = getattr(args, 'threshold_value', 0.7)
+
 
         if self.dataset_mode == "uadfv":
             self.args.dataset_type = "uadfv"
@@ -207,14 +206,7 @@ class TrainDDP:
         self.ori_loss = nn.BCEWithLogitsLoss().cuda()
         self.kd_loss = loss.KDLoss().cuda()
         self.rc_loss = loss.RCLoss().cuda()
-
-        if self.use_threshold_loss:
-            self.mask_loss = loss.MaskLoss(
-                use_threshold=True,
-                threshold_value=self.threshold_value
-            ).cuda()
-        else:
-            self.mask_loss = loss.MaskLoss(use_threshold=True, threshold_value=0.7).cuda()
+        self.mask_loss = loss.MaskLoss().cuda()
 
     def define_optim(self):
         weight_params = map(lambda p: p[1],
