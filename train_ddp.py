@@ -28,7 +28,7 @@ os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 class TrainDDP: 
     def __init__(self, args):
         
-        self.coef_sparse = args.coef_sparse
+        #self.coef_sparse = args.coef_sparse
         self.args = args
         self.dataset_dir = args.dataset_dir
         self.dataset_mode = args.dataset_mode
