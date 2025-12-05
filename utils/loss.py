@@ -75,7 +75,7 @@ def compute_filter_correlation(filters, mask_weight, gumbel_temperature=1.0):
     return correlation_loss, current_layer_retention
     
 class MaskLoss(nn.Module):
-    def __init__(self, target_retention=0.75, lambda_sparse=10.0, penalty_mode='mse'):
+    def __init__(self, target_retention=0.75, lambda_sparse=10.0, penalty_mode='asymmetric'):
         """
         Args:
             target_retention (ρ): نرخ نگه‌داشت هدف (0.75 = 75%)
