@@ -311,8 +311,7 @@ class TrainDDP:
         self.rc_loss = loss.RCLoss().cuda()
         self.mask_loss = loss.MaskLoss(
             target_retention=self.target_retention,
-            lambda_sparse=self.lambda_sparse,
-            penalty_mode='asymmetric'  # ❗ اضافه کردن این خط
+            lambda_sparse=self.lambda_sparse
         ).cuda()
 
     def define_optim(self):
@@ -645,15 +644,7 @@ class TrainDDP:
                             prec1 = 100. * correct / images.size(0)
                             n = images.size(0)
                             meter_top1.update(prec1, n)
-                            retention_error = abs(meter_retention.avg - self.target_retention)
-    
-                            if retention_error < 0.02:  # 2% threshold
-                                self.logger.info(f"✅ Target retention {self.target_retention:.2f} achieved: {meter_retention.avg:.4f}")
-        
-        # کاهش تدریجی lambda_sparse
-                            if epoch > 50 and self.mask_loss.lambda_sparse > 10.0:
-                                self.mask_loss.lambda_sparse *= 0.9
-                                self.logger.info(f"Reducing lambda_sparse to {self.mask_loss.lambda_sparse:.2f}")
+
                             _tqdm.set_postfix(
                                 val_acc="{:.4f}".format(meter_top1.avg),
                             )
