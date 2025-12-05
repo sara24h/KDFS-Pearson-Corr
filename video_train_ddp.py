@@ -357,10 +357,17 @@ class TrainDDP:
                             kd_loss = (self.target_temperature ** 2) * self.kd_loss(
                                 logits_teacher, logits_student, self.target_temperature)
 
+                            # RC Loss - اصلاح شده
                             rc_loss = torch.tensor(0.0, device=images.device)
                             for i in range(len(feature_list_student)):
-                                s_feat = feature_list_student[i].view(batch_size, num_frames, -1).mean(dim=1)
-                                t_feat = feature_list_teacher[i].view(batch_size, num_frames, -1).mean(dim=1)
+                                # Features shape: [B*T, C, H, W]
+                                s_feat_flat = feature_list_student[i].view(batch_size * num_frames, -1)
+                                t_feat_flat = feature_list_teacher[i].view(batch_size * num_frames, -1)
+                                
+                                # Reshape to [B, T, Features] and average over time
+                                s_feat = s_feat_flat.view(batch_size, num_frames, -1).mean(dim=1)
+                                t_feat = t_feat_flat.view(batch_size, num_frames, -1).mean(dim=1)
+                                
                                 rc_loss = rc_loss + self.rc_loss(s_feat, t_feat)
 
                             mask_loss = self.mask_loss(self.student.module)
@@ -422,38 +429,52 @@ class TrainDDP:
                         )
                         _tqdm.update(1)
 
-             
-                if self.rank == 0:
-                    self.student.eval()
-                    self.student.module.ticket = True
-                    val_meter = meter.AverageMeter("Acc@1", ":6.2f")
+            # ----------------- Validation (خارج از tqdm loop) -----------------
+            if self.rank == 0:
+                self.student.eval()
+                self.student.module.ticket = True
+                val_meter = meter.AverageMeter("Acc@1", ":6.2f")
 
-                    with torch.no_grad():
-                        for images, targets in self.val_loader:
-                            images = images.cuda(non_blocking=True)
-                            targets = targets.cuda(non_blocking=True).float()
-    
-                            batch_size, num_frames, C, H, W = images.shape
-                            frames = images.view(-1, C, H, W)
-                            logits, _ = self.student(frames)
-                            logits = logits.squeeze(1)
-                            logits = logits.view(batch_size, num_frames).mean(dim=1)
-                            preds = (torch.sigmoid(logits) > 0.5).float()
-                            preds = (preds > 0.5).float()
-                            acc1 = 100.0 * (preds == targets).sum().item() / batch_size
-                            val_meter.update(acc1, batch_size)
+                with torch.no_grad():
+                    for val_videos, val_targets in self.val_loader:
+                        val_videos = val_videos.cuda(non_blocking=True)
+                        val_targets = val_targets.cuda(non_blocking=True).float()
 
-                    flops = self.student.module.get_flops()
-                    self.writer.add_scalar("val/acc/top1", val_meter.avg, epoch)
-                    self.writer.add_scalar("val/Flops", flops, epoch)
+                        val_batch_size, val_num_frames, C, H, W = val_videos.shape
+                        val_frames = val_videos.view(-1, C, H, W)  # [B*T, C, H, W]
+                        
+                        # Forward pass
+                        val_logits, _ = self.student(val_frames)
+                        val_logits = val_logits.squeeze(1)  # [B*T]
+                        
+                        # Average logits over time
+                        val_logits = val_logits.view(val_batch_size, val_num_frames).mean(dim=1)  # [B]
+                        
+                        # فقط یک بار sigmoid و threshold
+                        val_preds = (torch.sigmoid(val_logits) > 0.5).float()  # [B]
+                        
+                        # Calculate accuracy
+                        correct = (val_preds == val_targets).sum().item()
+                        acc1 = 100.0 * correct / val_batch_size
+                        val_meter.update(acc1, val_batch_size)
 
-                    self.logger.info(f"[Epoch {epoch}] Val Acc: {val_meter.avg:.2f} | FLOPs: {flops/1e6:.2f}M")
+                # Scheduler step after validation
+                self.scheduler_student_weight.step()
+                self.scheduler_student_mask.step()
 
-                    if val_meter.avg > self.best_prec1:
-                        self.best_prec1 = val_meter.avg
-                        self.save_student_ckpt(is_best=True, epoch=epoch)
-                    else:
-                        self.save_student_ckpt(is_best=False, epoch=epoch)
+                flops = self.student.module.get_flops()
+                self.writer.add_scalar("train/lr", self.optim_weight.param_groups[0]['lr'], epoch)
+                self.writer.add_scalar("val/acc/top1", val_meter.avg, epoch)
+                self.writer.add_scalar("val/Flops", flops, epoch)
+
+                self.logger.info(f"[Epoch {epoch}] Val Acc: {val_meter.avg:.2f} | "
+                                 f"FLOPs: {flops/1e6:.2f}M | LR: {self.optim_weight.param_groups[0]['lr']:.6f}")
+
+                if val_meter.avg > self.best_prec1:
+                    self.best_prec1 = val_meter.avg
+                    self.save_student_ckpt(is_best=True, epoch=epoch)
+                else:
+                    self.save_student_ckpt(is_best=False, epoch=epoch)
 
         if self.rank == 0:
             self.logger.info("Training finished!")
