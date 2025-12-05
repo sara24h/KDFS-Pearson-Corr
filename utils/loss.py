@@ -75,19 +75,24 @@ def compute_filter_correlation(filters, mask_weight, gumbel_temperature=1.0):
     return correlation_loss, current_layer_retention
     
 class MaskLoss(nn.Module):
-    def __init__(self, target_retention=0.5, lambda_sparse=1.0):
+    def __init__(self, target_retention=0.75, lambda_sparse=10.0, penalty_mode='mse'):
         """
         Args:
-            target_retention (ρ): نرخ نگه‌داشت هدف (مثلاً ۰.۵ برای نگه داشتن ۵۰ درصد)
-            lambda_sparse (λ_sparse): ضریب اهمیت برای زیان کنترل فشردگی (فرمول ۹).
+            target_retention (ρ): نرخ نگه‌داشت هدف (0.75 = 75%)
+            lambda_sparse: ضریب اهمیت (باید بزرگ باشد: 10-100)
+            penalty_mode: نوع جریمه
+                'mse': (current - target)^2
+                'asymmetric': جریمه شدیدتر برای نگه‌داشت بیش از حد
+                'hard': جریمه نمایی
         """
         super(MaskLoss, self).__init__()
         self.rho = target_retention
         self.lambda_sparse = lambda_sparse
+        self.penalty_mode = penalty_mode
    
     def forward(self, model):
-        total_corr_loss = 0.0      # L_corr
-        total_sparsity_loss = 0.0  # L_sparsity
+        total_corr_loss = 0.0
+        total_sparsity_loss = 0.0
         num_layers = 0
         device = next(model.parameters()).device
         
@@ -97,27 +102,46 @@ class MaskLoss(nn.Module):
                 mask_weight = m.mask_weight
                 gumbel_temperature = m.gumbel_temperature
                 
-                # دریافت L_corr و نرخ نگه‌داشت فعلی (current_retention)
-                l_corr, current_retention = compute_filter_correlation(filters, mask_weight, gumbel_temperature)
+                l_corr, current_retention = compute_filter_correlation(
+                    filters, mask_weight, gumbel_temperature
+                )
                 
                 total_corr_loss += l_corr
                 
-                # --- پیاده‌سازی L_sparsity (فرمول ۹) ---
-                # L_sparsity = (میانگین ماسک لایه - نرخ نگه‌داشت هدف)^2
-                layer_sparsity_loss = (current_retention - self.rho) ** 2
-                total_sparsity_loss += layer_sparsity_loss
+                # --- جریمه‌های مختلف برای کنترل نرخ نگه‌داشت ---
+                if self.penalty_mode == 'mse':
+                    # حالت معمولی: فاصله مربعی
+                    layer_sparsity_loss = (current_retention - self.rho) ** 2
                 
+                elif self.penalty_mode == 'asymmetric':
+                    # جریمه شدیدتر برای نگه‌داشت بیش از حد
+                    diff = current_retention - self.rho
+                    if diff > 0:  # اگر بیش از حد نگه داشته
+                        layer_sparsity_loss = (diff ** 2) * 5.0  # 5 برابر جریمه
+                    else:  # اگر کمتر نگه داشته
+                        layer_sparsity_loss = (diff ** 2) * 1.0
+                
+                elif self.penalty_mode == 'hard':
+                    # جریمه نمایی برای اجبار به هدف
+                    diff = torch.abs(current_retention - self.rho)
+                    layer_sparsity_loss = torch.exp(diff * 10) - 1
+                
+                elif self.penalty_mode == 'clipped':
+                    # فقط وقتی جریمه که از هدف بیشتر نگه دارد
+                    diff = current_retention - self.rho
+                    layer_sparsity_loss = torch.relu(diff) ** 2  # فقط مثبت
+                
+                total_sparsity_loss += layer_sparsity_loss
                 num_layers += 1
         
         if num_layers == 0:
             warnings.warn("No maskable layers found in the model.")
             return torch.tensor(0.0, device=device, requires_grad=True)
         
-        # میانگین‌گیری روی لایه‌ها
         avg_corr_loss = total_corr_loss / num_layers
-        avg_sparsity_loss = total_sparsity_loss / num_layers 
+        avg_sparsity_loss = total_sparsity_loss / num_layers
         
-        # زیان نهایی = L_corr + λ_sparse * L_sparsity
+        # زیان نهایی
         final_loss = avg_corr_loss + (self.lambda_sparse * avg_sparsity_loss)
         
         return final_loss
