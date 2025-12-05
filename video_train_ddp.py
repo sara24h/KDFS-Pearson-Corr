@@ -173,7 +173,7 @@ class TrainDDP:
             self.logger.info("Building student model")
 
         if self.arch == 'resnet50':
-            StudentModelClass = (ResNet_50_sparse_rvf10k
+            StudentModelClass = (ResNet_50_sparse_uadfv
                                  if self.dataset_mode != "hardfake"
                                  else ResNet_50_sparse_hardfakevsreal)
         elif self.arch == 'mobilenetv2':
