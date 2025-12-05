@@ -275,6 +275,16 @@ class TrainDDP:
         rt /= self.world_size
         return rt
 
+    def get_mask_averages(self):
+        """Get average mask values for each layer"""
+        mask_avgs = []
+        for m in self.student.module.mask_modules:
+            if isinstance(m, SoftMaskedConv2d):
+                with torch.no_grad():
+                    mask = torch.sigmoid(m.mask_weight)
+                    mask_avgs.append(round(mask.mean().item(), 2))
+        return mask_avgs
+
     def train(self):
         if self.rank == 0:
             self.logger.info(f"Starting training from epoch: {self.start_epoch + 1}")
@@ -313,10 +323,10 @@ class TrainDDP:
                 meter_avg_corr.reset()
                 meter_retention.reset()
 
-                lr = (self.optim_weight.state_dict()["param_groups"][0]["lr"]
-                      if epoch > 1 else self.warmup_start_lr)
+                current_lr = self.optim_weight.param_groups[0]['lr']
 
             self.student.module.update_gumbel_temperature(epoch)
+            current_gumbel_temp = self.student.module.gumbel_temperature
 
             with tqdm(total=len(self.train_loader), ncols=100, disable=self.rank != 0) as _tqdm:
                 if self.rank == 0:
@@ -429,7 +439,21 @@ class TrainDDP:
                         )
                         _tqdm.update(1)
 
-            # ----------------- Validation (خارج از tqdm loop) -----------------
+            # ----------------- End of epoch logging (Train) -----------------
+            if self.rank == 0:
+                # Calculate train FLOPs with ticket=False
+                self.student.module.ticket = False
+                train_flops = self.student.module.get_flops()
+                
+                self.logger.info(f"[Train] Epoch {epoch} : Gumbel_temperature {current_gumbel_temp:.2f} "
+                                f"LR {current_lr:.6f} OriLoss {meter_oriloss.avg:.4f} "
+                                f"KDLoss {meter_kdloss.avg:.4f} RCLoss {meter_rcloss.avg:.4f} "
+                                f"MaskLoss {meter_maskloss.avg:.6f} TotalLoss {meter_loss.avg:.4f} "
+                                f"Train_Acc {meter_top1.avg:.2f}")
+                
+                self.logger.info(f"[Train model Flops] Epoch {epoch} : {train_flops/1e6:.6f}M")
+
+            # ----------------- Validation -----------------
             if self.rank == 0:
                 self.student.eval()
                 self.student.module.ticket = True
@@ -458,20 +482,34 @@ class TrainDDP:
                         acc1 = 100.0 * correct / val_batch_size
                         val_meter.update(acc1, val_batch_size)
 
+                # Get mask averages
+                mask_avgs = self.get_mask_averages()
+                
+                # Calculate validation FLOPs with ticket=True
+                val_flops = self.student.module.get_flops()
+                
+                # Log validation results
+                self.logger.info(f"[Val] Epoch {epoch} : Val_Acc {val_meter.avg:.2f}")
+                self.logger.info(f"[Val mask avg] Epoch {epoch} : {mask_avgs}")
+                self.logger.info(f"[Val model Flops] Epoch {epoch} : {val_flops/1e6:.6f}M")
+
                 # Scheduler step after validation
                 self.scheduler_student_weight.step()
                 self.scheduler_student_mask.step()
 
-                flops = self.student.module.get_flops()
-                self.writer.add_scalar("train/lr", self.optim_weight.param_groups[0]['lr'], epoch)
-                self.writer.add_scalar("val/acc/top1", val_meter.avg, epoch)
-                self.writer.add_scalar("val/Flops", flops, epoch)
+                # TensorBoard logging
+                self.writer.add_scalar("train/lr", current_lr, epoch)
+                self.writer.add_scalar("train/gumbel_temp", current_gumbel_temp, epoch)
+                self.writer.add_scalar("train/acc", meter_top1.avg, epoch)
+                self.writer.add_scalar("train/loss", meter_loss.avg, epoch)
+                self.writer.add_scalar("train/flops", train_flops, epoch)
+                self.writer.add_scalar("val/acc", val_meter.avg, epoch)
+                self.writer.add_scalar("val/flops", val_flops, epoch)
 
-                self.logger.info(f"[Epoch {epoch}] Val Acc: {val_meter.avg:.2f} | "
-                                 f"FLOPs: {flops/1e6:.2f}M | LR: {self.optim_weight.param_groups[0]['lr']:.6f}")
-
+                # Save checkpoint
                 if val_meter.avg > self.best_prec1:
                     self.best_prec1 = val_meter.avg
+                    self.logger.info(f" => Best top1 accuracy on validation before finetune : {self.best_prec1}")
                     self.save_student_ckpt(is_best=True, epoch=epoch)
                 else:
                     self.save_student_ckpt(is_best=False, epoch=epoch)
