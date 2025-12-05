@@ -290,3 +290,15 @@ def ResNet_50_sparse_140k(
         num_epochs=num_epochs,
         dataset_type="140k"
     )
+def ResNet_50_sparse_uadfv(
+    gumbel_start_temperature=2.0, gumbel_end_temperature=0.5, num_epochs=200
+):
+    return ResNet_sparse(
+        block=Bottleneck_sparse,
+        num_blocks=[3, 4, 6, 3],
+        num_classes=1,
+        gumbel_start_temperature=gumbel_start_temperature,
+        gumbel_end_temperature=gumbel_end_temperature,
+        num_epochs=num_epochs,
+        dataset_type="uadfv"  # مهم برای محاسبه FLOPs
+    )
