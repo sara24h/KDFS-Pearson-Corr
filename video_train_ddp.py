@@ -131,7 +131,6 @@ class TrainDDP:
                 num_workers=self.num_workers,
                 pin_memory=self.pin_memory,
                 ddp=True,
-                split_ratio=self.split_ratio,
                 seed=self.seed,
                 sampling_strategy=self.frame_sampling
             )
