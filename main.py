@@ -56,22 +56,17 @@ def parse_args():
     parser.add_argument(
         "--dataset_mode",
         type=str,
-        default="hardfake",
-        choices=("hardfake", "rvf10k", "140k", "200k", "190k", "330k"),
-        help="Dataset to use: hardfake, rvf10k, 140k, 200k, 190k, or 330k",
+        default="rvf10k",
+        choices=("rvf10k", "rvf10k", "140k", "200k", "190k", "330k"),
+        help="Dataset to use:  rvf10k, 140k, 200k, 190k, or 330k",
     )
     parser.add_argument(
         "--dataset_dir",
         type=str,
-        default="/kaggle/input/hardfakevsrealfaces",
-        help="The dataset path (used for hardfake, rvf10k, 140k, 200k)",
+        default="/kaggle/input/rvf10k",
+        help="The dataset path (used for  rvf10k, 140k, 200k)",
     )
-    parser.add_argument(
-        "--hardfake_csv_file",
-        type=str,
-        default="/kaggle/input/hardfakevsrealfaces/data.csv",
-        help="The path to the hardfake CSV file (for hardfake mode)",
-    )
+    
     parser.add_argument(
         "--compress_rate",
         type=float,
@@ -403,13 +398,8 @@ def parse_args():
     return parser.parse_args()
 
 def validate_args(args):
-    """Check if required files and directories exist"""
-    if args.dataset_mode == "hardfake":
-        if not os.path.exists(args.hardfake_csv_file):
-            raise FileNotFoundError(f"Hardfake CSV file not found: {args.hardfake_csv_file}")
-        if not os.path.exists(args.dataset_dir):
-            raise FileNotFoundError(f"Dataset directory not found: {args.dataset_dir}")
-    elif args.dataset_mode == "rvf10k":
+
+    if args.dataset_mode == "rvf10k":
         if not os.path.exists(args.rvf10k_train_csv):
             raise FileNotFoundError(f"RVF10k train CSV file not found: {args.rvf10k_train_csv}")
         if not os.path.exists(args.rvf10k_valid_csv):
