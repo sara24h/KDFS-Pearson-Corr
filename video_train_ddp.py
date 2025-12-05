@@ -115,7 +115,7 @@ class TrainDDP:
 
     def dataload(self):
         if self.dataset_mode == "uadfv":
-            from uadfv_dataset import create_uadfv_dataloaders
+            from data.video_data import create_uadfv_dataloaders
 
             if self.rank == 0:
                 self.logger.info(f"Loading UADFV dataset from: {self.dataset_dir}")
