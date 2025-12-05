@@ -21,14 +21,13 @@ from model.teacher.ResNet import ResNet_50_hardfakevsreal
 from model.teacher.Mobilenetv2 import MobileNetV2_deepfake
 from model.teacher.GoogleNet import GoogLeNet_deepfake
 from torch import amp
-# فرض بر این است که تابع compute_filter_correlation در فایل utils.loss قرار دارد
 from utils.loss import compute_filter_correlation
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-class TrainDDP: # اصلاح کوچک در نام کلاس
+class TrainDDP: 
     def __init__(self, args):
-        self.target_retention_ratio = args.target_retention_ratio
+        
         self.coef_sparse = args.coef_sparse
         self.args = args
         self.dataset_dir = args.dataset_dir
