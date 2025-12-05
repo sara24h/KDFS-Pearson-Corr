@@ -46,14 +46,14 @@ class UADFVDataset(Dataset):
         if fake_dir.exists():
             fake_videos = sorted([f for f in fake_dir.glob('*.mp4') if not f.name.startswith('.')])
             for video_path in fake_videos:
-                video_list.append((str(video_path), 1))  # Label 1 for fake
+                video_list.append((str(video_path), 0))  # Label 1 for fake
         
         # Load real videos
         real_dir = self.root_dir / 'real'
         if real_dir.exists():
             real_videos = sorted([f for f in real_dir.glob('*.mp4') if not f.name.startswith('.')])
             for video_path in real_videos:
-                video_list.append((str(video_path), 0))  # Label 0 for real
+                video_list.append((str(video_path), 1))  # Label 0 for real
         
         # Shuffle with fixed seed for reproducibility
         random.seed(self.seed)
