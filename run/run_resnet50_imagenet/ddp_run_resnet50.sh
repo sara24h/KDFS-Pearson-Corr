@@ -36,8 +36,10 @@ master_port=${MASTER_PORT:-6681}
 num_epochs=${NUM_EPOCHS:-6}
 resume=${RESUME:-}
 finetune_student_ckpt_path=${FINETUNE_STUDENT_CKPT_PATH:-}
+# ⭐️ مقادیر پیش‌فرض جدید ⭐️
 target_retention=${TARGET_RETENTION:-0.5}
 lambda_sparse=${LAMBDA_SPARSE:-1.0}
+
 
 # Environment variables for CUDA and memory management
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -106,8 +108,9 @@ while [[ $# -gt 0 ]]; do
         --num_epochs) num_epochs="$2"; shift 2 ;;
         --resume) resume="$2"; shift 2 ;;
         --finetune_student_ckpt_path) finetune_student_ckpt_path="$2"; shift 2 ;;
+
         --target_retention) target_retention="$2"; shift 2 ;;
-        --lambda_sparse) lambda_sparse="$2"; shift 2 ;;
+        --lambda_sparse) lambda_sparse="$2"; shift 2 ;;
         --ddp) ddp_flag="--ddp"; shift ;;
         *) echo "Ignoring unrecognized argument: $1"; shift ;;
     esac
@@ -162,8 +165,9 @@ if [ "$PHASE" = "train" ]; then
         --coef_maskloss "$coef_maskloss" \
         --dataset_mode "$dataset_mode" \
         --dataset_dir "$dataset_dir" \
+
         --target_retention "$target_retention" \
-        --lambda_sparse "$lambda_sparse" \
+        --lambda_sparse "$lambda_sparse" \
         $( [ -n "$resume" ] && echo "--resume $resume" ) \
         $ddp_flag
 elif [ "$PHASE" = "finetune" ]; then
