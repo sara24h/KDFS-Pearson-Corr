@@ -362,13 +362,29 @@ class TrainDDP:
                                 logits_teacher = logits_teacher.squeeze(1)
                                 logits_teacher = logits_teacher.view(batch_size, num_frames).mean(dim=1)
 
+                            # Debug: Log feature list info (first batch only)
+                            if self.rank == 0 and epoch == 1 and not hasattr(self, '_features_logged'):
+                                self._features_logged = True
+                                self.logger.info(f"Student features: {len(feature_list_student)} layers")
+                                self.logger.info(f"Teacher features: {len(feature_list_teacher)} layers")
+                                if len(feature_list_student) > 0:
+                                    self.logger.info(f"First student feature shape: {feature_list_student[0].shape}")
+                                if len(feature_list_teacher) > 0:
+                                    self.logger.info(f"First teacher feature shape: {feature_list_teacher[0].shape}")
+
                             # Losses
                             ori_loss = self.ori_loss(logits_student, targets)
                             kd_loss = (self.target_temperature ** 2) * self.kd_loss(
                                 logits_teacher, logits_student, self.target_temperature)
 
-                            # RC Loss - اصلاح شده
+                            # RC Loss - اصلاح شده با logging
                             rc_loss = torch.tensor(0.0, device=images.device)
+                            
+                            # Debug: check if feature lists are empty
+                            if len(feature_list_student) == 0:
+                                if self.rank == 0 and batch_data is self.train_loader:
+                                    self.logger.warning("Feature list is empty! Model may not be returning features.")
+                            
                             for i in range(len(feature_list_student)):
                                 # Features shape: [B*T, C, H, W]
                                 s_feat_flat = feature_list_student[i].view(batch_size * num_frames, -1)
@@ -378,7 +394,9 @@ class TrainDDP:
                                 s_feat = s_feat_flat.view(batch_size, num_frames, -1).mean(dim=1)
                                 t_feat = t_feat_flat.view(batch_size, num_frames, -1).mean(dim=1)
                                 
-                                rc_loss = rc_loss + self.rc_loss(s_feat, t_feat)
+                                # Calculate RC loss for this layer
+                                layer_rc_loss = self.rc_loss(s_feat, t_feat)
+                                rc_loss = rc_loss + layer_rc_loss
 
                             mask_loss = self.mask_loss(self.student.module)
 
@@ -439,19 +457,23 @@ class TrainDDP:
                         )
                         _tqdm.update(1)
 
-            # ----------------- End of epoch logging (Train) -----------------
-            if self.rank == 0:
-                # Calculate train FLOPs with ticket=False
-                self.student.module.ticket = False
-                train_flops = self.student.module.get_flops()
-                
-                self.logger.info(f"[Train] Epoch {epoch} : Gumbel_temperature {current_gumbel_temp:.2f} "
-                                f"LR {current_lr:.6f} OriLoss {meter_oriloss.avg:.4f} "
-                                f"KDLoss {meter_kdloss.avg:.4f} RCLoss {meter_rcloss.avg:.4f} "
-                                f"MaskLoss {meter_maskloss.avg:.6f} TotalLoss {meter_loss.avg:.4f} "
-                                f"Train_Acc {meter_top1.avg:.2f}")
-                
-                self.logger.info(f"[Train model Flops] Epoch {epoch} : {train_flops/1e6:.6f}M")
+                # Log training details
+                if self.rank == 0:
+                    # Calculate train FLOPs with ticket=False
+                    self.student.module.ticket = False
+                    train_flops = self.student.module.get_flops()
+                    
+                    # Debug RC Loss
+                    if meter_rcloss.avg < 0.0001:
+                        self.logger.warning(f"RC Loss is near zero! Feature list length: {len(feature_list_student) if 'feature_list_student' in locals() else 'N/A'}")
+                    
+                    self.logger.info(f"[Train] Epoch {epoch} : Gumbel_temperature {current_gumbel_temp:.2f} "
+                                    f"LR {current_lr:.6f} OriLoss {meter_oriloss.avg:.4f} "
+                                    f"KDLoss {meter_kdloss.avg:.4f} RCLoss {meter_rcloss.avg:.6f} "
+                                    f"MaskLoss {meter_maskloss.avg:.6f} TotalLoss {meter_loss.avg:.4f} "
+                                    f"Train_Acc {meter_top1.avg:.2f}")
+                    
+                    self.logger.info(f"[Train model Flops] Epoch {epoch} : {train_flops/1e6:.6f}M")
 
             # ----------------- Validation -----------------
             if self.rank == 0:
