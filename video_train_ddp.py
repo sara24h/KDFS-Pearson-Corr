@@ -432,7 +432,10 @@ class TrainDDP:
                         for images, targets in self.val_loader:
                             images = images.cuda(non_blocking=True)
                             targets = targets.cuda(non_blocking=True).float()
-
+    
+                            batch_size, num_frames, C, H, W = images.shape
+                            images = images.view(-1, C,C, H, W)   # ← [B*T, C, H, W]
+    
                             logits, _ = self.student(images)
                             logits = logits.squeeze(1)
                             preds = (torch.sigmoid(logits) > 0.5).float()
