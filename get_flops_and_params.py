@@ -17,6 +17,7 @@ Flops_baselines = {
         "200k": 5390.0,
         "330k": 5390.0,
         "125k": 2100.0,
+        "uadfv": 5390.0,
     },
     "MobileNetV2": {
         "hardfakevsrealfaces": 570.0,  # Approximate value for 300x300 input
@@ -42,10 +43,11 @@ Params_baselines = {
         "hardfakevsreal": 14.97,
         "rvf10k": 23.51,
         "140k": 23.51,
-        "190k": 23.51,  # Added for 190k
+        "190k": 23.51,  
         "200k": 23.51,
         "330k": 23.51,
         "125k": 23.51,
+        "uadfv":23.51,
     },
     "MobileNetV2": {
         "hardfakevsrealfaces": 2.23,
@@ -74,6 +76,7 @@ image_sizes = {
     "200k": 256,
     "330k": 256,
     "125k": 160,
+    "uadfv": 256
 }
 
 def get_flops_and_params(dataset_mode, sparsed_student_ckpt_path):
@@ -85,7 +88,8 @@ def get_flops_and_params(dataset_mode, sparsed_student_ckpt_path):
         "190k": "190k", 
         "200k": "200k",
         "330k": "330k",
-        "125k": "125k"
+        "125k": "125k",
+        "uadfv": "uadfv",
     }[dataset_mode]
 
     # Load checkpoint
@@ -157,7 +161,7 @@ def main():
         raise ValueError("Please set the sparsed_student_ckpt_path in the code.")
 
     # Run for all datasets
-    for dataset_mode in ["hardfake", "rvf10k", "140k", "190k", "200k", "330k", "125k"]:
+    for dataset_mode in ["hardfake", "rvf10k", "140k", "190k", "200k", "330k", "125k","uadfv"]:
         print(f"\nEvaluating for dataset: {dataset_mode}")
         (
             Flops_baseline,
