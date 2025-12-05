@@ -143,15 +143,14 @@ class UADFVDataset(Dataset):
     
     def __getitem__(self, idx):
         video_path, label = self.video_list[idx]
-        
         try:
-            frames = self.load_video(video_path)
+            frames = self.load_video(video_path)  
+     
+            frame = torch.mean(frames, dim=0)
         except Exception as e:
             print(f"Error loading video {video_path}: {e}")
-            # Return zeros as fallback
-            frames = torch.zeros(self.num_frames, 3, self.image_size, self.image_size)
-        
-        return frames, torch.tensor(label, dtype=torch.float32)
+            frame = torch.zeros(3, self.image_size, self.image_size)
+        return frame, torch.tensor(label, dtype=torch.float32)
 
 
 def create_uadfv_dataloaders(root_dir, num_frames=16, image_size=256,
