@@ -182,7 +182,7 @@ def create_uadfv_dataloaders(
         test_sampler  = DistributedSampler(test_ds, shuffle=False)
         shuffle = False
     else:
-        :
+
         train_sampler = val_sampler = test_sampler = None
         shuffle = True
 
