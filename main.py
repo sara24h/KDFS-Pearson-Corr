@@ -41,32 +41,28 @@ def parse_args():
         help="train, finetune or test",
     )
 
-    parser.add_argument(
-        "--target_retention",
-        type=float,
-        default=0.5,
-        help="نرخ نگه‌داشت هدف (Target Retention Rate) برای هرس فیلترها (ρ).",
-    )
-    parser.add_argument(
-        "--lambda_sparse",
-        type=float,
-        default=1.0,
-        help="ضریب جریمه تنک‌سازی (Sparsity Regularization) برای یادگیری ماسک‌ها (λ).",
-    )
+    parser.add_argument('--use_threshold_loss', type=bool, default=True, help='Whether to use the new threshold-based loss.')
+    parser.add_argument('--threshold_value', type=float, default=0.7, help='The fixed threshold value for regularization.')
+
     parser.add_argument(
         "--dataset_mode",
         type=str,
-        default="rvf10k",
-        choices=("rvf10k", "rvf10k", "140k", "200k", "190k", "330k"),
-        help="Dataset to use:  rvf10k, 140k, 200k, 190k, or 330k",
+        default="hardfake",
+        choices=("hardfake", "rvf10k", "140k", "200k", "190k", "330k"),
+        help="Dataset to use: hardfake, rvf10k, 140k, 200k, 190k, or 330k",
     )
     parser.add_argument(
         "--dataset_dir",
         type=str,
-        default="/kaggle/input/rvf10k",
-        help="The dataset path (used for  rvf10k, 140k, 200k)",
+        default="/kaggle/input/hardfakevsrealfaces",
+        help="The dataset path (used for hardfake, rvf10k, 140k, 200k)",
     )
-    
+    parser.add_argument(
+        "--hardfake_csv_file",
+        type=str,
+        default="/kaggle/input/hardfakevsrealfaces/data.csv",
+        help="The path to the hardfake CSV file (for hardfake mode)",
+    )
     parser.add_argument(
         "--compress_rate",
         type=float,
@@ -398,8 +394,13 @@ def parse_args():
     return parser.parse_args()
 
 def validate_args(args):
-
-    if args.dataset_mode == "rvf10k":
+    """Check if required files and directories exist"""
+    if args.dataset_mode == "hardfake":
+        if not os.path.exists(args.hardfake_csv_file):
+            raise FileNotFoundError(f"Hardfake CSV file not found: {args.hardfake_csv_file}")
+        if not os.path.exists(args.dataset_dir):
+            raise FileNotFoundError(f"Dataset directory not found: {args.dataset_dir}")
+    elif args.dataset_mode == "rvf10k":
         if not os.path.exists(args.rvf10k_train_csv):
             raise FileNotFoundError(f"RVF10k train CSV file not found: {args.rvf10k_train_csv}")
         if not os.path.exists(args.rvf10k_valid_csv):
