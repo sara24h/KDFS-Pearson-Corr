@@ -1,6 +1,6 @@
 import torch
 from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal
-from model.pruned_model.ResNet_pruned import ResNet_50_pruned_hardfakevsreal
+from model.pruned_model.ResNet_pruned import ResNet_50_pruned_uadfv
 from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
 from model.pruned_model.MobileNetV2_pruned import MobileNetV2_pruned
 from model.student.GoogleNet_sparse import GoogLeNet_sparse_deepfake
