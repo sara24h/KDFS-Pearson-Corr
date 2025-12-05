@@ -133,7 +133,7 @@ echo "Running torchrun with arguments:"
 
 if [ "$PHASE" = "train" ]; then
     echo "Starting training phase..."
-    torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson-Corr/main.py \
+    torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson-Corr/video_main.py \
         --phase train \
         --arch "$arch" \
         --device cuda \
@@ -169,7 +169,7 @@ elif [ "$PHASE" = "finetune" ]; then
         exit 1
     fi
 
-    torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson-Corr/main.py \
+    torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson-Corr/video_main.py \
         --phase finetune \
         --arch "$arch" \
         --device cuda \
