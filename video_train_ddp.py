@@ -332,7 +332,7 @@ class TrainDDP:
                         targets = targets.cuda(non_blocking=True).float()
 
                         batch_size, num_frames, C, H, W = videos.shape
-                        images = images.view(-1, C, H, W)
+                        images = videos.view(-1, C, H, W)
 
                         if torch.isnan(images).any() or torch.isinf(images).any() or \
                            torch.isnan(targets).any() or torch.isinf(targets).any():
@@ -422,7 +422,7 @@ class TrainDDP:
                         )
                         _tqdm.update(1)
 
-                # ----------------- Validation -----------------
+             
                 if self.rank == 0:
                     self.student.eval()
                     self.student.module.ticket = True
@@ -434,13 +434,14 @@ class TrainDDP:
                             targets = targets.cuda(non_blocking=True).float()
     
                             batch_size, num_frames, C, H, W = images.shape
-                            images = images.view(-1, C, H, W)   # ← [B*T, C, H, W]
-    
-                            logits, _ = self.student(images)
+                            frames = images.view(-1, C, H, W)
+                            logits, _ = self.student(frames)
                             logits = logits.squeeze(1)
+                            logits = logits.view(batch_size, num_frames).mean(dim=1)
                             preds = (torch.sigmoid(logits) > 0.5).float()
-                            acc1 = 100.0 * (preds == targets).sum().item() / targets.size(0)
-                            val_meter.update(acc1, targets.size(0))
+                            preds = (preds > 0.5).float()
+                            acc1 = 100.0 * (preds == targets).sum().item() / batch_size
+                            val_meter.update(acc1, batch_size)
 
                     flops = self.student.module.get_flops()
                     self.writer.add_scalar("val/acc/top1", val_meter.avg, epoch)
