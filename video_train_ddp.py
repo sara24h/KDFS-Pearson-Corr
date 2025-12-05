@@ -377,33 +377,39 @@ class TrainDDP:
                             kd_loss = (self.target_temperature ** 2) * self.kd_loss(
                                 logits_teacher, logits_student, self.target_temperature)
 
-                            # RC Loss - اصلاح شده با logging
-                            rc_loss = torch.tensor(0.0, device=images.device)
+                            # ✅ RC Loss - Fixed version (similar to image code)
+                            rc_loss = torch.tensor(0.0, device=images.device, dtype=torch.float32)
                             
-                            # Debug: check if feature lists are empty
                             if len(feature_list_student) == 0:
-                                if self.rank == 0 and batch_data is self.train_loader:
+                                if self.rank == 0:
                                     self.logger.warning("Feature list is empty! Model may not be returning features.")
-                            
-                            for i in range(len(feature_list_student)):
-                                # Features shape: [B*T, C, H, W]
-                                s_feat_flat = feature_list_student[i].view(batch_size * num_frames, -1)
-                                t_feat_flat = feature_list_teacher[i].view(batch_size * num_frames, -1)
+                            else:
+                                for i in range(len(feature_list_student)):
+                                    # Features shape: [B*T, C, H, W]
+                                    # Directly pass to RCLoss (it will handle flattening)
+                                    layer_rc_loss = self.rc_loss(
+                                        feature_list_student[i], 
+                                        feature_list_teacher[i]
+                                    )
+                                    rc_loss = rc_loss + layer_rc_loss
                                 
-                                # Reshape to [B, T, Features] and average over time
-                                s_feat = s_feat_flat.view(batch_size, num_frames, -1).mean(dim=1)
-                                t_feat = t_feat_flat.view(batch_size, num_frames, -1).mean(dim=1)
+                                # Average over layers (like image code)
+                                rc_loss = rc_loss / len(feature_list_student)
                                 
-                                # Calculate RC loss for this layer
-                                layer_rc_loss = self.rc_loss(s_feat, t_feat)
-                                rc_loss = rc_loss + layer_rc_loss
+                                # Debug logging for first epoch
+                                if self.rank == 0 and epoch == 1 and not hasattr(self, '_rc_logged'):
+                                    self._rc_logged = True
+                                    self.logger.info(f"RC Loss per layer: {rc_loss.item():.6f}")
 
                             mask_loss = self.mask_loss(self.student.module)
 
-                            total_loss = (ori_loss +
-                                          self.coef_kdloss * kd_loss +
-                                          self.coef_rcloss * rc_loss / len(feature_list_student) +
-                                          self.coef_maskloss * mask_loss)
+                            # ✅ Total loss - no division by len(feature_list_student) here
+                            total_loss = (
+                                ori_loss +
+                                self.coef_kdloss * kd_loss +
+                                self.coef_rcloss * rc_loss +  # Already averaged
+                                self.coef_maskloss * mask_loss
+                            )
 
                             # Correlation & retention for logging
                             total_corr, total_ret = 0.0, 0.0
@@ -443,8 +449,8 @@ class TrainDDP:
                         n = batch_size if is_video_dataset else images.size(0)
                         meter_oriloss.update(reduced_ori_loss.item(), n)
                         meter_kdloss.update(self.coef_kdloss * reduced_kd_loss.item(), n)
-                        meter_rcloss.update(self.coef_rcloss * reduced_rc_loss.item() /
-                                            len(feature_list_student), n)
+                        # ✅ No division here - rc_loss is already averaged
+                        meter_rcloss.update(self.coef_rcloss * reduced_rc_loss.item(), n)
                         meter_maskloss.update(self.coef_maskloss * reduced_mask_loss.item(), n)
                         meter_loss.update(reduced_total_loss.item(), n)
                         meter_top1.update(reduced_prec1.item(), n)
@@ -465,7 +471,7 @@ class TrainDDP:
                     
                     # Debug RC Loss
                     if meter_rcloss.avg < 0.0001:
-                        self.logger.warning(f"RC Loss is near zero! Feature list length: {len(feature_list_student) if 'feature_list_student' in locals() else 'N/A'}")
+                        self.logger.warning(f"RC Loss is near zero! This might indicate a problem.")
                     
                     self.logger.info(f"[Train] Epoch {epoch} : Gumbel_temperature {current_gumbel_temp:.2f} "
                                     f"LR {current_lr:.6f} OriLoss {meter_oriloss.avg:.4f} "
@@ -487,39 +493,27 @@ class TrainDDP:
                         val_targets = val_targets.cuda(non_blocking=True).float()
 
                         val_batch_size, val_num_frames, C, H, W = val_videos.shape
-                        val_frames = val_videos.view(-1, C, H, W)  # [B*T, C, H, W]
+                        val_frames = val_videos.view(-1, C, H, W)
                         
-                        # Forward pass
                         val_logits, _ = self.student(val_frames)
-                        val_logits = val_logits.squeeze(1)  # [B*T]
+                        val_logits = val_logits.squeeze(1)
+                        val_logits = val_logits.view(val_batch_size, val_num_frames).mean(dim=1)
                         
-                        # Average logits over time
-                        val_logits = val_logits.view(val_batch_size, val_num_frames).mean(dim=1)  # [B]
-                        
-                        # فقط یک بار sigmoid و threshold
-                        val_preds = (torch.sigmoid(val_logits) > 0.5).float()  # [B]
-                        
-                        # Calculate accuracy
+                        val_preds = (torch.sigmoid(val_logits) > 0.5).float()
                         correct = (val_preds == val_targets).sum().item()
                         acc1 = 100.0 * correct / val_batch_size
                         val_meter.update(acc1, val_batch_size)
 
-                # Get mask averages
                 mask_avgs = self.get_mask_averages()
-                
-                # Calculate validation FLOPs with ticket=True
                 val_flops = self.student.module.get_flops()
                 
-                # Log validation results
                 self.logger.info(f"[Val] Epoch {epoch} : Val_Acc {val_meter.avg:.2f}")
                 self.logger.info(f"[Val mask avg] Epoch {epoch} : {mask_avgs}")
                 self.logger.info(f"[Val model Flops] Epoch {epoch} : {val_flops/1e6:.6f}M")
 
-                # Scheduler step after validation
                 self.scheduler_student_weight.step()
                 self.scheduler_student_mask.step()
 
-                # TensorBoard logging
                 self.writer.add_scalar("train/lr", current_lr, epoch)
                 self.writer.add_scalar("train/gumbel_temp", current_gumbel_temp, epoch)
                 self.writer.add_scalar("train/acc", meter_top1.avg, epoch)
@@ -528,7 +522,6 @@ class TrainDDP:
                 self.writer.add_scalar("val/acc", val_meter.avg, epoch)
                 self.writer.add_scalar("val/flops", val_flops, epoch)
 
-                # Save checkpoint
                 if val_meter.avg > self.best_prec1:
                     self.best_prec1 = val_meter.avg
                     self.logger.info(f" => Best top1 accuracy on validation before finetune : {self.best_prec1}")
