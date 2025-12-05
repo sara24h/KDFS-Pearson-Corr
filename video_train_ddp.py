@@ -3,7 +3,6 @@ import os
 import random
 import time
 from datetime import datetime
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -12,17 +11,16 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
-
 from data.dataset import Dataset_selector
 from model.student.ResNet_sparse import (ResNet_50_sparse_uadfv,SoftMaskedConv2d)
 from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
 from model.student.GoogleNet_sparse import GoogLeNet_sparse_deepfake
 from utils import utils, loss, meter, scheduler
 from thop import profile
-
 from model.teacher.ResNet import ResNet_50_hardfakevsreal
 from model.teacher.Mobilenetv2 import MobileNetV2_deepfake
 from model.teacher.GoogleNet import GoogLeNet_deepfake
+from utils.loss import compute_filter_correlation
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
