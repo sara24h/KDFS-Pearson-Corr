@@ -3,7 +3,6 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from sklearn.model_selection import train_test_split
 from PIL import Image
 import argparse
 import random
@@ -14,10 +13,8 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from torch.cuda.amp import autocast, GradScaler
 import torch.distributed as dist
-
 matplotlib.use('Agg')
-
-from data.dataset import FaceDataset, Dataset_selector
+from data.dataset import Dataset_selector
 from model.teacher.ResNet import ResNet_50_hardfakevsreal
 from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal, ResNet_50_sparse_rvf10k
 from utils import utils, loss, meter, scheduler
@@ -45,14 +42,14 @@ def parse_args():
         "--dataset_mode",
         type=str,
         default="uadfv",
-        choices=("uadfv"),
-        help="Dataset to use:uadvf",
+        choices=("uadfv", "hardfake", "rvf10k", "140k", "200k", "190k", "330k"),
+        help="Dataset to use",
     )
     parser.add_argument(
         "--dataset_dir",
         type=str,
         default="/kaggle/input/uadfv-dataset/UADFV",
-        help="The dataset path (used for hardfake, rvf10k, 140k, 200k)",
+        help="The dataset path",
     )
     
     parser.add_argument(
@@ -316,66 +313,42 @@ def parse_args():
         help=" weight decay for fine-tuning",
     )
     
-
     return parser.parse_args()
 
 def validate_args(args):
     """Check if required files and directories exist"""
-    if args.dataset_mode == "hardfake":
-        if not os.path.exists(args.hardfake_csv_file):
-            raise FileNotFoundError(f"Hardfake CSV file not found: {args.hardfake_csv_file}")
+    if args.dataset_mode == "uadfv":
+        if not os.path.exists(args.dataset_dir):
+            raise FileNotFoundError(f"UADFV dataset directory not found: {args.dataset_dir}")
+        real_dir = os.path.join(args.dataset_dir, "real")
+        fake_dir = os.path.join(args.dataset_dir, "fake")
+        if not os.path.exists(real_dir) or not os.path.exists(fake_dir):
+            raise FileNotFoundError(
+                f"UADFV requires 'real/' and 'fake/' subdirectories inside {args.dataset_dir}"
+            )
+    elif args.dataset_mode == "hardfake":
+        # You may define CSV paths if needed, or rely on folder structure
         if not os.path.exists(args.dataset_dir):
             raise FileNotFoundError(f"Dataset directory not found: {args.dataset_dir}")
-    elif args.dataset_mode == "rvf10k":
-        if not os.path.exists(args.rvf10k_train_csv):
-            raise FileNotFoundError(f"RVF10k train CSV file not found: {args.rvf10k_train_csv}")
-        if not os.path.exists(args.rvf10k_valid_csv):
-            raise FileNotFoundError(f"RVF10k valid CSV file not found: {args.rvf10k_valid_csv}")
+    elif args.dataset_mode in ["rvf10k", "140k", "200k", "190k", "330k"]:
         if not os.path.exists(args.dataset_dir):
             raise FileNotFoundError(f"Dataset directory not found: {args.dataset_dir}")
-    elif args.dataset_mode == "140k":
-        if not os.path.exists(args.realfake140k_train_csv):
-            raise FileNotFoundError(f"140k train CSV file not found: {args.realfake140k_train_csv}")
-        if not os.path.exists(args.realfake140k_valid_csv):
-            raise FileNotFoundError(f"140k valid CSV file not found: {args.realfake140k_valid_csv}")
-        if not os.path.exists(args.realfake140k_test_csv):
-            raise FileNotFoundError(f"140k test CSV file not found: {args.realfake140k_test_csv}")
-        if not os.path.exists(args.dataset_dir):
-            raise FileNotFoundError(f"Dataset directory not found: {args.dataset_dir}")
-    elif args.dataset_mode == "200k":
-        if not os.path.exists(args.realfake200k_train_csv):
-            raise FileNotFoundError(f"200k train CSV file not found: {args.realfake200k_train_csv}")
-        if not os.path.exists(args.realfake200k_valid_csv):
-            raise FileNotFoundError(f"200k valid CSV file not found: {args.realfake200k_valid_csv}")
-        if not os.path.exists(args.realfake200k_test_csv):
-            raise FileNotFoundError(f"200k test CSV file not found: {args.realfake200k_test_csv}")
-        if not os.path.exists(args.dataset_dir):
-            raise FileNotFoundError(f"Dataset directory not found: {args.dataset_dir}")
-    elif args.dataset_mode == "190k":
-        if not os.path.exists(args.realfake190k_root_dir):
-            raise FileNotFoundError(f"190k dataset directory not found: {args.realfake190k_root_dir}")
-    elif args.dataset_mode == "330k":
-        if not os.path.exists(args.realfake330k_root_dir):
-            raise FileNotFoundError(f"330k dataset directory not found: {args.realfake330k_root_dir}")
-
+    
+    # Common validations
     if args.phase in ["train", "finetune"]:
         if not os.path.exists(args.teacher_ckpt_path):
             raise FileNotFoundError(f"Teacher checkpoint not found: {args.teacher_ckpt_path}")
 
+    if args.phase == "finetune" and args.finetune_student_ckpt_path:
+        if not os.path.exists(args.finetune_student_ckpt_path):
+            raise FileNotFoundError(f"Finetune student checkpoint not found: {args.finetune_student_ckpt_path}")
 
-    if args.phase == "finetune" and args.finetune_student_ckpt_path and not os.path.exists(args.finetune_student_ckpt_path):
-        raise FileNotFoundError(f"Finetune student checkpoint not found: {args.finetune_student_ckpt_path}")
-
-    if args.phase == "test" and args.sparsed_student_ckpt_path and not os.path.exists(args.sparsed_student_ckpt_path):
-        raise FileNotFoundError(f"Sparsed student checkpoint not found: {args.sparsed_student_ckpt_path}")
-
-    #if args.new_dataset_dir and not os.path.exists(args.new_dataset_dir):
-      #  raise FileNotFoundError(f"New dataset directory not found: {args.new_dataset_dir}")
+    if args.phase == "test" and args.sparsed_student_ckpt_path:
+        if not os.path.exists(args.sparsed_student_ckpt_path):
+            raise FileNotFoundError(f"Sparsed student checkpoint not found: {args.sparsed_student_ckpt_path}")
 
 def main():
     args = parse_args()
-    
-    # Validate file and directory existence
     validate_args(args)
 
     # Set seeds for reproducibility
@@ -396,9 +369,6 @@ def main():
 
     if args.dali:
         print("Using NVIDIA DALI for data loading.")
-        from nvidia.dali.pipeline import Pipeline
-        from nvidia.dali.plugin.pytorch import DALIClassificationIterator
-        # DALI pipeline implementation would go here
     else:
         print("Using standard PyTorch DataLoader.")
 
