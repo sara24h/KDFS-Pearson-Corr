@@ -41,9 +41,18 @@ def parse_args():
         help="train, finetune or test",
     )
 
-    parser.add_argument('--use_threshold_loss', type=bool, default=True, help='Whether to use the new threshold-based loss.')
-    parser.add_argument('--threshold_value', type=float, default=0.7, help='The fixed threshold value for regularization.')
-
+    parser.add_argument(
+        "--target_retention",
+        type=float,
+        default=0.5,
+        help="نرخ نگه‌داشت هدف (Target Retention Rate) برای هرس فیلترها (ρ).",
+    )
+    parser.add_argument(
+        "--lambda_sparse",
+        type=float,
+        default=1.0,
+        help="ضریب جریمه تنک‌سازی (Sparsity Regularization) برای یادگیری ماسک‌ها (λ).",
+    )
     parser.add_argument(
         "--dataset_mode",
         type=str,
