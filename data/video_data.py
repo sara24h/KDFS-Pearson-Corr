@@ -237,7 +237,7 @@ def create_uadfv_dataloaders(root_dir, num_frames=16, image_size=256,
 # Test function
 if __name__ == "__main__":
     # Example usage
-    root_dir = "/path/to/UADFV"
+    root_dir = "/kaggle/input/uadfv-dataset/UADFV"
     
     train_loader, val_loader, test_loader = create_uadfv_dataloaders(
         root_dir=root_dir,
