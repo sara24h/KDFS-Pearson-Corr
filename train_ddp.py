@@ -439,7 +439,7 @@ class TrainDDP:
                     else self.warmup_start_lr
                 )
             
-            self.student.module.gumbel_temperature(epoch)
+            self.student.module.update_gumbel_temperature(epoch)
             
             with tqdm(total=len(self.train_loader), ncols=100, disable=self.rank != 0) as _tqdm:
                 if self.rank == 0:
