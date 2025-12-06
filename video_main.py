@@ -37,7 +37,9 @@ def parse_args():
         choices=("train", "finetune", "test"),
         help="train, finetune or test",
     )
-
+    parser.add_argument('--num_frames', type=int, default=16, help='Number of frames to sample from each video')
+    parser.add_argument('--image_size', type=int, default=256, help='Size to resize video frames')
+    parser.add_argument('--sampling_strategy', type=str, default='uniform',choices=['uniform', 'random'],help='Strategy for sampling frames from video')
     parser.add_argument(
         "--dataset_mode",
         type=str,
