@@ -15,7 +15,7 @@ from torch.cuda.amp import autocast, GradScaler
 from data.video_data import create_kfold_dataloaders, set_global_seed
 from utils import utils, loss, meter, scheduler
 from thop import profile
-from model.student.ResNet_sparse import ResNet_50_sparse_uadfv, SoftMaskedConv2d
+from model.student.ResNet_sparse_video import ResNet_50_sparse_uadfv, SoftMaskedConv2d
 from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
 from model.student.GoogleNet_sparse import GoogLeNet_sparse_deepfake
 from model.teacher.ResNet import ResNet_50_hardfakevsreal
