@@ -1,3 +1,5 @@
+# data/video_dataset.py
+
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
@@ -11,7 +13,8 @@ from sklearn.model_selection import KFold, StratifiedKFold
 
 def set_global_seed(seed: int = 42):
     random.seed(seed)
-    np.random.seed(seed)
+    # از default_rng برای سازگاری با نسخه‌های جدید numpy استفاده می‌کنیم
+    np.random.default_rng(seed).bit_generator.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
@@ -19,10 +22,11 @@ def set_global_seed(seed: int = 42):
     os.environ['PYTHONHASHSEED'] = str(seed)
 
 def worker_init_fn(worker_id):
-    seed = 42 + worker_id
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    # از default_rng برای سازگاری با نسخه‌های جدید numpy استفاده می‌کنیم
+    rng = np.random.default_rng(42 + worker_id)
+    rng.bit_generator.seed(42 + worker_id)
+    random.seed(42 + worker_id)
+    torch.manual_seed(42 + worker_id)
 
 class UADFVDataset(Dataset):
     def __init__(self, root_dir, num_frames=16, image_size=256,
@@ -59,7 +63,6 @@ class UADFVDataset(Dataset):
             self.transform = transform
             
         self.video_list = self._load_videos()
-
         if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
             print(f"Total {len(self.video_list)} videos loaded.")
 
@@ -126,24 +129,26 @@ class UADFVDataset(Dataset):
     def __getitem__(self, idx):
         path, label = self.video_list[idx]
         worker_info = torch.utils.data.get_worker_info()
+        
+        # !!! اینجا تغییر اصلی را اعمال می‌کنیم !!!
         if worker_info is not None:
             seed = self.seed + worker_info.id * 100000 + idx
         else:
             seed = self.seed + idx
-        r_state = random.getstate()
-        np_state = np.random.get_state()
         
+        # ایجاد یک generator محلی با seed مشخص
+        rng = np.random.default_rng(seed)
+        # همچنین random و torch را با همان seed تنظیم می‌کنیم
         random.seed(int(seed))
-        np.random.seed(int(seed))
-        
+        torch.manual_seed(int(seed))
+
         try:
             frames = self.load_video(path)
         except Exception as e:
             print(f"Error loading {path}: {e}")
             frames = torch.zeros(self.num_frames, 3, self.image_size, self.image_size)
-        finally:
-            random.setstate(r_state)
-            np.random.setstate(np_state)
+        # دیگر نیازی به finally برای بازگرداندن حالت نیست، چون rng محلی است
+        
         return frames, torch.tensor(label, dtype=torch.float32)
 
 def create_kfold_dataloaders(
