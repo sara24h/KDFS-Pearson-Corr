@@ -4,38 +4,24 @@ from thop import profile
 from torchvision.models import resnet50
 from model.teacher.ResNet import ResNet_50_hardfakevsreal
 
-def get_model():
-    
-    model = resnet50(pretrained=False)
-    # تغییر لایه نهایی برای خروجی باینری (واقعی/جعلی)
-    num_ftrs = model.fc.in_features
-    model.fc = nn.Linear(num_ftrs, 1)
-    return model
-
-# --- بخش ۲: تابع محاسبه FLOPs و پارامترها ---
-
 def calculate_flops_params_for_video(model_path, num_frames=16, image_size=256):
    
     print(f"Loading model from: {model_path}")
+
+    model = ResNet_50_hardfakevsreal()
     
-    # 1. ایجاد مدل
-    model = get_model()
-    
-    # 2. بارگذاری وزن‌ها از چک‌پوینت
     try:
         checkpoint = torch.load(model_path, map_location='cpu')
-        
-        # گاهی اوقات state_dict در کلیدهای دیگری مانند 'model' یا 'student' ذخیره می‌شود
+
         if 'state_dict' in checkpoint:
             state_dict = checkpoint['state_dict']
         elif 'model_state_dict' in checkpoint:
             state_dict = checkpoint['model_state_dict']
-        elif 'student' in checkpoint: # برای مدل‌های دانش‌آموز (student)
+        elif 'student' in checkpoint: 
              state_dict = checkpoint['student']
         else:
-            state_dict = checkpoint # فرض می‌کنیم کل فایل state_dict است
+            state_dict = checkpoint 
 
-        # اگر مدل با DDP ذخیره شده باشد، کلیدها با 'module.' شروع می‌شوند
         if list(state_dict.keys())[0].startswith('module.'):
             from collections import OrderedDict
             new_state_dict = OrderedDict()
@@ -79,13 +65,10 @@ def calculate_flops_params_for_video(model_path, num_frames=16, image_size=256):
     print(f"  - FLOPs per Video: {flops_per_video/1e9:.2f} GFLOPs")
     print("="*70)
 
-
-# --- بخش ۳: اجرای اصلی ---
 if __name__ == "__main__":
-    # مسیر فایل چک‌پوینت مدل خود را اینجا قرار دهید
+
     TEACHER_MODEL_PATH = "/kaggle/input/10k_teacher_beaet/pytorch/default/1/10k-teacher_model_best.pth"
-    
-    # پارامترهای مربوط به دیتاست ویدیویی (بر اساس UADFVDataset)
+
     NUM_FRAMES = 16
     IMAGE_SIZE = 256
 
