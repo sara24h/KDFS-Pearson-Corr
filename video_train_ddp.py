@@ -11,7 +11,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
-from data.video_dataset import create_kfold_dataloaders, set_global_seed
+from data.video import create_kfold_dataloaders, set_global_seed
 from utils import utils, loss, meter, scheduler
 from thop import profile
 from model.student.ResNet_sparse import (ResNet_50_sparse_uadfv,SoftMaskedConv2d)
