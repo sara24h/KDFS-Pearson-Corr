@@ -559,6 +559,7 @@ class TrainDDP:
 
 
             if self.rank == 0:
+                final_acc = 100.0 * total_correct_tensor.item() / total_samples_tensor.item()
                 mask_avgs = self.get_mask_averages()
                 val_flops = self.student.module.get_flops()
                 
@@ -582,7 +583,7 @@ class TrainDDP:
                 self.writer.add_scalar(f"train/fold_{fold_idx+1}/acc", meter_top1.avg, epoch)
                 self.writer.add_scalar(f"train/fold_{fold_idx+1}/loss", meter_loss.avg, epoch)
                 self.writer.add_scalar(f"train/fold_{fold_idx+1}/flops", train_flops, epoch)
-                self.writer.add_scalar(f"val/fold_{fold_idx+1}/acc", val_meter.avg, epoch)
+                self.writer.add_scalar(f"val/fold_{fold_idx+1}/acc", final_acc, epoch)
                 self.writer.add_scalar(f"val/fold_{fold_idx+1}/flops", val_flops, epoch)
                 
                 # Save checkpoint
