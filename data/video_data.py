@@ -152,7 +152,7 @@ class UADFVDataset(Dataset):
             np.random.set_state(np_state)
         return frames, torch.tensor(label, dtype=torch.float32)
 
-def create_uadfv_dataloaders(
+def create_kfold_dataloaders(
     root_dir,
     num_frames=16,
     image_size=256,
@@ -174,22 +174,18 @@ def create_uadfv_dataloaders(
     train_end = int(total * split_ratio[0])
     val_end = train_end + int(total * split_ratio[1])
     trainval_list = video_list[:val_end]
-    # test_list = video_list[val_end:]  # not needed since test_ds loads it
     labels_trainval = np.array([label for _, label in trainval_list])
-
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
     fold_loaders = []
     for fold, (train_idx, val_idx) in enumerate(skf.split(np.arange(len(trainval_list)), labels_trainval)):
         train_videos = [trainval_list[i] for i in train_idx]
         val_videos = [trainval_list[i] for i in val_idx]
-
         train_ds = UADFVDataset(root_dir, num_frames, image_size,
                                 transform=None, sampling_strategy=sampling_strategy,
                                 split='train', split_ratio=split_ratio, seed=seed, video_list=train_videos)
         val_ds = UADFVDataset(root_dir, num_frames, image_size,
                               transform=None, sampling_strategy=sampling_strategy,
                               split='val', split_ratio=split_ratio, seed=seed, video_list=val_videos)
-
         if ddp:
             train_sampler = DistributedSampler(train_ds, shuffle=True, seed=seed)
             val_sampler = DistributedSampler(val_ds, shuffle=False, seed=seed)
@@ -198,7 +194,6 @@ def create_uadfv_dataloaders(
             train_sampler = None
             val_sampler = None
             shuffle = True
-
         g = torch.Generator().manual_seed(seed)
         train_loader = DataLoader(train_ds,
                                   batch_size=train_batch_size,
@@ -217,7 +212,6 @@ def create_uadfv_dataloaders(
                                 pin_memory=pin_memory,
                                 worker_init_fn=worker_init_fn)
         fold_loaders.append((train_loader, val_loader))
-
     # Create test_loader as before
     test_ds = UADFVDataset(root_dir, num_frames, image_size,
                            transform=None, sampling_strategy=sampling_strategy,
@@ -233,12 +227,11 @@ def create_uadfv_dataloaders(
                              num_workers=num_workers,
                              pin_memory=pin_memory,
                              worker_init_fn=worker_init_fn)
-
     return fold_loaders, test_loader
 
 if __name__ == "__main__":
     root_dir = "/kaggle/input/uadfv-dataset/UADFV"
-    fold_loaders, test_loader = create_uadfv_dataloaders(
+    fold_loaders, test_loader = create_kfold_dataloaders(
         root_dir=root_dir,
         num_frames=16,
         image_size=256,
