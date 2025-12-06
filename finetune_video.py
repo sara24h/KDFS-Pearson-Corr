@@ -254,7 +254,7 @@ class FinetuneDDP:
                     logits_student = logits_student_raw.mean(dim=1)
                     
                     # محاسبه loss با لیبل ویدیو
-                    ori_loss = self.ori_loss(logits_student.squeeze(1), targets)
+                    ori_loss = self.ori_loss(logits_student, targets)
                     total_loss = ori_loss
                     total_loss.backward()
                     self.finetune_optim_weight.step()
