@@ -11,6 +11,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
+from data.video_dataset import create_kfold_dataloaders, set_global_seed
 from utils import utils, loss, meter, scheduler
 from thop import profile
 from model.student.ResNet_sparse import (ResNet_50_sparse_uadfv,SoftMaskedConv2d)
@@ -23,15 +24,6 @@ from utils.loss import compute_filter_correlation
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-def set_global_seed(seed: int = 42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    os.environ['PYTHONHASHSEED'] = str(seed) 
-    
 class TrainDDP:
     def __init__(self, args):
         self.args = args
@@ -45,7 +37,9 @@ class TrainDDP:
         self.num_epochs = args.num_epochs
         self.num_frames = getattr(args, 'num_frames', 16)
         self.frame_sampling = getattr(args, 'frame_sampling', 'uniform')
+        # پارامترهای جدید برای K-Fold
         self.n_splits = getattr(args, 'n_splits', 5)
+        
         self.lr = args.lr
         self.warmup_steps = args.warmup_steps
         self.warmup_start_lr = args.warmup_start_lr
@@ -109,8 +103,6 @@ class TrainDDP:
         set_global_seed(self.seed)
 
     def dataload(self):
-        # این تابع دیگر یک دیتالودر برنمی‌گرداند، بلکه یک generator برمی‌گرداند
-        # که در حلقه اصلی از آن استفاده می‌کنیم
         if self.rank == 0:
             self.logger.info(f"Loading UADFV dataset from: {self.dataset_dir}")
             self.logger.info(f"Number of frames per video: {self.num_frames}")
@@ -276,7 +268,7 @@ class TrainDDP:
         torch.cuda.empty_cache()
         self.teacher.eval()
         scaler = GradScaler()
-
+        
         if self.resume:
             self.resume_student_ckpt()
         
@@ -413,7 +405,8 @@ class TrainDDP:
                             acc=f"{meter_top1.avg:.2f}"
                         )
                         _tqdm.update(1)
-
+                
+                # Log training details
                 if self.rank == 0:
                     self.student.module.ticket = False
                     train_flops = self.student.module.get_flops()
@@ -471,7 +464,7 @@ class TrainDDP:
                     self.save_student_ckpt(is_best=True, epoch=epoch, fold_idx=fold_idx)
                 else:
                     self.save_student_ckpt(is_best=False, epoch=epoch, fold_idx=fold_idx)
-
+        
         if self.rank == 0:
             self.fold_results.append(self.best_prec1)
             self.logger.info(f"Training for Fold {fold_idx + 1} finished! Best accuracy: {self.best_prec1:.2f}")
@@ -492,11 +485,11 @@ class TrainDDP:
             self.start_epoch = 0
 
             if self.resume:
-
+    
                 if fold_idx == 0:
                     self.resume_student_ckpt()
                 else:
-                    self.resume = None 
+                    self.resume = None
 
             self.train(fold_idx)
 
