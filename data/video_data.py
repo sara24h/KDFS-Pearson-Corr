@@ -1,4 +1,4 @@
-# data/video_dataset.py
+# data/video_data.py
 
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
@@ -13,8 +13,8 @@ from sklearn.model_selection import KFold, StratifiedKFold
 
 def set_global_seed(seed: int = 42):
     random.seed(seed)
-    # از default_rng برای سازگاری با نسخه‌های جدید numpy استفاده می‌کنیم
-    np.random.default_rng(seed).bit_generator.seed(seed)
+    # استفاده از random و np.random به صورت مستقیم
+    np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
@@ -22,11 +22,11 @@ def set_global_seed(seed: int = 42):
     os.environ['PYTHONHASHSEED'] = str(seed)
 
 def worker_init_fn(worker_id):
-    # از default_rng برای سازگاری با نسخه‌های جدید numpy استفاده می‌کنیم
-    rng = np.random.default_rng(42 + worker_id)
-    rng.bit_generator.seed(42 + worker_id)
-    random.seed(42 + worker_id)
-    torch.manual_seed(42 + worker_id)
+    # استفاده از random و np.random به صورت مستقیم
+    seed_val = 42 + worker_id
+    random.seed(seed_val)
+    np.random.seed(seed_val)
+    torch.manual_seed(seed_val)
 
 class UADFVDataset(Dataset):
     def __init__(self, root_dir, num_frames=16, image_size=256,
@@ -130,24 +130,28 @@ class UADFVDataset(Dataset):
         path, label = self.video_list[idx]
         worker_info = torch.utils.data.get_worker_info()
         
-        # !!! اینجا تغییر اصلی را اعمال می‌کنیم !!!
         if worker_info is not None:
-            seed = self.seed + worker_info.id * 100000 + idx
+            # ایجاد یک seed منحصر برای هر worker
+            worker_seed = self.seed + worker_info.id * 100000 + idx
         else:
-            seed = self.seed + idx
+            worker_seed = self.seed + idx
         
-        # ایجاد یک generator محلی با seed مشخص
-        rng = np.random.default_rng(seed)
-        # همچنین random و torch را با همان seed تنظیم می‌کنیم
-        random.seed(int(seed))
-        torch.manual_seed(int(seed))
+        # ذخیره حالت فعلی random و numpy
+        r_state = random.getstate()
+        np_state = np.random.get_state()
+        
+        random.seed(worker_seed)
+        np.random.seed(worker_seed)
 
         try:
             frames = self.load_video(path)
         except Exception as e:
             print(f"Error loading {path}: {e}")
             frames = torch.zeros(self.num_frames, 3, self.image_size, self.image_size)
-        # دیگر نیازی به finally برای بازگرداندن حالت نیست، چون rng محلی است
+        finally:
+            # بازگرداندن حالت اولیه
+            random.setstate(r_state)
+            np.random.setstate(np_state)
         
         return frames, torch.tensor(label, dtype=torch.float32)
 
