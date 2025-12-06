@@ -520,7 +520,7 @@ class TrainDDP:
                 )
             
             # Validation
-
+            dist.barrier()
             self.student.eval()
             self.student.module.ticket = True
             val_meter = meter.AverageMeter("Acc@1", ":6.2f")
@@ -541,7 +541,8 @@ class TrainDDP:
                     correct = (val_preds == val_targets).sum().item()
                     acc1 = 100.0 * correct / val_batch_size
                     reduced_acc1 = self.reduce_tensor(torch.tensor(acc1, device='cuda'))
-                    val_meter.update(acc1, val_batch_size)
+                    val_meter.update(reduced_acc1.item(), val_batch_size)
+
 
             if self.rank == 0:
                 mask_avgs = self.get_mask_averages()
