@@ -163,7 +163,8 @@ def create_kfold_dataloaders(
     ddp=False,
     sampling_strategy='uniform',
     split_ratio=(0.7, 0.15, 0.15),
-    seed=42
+    seed=42,
+    n_splits=5
 ):
     # Get full video_list to compute splits consistently
     temp_ds = UADFVDataset(root_dir, num_frames, image_size,
@@ -175,7 +176,7 @@ def create_kfold_dataloaders(
     val_end = train_end + int(total * split_ratio[1])
     trainval_list = video_list[:val_end]
     labels_trainval = np.array([label for _, label in trainval_list])
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
     fold_loaders = []
     for fold, (train_idx, val_idx) in enumerate(skf.split(np.arange(len(trainval_list)), labels_trainval)):
         train_videos = [trainval_list[i] for i in train_idx]
@@ -242,7 +243,8 @@ if __name__ == "__main__":
         ddp=False,
         sampling_strategy='uniform',
         split_ratio=(0.7, 0.15, 0.15),
-        seed=42
+        seed=42,
+        n_splits=5
     )
     print(f"Test batches: {len(test_loader)}")
     for fold, (train_loader, val_loader) in enumerate(fold_loaders):
