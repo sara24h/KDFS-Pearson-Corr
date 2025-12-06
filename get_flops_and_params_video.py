@@ -1,5 +1,5 @@
 import torch
-from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal
+from model.student.ResNet_sparse_video import ResNet_50_sparse_uadfv
 # --- تغییر: ایمپورت مدل prune شده برای UADFV ---
 from model.pruned_model.ResNet_pruned import ResNet_50_pruned_uadfv, ResNet_50_pruned_hardfakevsreal
 from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
@@ -20,7 +20,7 @@ Flops_baselines = {
         "125k": 2100.0,
         # --- تغییر: به‌روزرسانی FLOPs پایه برای دیتاست ویدیویی UADFV (فرض ۱۶ فریم) ---
         # 5390.0 (FLOPs per frame) * 16 (frames) = 86240.0
-        "uadfv": 86240.0,
+        "uadfv": 86340.0,
     },
     "MobileNetV2": {
         "hardfakevsrealfaces": 570.0,
