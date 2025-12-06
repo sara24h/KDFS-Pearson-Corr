@@ -1,5 +1,3 @@
-# data/video_dataset.py
-
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
@@ -61,7 +59,7 @@ class UADFVDataset(Dataset):
             self.transform = transform
             
         self.video_list = self._load_videos()
-        # چاپ فقط در رنک 0 برای جلوگیری از شلوغی در DDP
+
         if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
             print(f"Total {len(self.video_list)} videos loaded.")
 
@@ -134,8 +132,10 @@ class UADFVDataset(Dataset):
             seed = self.seed + idx
         r_state = random.getstate()
         np_state = np.random.get_state()
-        random.seed(seed)
-        np.random.seed(seed)
+        
+        random.seed(int(seed))
+        np.random.seed(int(seed))
+        
         try:
             frames = self.load_video(path)
         except Exception as e:
