@@ -69,7 +69,7 @@ class TrainDDP:
         self.local_rank = -1
         self.rank = -1
         
-        self.device = None  # Initialize as None, set later
+        self.device = None  # Set after dist_init
         
         if self.dataset_mode == "uadfv":
             self.args.dataset_type = "uadfv"
@@ -211,8 +211,8 @@ class TrainDDP:
         self.rc_loss = loss.RCLoss().to(self.device)
         self.mask_loss = loss.MaskLoss().to(self.device)
     def define_optim(self):
-        weight_params = [p[1] for p in self.student.named_parameters() if p[1].requires_grad and "mask" not in p[0]]
-        mask_params = [p[1] for p in self.student.named_parameters() if p[1].requires_grad and "mask" in p[0]]
+        weight_params = [p[1] for p in self.student.module.named_parameters() if p[1].requires_grad and "mask" not in p[0]]
+        mask_params = [p[1] for p in self.student.module.named_parameters() if p[1].requires_grad and "mask" in p[0]]
         
         self.optim_weight = torch.optim.Adamax(weight_params,
                                              lr=self.lr,
@@ -238,7 +238,7 @@ class TrainDDP:
         ckpt_student = torch.load(self.resume, map_location=self.device, weights_only=True)
         self.best_prec1 = ckpt_student["best_prec1"]
         self.start_epoch = ckpt_student["start_epoch"]
-        self.student.load_state_dict(ckpt_student["student"])
+        self.student.module.load_state_dict(ckpt_student["student"])
         self.optim_weight.load_state_dict(ckpt_student["optim_weight"])
         self.optim_mask.load_state_dict(ckpt_student["optim_mask"])
         self.scheduler_student_weight.load_state_dict(ckpt_student["scheduler_student_weight"])
@@ -255,7 +255,7 @@ class TrainDDP:
             ckpt_student = {
                 "best_prec1": self.best_prec1,
                 "start_epoch": epoch,
-                "student": self.student.state_dict(),
+                "student": self.student.module.state_dict(),
                 "optim_weight": self.optim_weight.state_dict(),
                 "optim_mask": self.optim_mask.state_dict(),
                 "scheduler_student_weight": self.scheduler_student_weight.state_dict(),
@@ -276,7 +276,7 @@ class TrainDDP:
     def get_mask_averages(self):
         """Get average mask values for each layer"""
         mask_avgs = []
-        for m in self.student.mask_modules:
+        for m in self.student.module.mask_modules:
             if isinstance(m, SoftMaskedConv2d):
                 with torch.no_grad():
                     mask = torch.sigmoid(m.mask_weight)
@@ -285,7 +285,7 @@ class TrainDDP:
     def validate(self, epoch):
         """Validation function that runs on all GPUs"""
         self.student.eval()
-        self.student.ticket = True
+        self.student.module.ticket = True
         
         val_meter = meter.AverageMeter("Acc@1", ":6.2f")
         
@@ -314,7 +314,7 @@ class TrainDDP:
         # Get mask averages and FLOPs (only on rank 0)
         if self.rank == 0:
             mask_avgs = self.get_mask_averages()
-            val_flops = self.student.get_flops()
+            val_flops = self.student.module.get_flops()
             
             self.logger.info(f"[Val] Epoch {epoch} : Val_Acc {reduced_val_acc.item():.2f}")
             self.logger.info(f"[Val mask avg] Epoch {epoch} : {mask_avgs}")
@@ -347,7 +347,7 @@ class TrainDDP:
         for epoch in range(self.start_epoch + 1, self.num_epochs + 1):
             self.train_loader.sampler.set_epoch(epoch)
             self.student.train()
-            self.student.ticket = False
+            self.student.module.ticket = False
             
             if self.rank == 0:
                 meter_oriloss.reset()
@@ -358,8 +358,8 @@ class TrainDDP:
                 meter_top1.reset()
                 current_lr = self.optim_weight.param_groups[0]['lr']
             
-            self.student.update_gumbel_temperature(epoch)
-            current_gumbel_temp = self.student.gumbel_temperature
+            self.student.module.update_gumbel_temperature(epoch)
+            current_gumbel_temp = self.student.module.gumbel_temperature
             
             with tqdm(total=len(self.train_loader), ncols=100, disable=self.rank != 0) as _tqdm:
                 if self.rank == 0:
@@ -426,7 +426,7 @@ class TrainDDP:
                             rc_loss = rc_loss / num_layers
                         
                         # ============ Mask Loss ============
-                        mask_loss = self.mask_loss(self.student)
+                        mask_loss = self.mask_loss(self.student.module)
                         
                         # ============ Total Loss ============
                         total_loss = (
@@ -474,8 +474,8 @@ class TrainDDP:
             # ============ Log training results ============
             if self.rank == 0:
                 # Calculate train FLOPs
-                self.student.ticket = False
-                train_flops = self.student.get_flops()
+                self.student.module.ticket = False
+                train_flops = self.student.module.get_flops()
                 
                 self.logger.info(
                     f"[Train] Epoch {epoch} : Gumbel_temp {current_gumbel_temp:.2f} "
