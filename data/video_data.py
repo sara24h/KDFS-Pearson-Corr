@@ -38,15 +38,26 @@ class UADFVDataset(Dataset):
         self.split = split
         self.seed = seed
 
-        # Transform پیش‌فرض
+        # اگر transform داده نشده، بر اساس split تصمیم‌گیری می‌شود
         if transform is None:
-            self.transform = transforms.Compose([
-                transforms.ToPILImage(),
-                transforms.Resize((image_size, image_size)),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-            ])
+            if split == 'train':
+                self.transform = transforms.Compose([
+                    transforms.ToPILImage(),
+                    transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0), ratio=(0.9, 1.1)),
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                         std=[0.229, 0.224, 0.225])
+                ])
+            else:  # val / test
+                self.transform = transforms.Compose([
+                    transforms.ToPILImage(),
+                    transforms.Resize((image_size, image_size)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                         std=[0.229, 0.224, 0.225])
+                ])
         else:
             self.transform = transform
 
@@ -113,7 +124,11 @@ class UADFVDataset(Dataset):
             ret, frame = cap.read()
             if ret:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frame = self.transform(frame)
+                try:
+                    frame = self.transform(frame)
+                except Exception as e:
+                    print(f"Transform error on frame from {path}: {e}")
+                    frame = torch.zeros(3, self.image_size, self.image_size)
                 frames.append(frame)
             else:
                 # fallback
@@ -128,7 +143,6 @@ class UADFVDataset(Dataset):
 
     def __getitem__(self, idx):
         path, label = self.video_list[idx]
-
 
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None:
@@ -182,7 +196,6 @@ def create_uadfv_dataloaders(
         test_sampler  = DistributedSampler(test_ds, shuffle=False)
         shuffle = False
     else:
-
         train_sampler = val_sampler = test_sampler = None
         shuffle = True
 
@@ -215,6 +228,7 @@ def create_uadfv_dataloaders(
                              worker_init_fn=worker_init_fn)
 
     return train_loader, val_loader, test_loader
+
 
 if __name__ == "__main__":
     root_dir = "/kaggle/input/uadfv-dataset/UADFV"   
