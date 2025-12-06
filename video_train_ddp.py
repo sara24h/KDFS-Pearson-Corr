@@ -1,363 +1,659 @@
-import torch
-from torch.utils.data import Dataset, DataLoader
-from torch.utils.data.distributed import DistributedSampler
-import cv2
-import numpy as np
+import json
 import os
 import random
-from pathlib import Path
-from torchvision import transforms
-from sklearn.model_selection import StratifiedKFold
+import time
+from datetime import datetime
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
+from torch.cuda.amp import autocast, GradScaler
 
-def set_global_seed(seed: int = 42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    os.environ['PYTHONHASHSEED'] = str(seed)
+from data.video_data import create_kfold_dataloaders, set_global_seed
+from utils import utils, loss, meter, scheduler
+from thop import profile
+from model.student.ResNet_sparse import ResNet_50_sparse_uadfv, SoftMaskedConv2d
+from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
+from model.student.GoogleNet_sparse import GoogLeNet_sparse_deepfake
+from model.teacher.ResNet import ResNet_50_hardfakevsreal
+from model.teacher.Mobilenetv2 import MobileNetV2_deepfake
+from model.teacher.GoogleNet import GoogLeNet_deepfake
+from utils.loss import compute_filter_correlation
 
-set_global_seed(42)
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-def worker_init_fn(worker_id):
-    seed = 42 + worker_id
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
 
-class UADFVDataset(Dataset):
-    def __init__(self, root_dir, num_frames=16, image_size=256,
-                 transform=None, sampling_strategy='uniform',
-                 split='train', split_ratio=(0.7, 0.15, 0.15), seed=42, video_list=None):
-       
-        self.root_dir = Path(root_dir)
-        self.num_frames = num_frames
-        self.image_size = image_size
-        self.sampling_strategy = sampling_strategy
-        self.split = split
-        self.seed = seed
-        self.video_list = video_list if video_list is not None else self._load_and_split(split_ratio)
+class TrainDDP:
+    def __init__(self, args):
+        self.args = args
+        self.dataset_dir = args.dataset_dir
+        self.dataset_mode = args.dataset_mode
+        self.num_workers = args.num_workers
+        self.pin_memory = args.pin_memory
+        self.seed = args.seed
+        self.result_dir = args.result_dir
+        self.teacher_ckpt_path = args.teacher_ckpt_path
+        self.num_epochs = args.num_epochs
+        self.num_frames = getattr(args, 'num_frames', 16)
+        self.frame_sampling = getattr(args, 'frame_sampling', 'uniform')
         
-        # اگر transform داده نشده، بر اساس split تصمیم‌گیری می‌شود
-        if transform is None:
-            if split == 'train':
-                self.transform = transforms.Compose([
-                    transforms.ToPILImage(),
-                    transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0), ratio=(0.9, 1.1)),
-                    transforms.RandomHorizontalFlip(p=0.5),
-                    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-                    transforms.ToTensor(),
-                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                         std=[0.229, 0.224, 0.225])
-                ])
-            else:  # val / test / full
-                self.transform = transforms.Compose([
-                    transforms.ToPILImage(),
-                    transforms.Resize((image_size, image_size)),
-                    transforms.ToTensor(),
-                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                         std=[0.229, 0.224, 0.225])
-                ])
+        # پارامترهای K-Fold
+        self.n_splits = getattr(args, 'n_splits', 5)
+        self.split_ratio = getattr(args, 'split_ratio', (0.7, 0.15, 0.15))
+        
+        self.lr = args.lr
+        self.warmup_steps = args.warmup_steps
+        self.warmup_start_lr = args.warmup_start_lr
+        self.lr_decay_T_max = args.lr_decay_T_max
+        self.lr_decay_eta_min = args.lr_decay_eta_min
+        self.weight_decay = args.weight_decay
+        self.train_batch_size = args.train_batch_size
+        self.eval_batch_size = args.eval_batch_size
+        self.target_temperature = args.target_temperature
+        self.gumbel_start_temperature = args.gumbel_start_temperature
+        self.gumbel_end_temperature = args.gumbel_end_temperature
+        self.coef_kdloss = args.coef_kdloss
+        self.coef_rcloss = args.coef_rcloss
+        self.coef_maskloss = args.coef_maskloss
+        self.resume = args.resume
+        self.start_epoch = 0
+        self.best_prec1 = 0
+        self.world_size = 0
+        self.local_rank = -1
+        self.rank = -1
+        self.fold_results = []
+        
+        if self.dataset_mode == "uadfv":
+            self.args.dataset_type = "uadfv"
+            self.num_classes = 1
+            self.image_size = 256
         else:
-            self.transform = transform
+            raise ValueError("dataset_mode must be 'uadfv' for this script")
         
-        print(f"[{split.upper() if split else 'CUSTOM'}] {len(self.video_list)} videos loaded.")
+        self.arch = args.arch.lower().replace('_', '')
+        if self.arch not in ['resnet50', 'mobilenetv2', 'googlenet']:
+            raise ValueError(f"Unsupported architecture: '{args.arch}'. "
+                             "It must be 'resnet50', 'mobilenetv2', or 'googlenet'.")
 
-    def _load_and_split(self, split_ratio):
-        video_list = []
-        # Fake → label 0
-        for p in sorted((self.root_dir / 'fake').glob('*.mp4')):
-            if not p.name.startswith('.'):
-                video_list.append((str(p), 0))
-        # Real → label 1
-        for p in sorted((self.root_dir / 'real').glob('*.mp4')):
-            if not p.name.startswith('.'):
-                video_list.append((str(p), 1))
+    def dist_init(self):
+        """Initialize distributed training"""
+        dist.init_process_group("nccl")
+        self.world_size = dist.get_world_size()
+        self.rank = dist.get_rank()
+        self.local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(self.local_rank)
         
-        # Shuffle ثابت
-        rng = random.Random(self.seed)
-        rng.shuffle(video_list)
+        if self.rank == 0:
+            print(f"Distributed training initialized: world_size={self.world_size}")
+
+    def result_init(self):
+        """Initialize result directories and loggers"""
+        if self.rank == 0:
+            if not os.path.exists(self.result_dir):
+                os.makedirs(self.result_dir)
+            
+            self.writer = SummaryWriter(self.result_dir)
+            self.logger = utils.get_logger(
+                os.path.join(self.result_dir, "train_logger.log"), "train_logger"
+            )
+            
+            self.logger.info("="*70)
+            self.logger.info("Training Configuration:")
+            self.logger.info("="*70)
+            self.logger.info(str(json.dumps(vars(self.args), indent=4)))
+            
+            utils.record_config(
+                self.args, os.path.join(self.result_dir, "train_config.txt")
+            )
+            
+            self.logger.info("="*70)
+            self.logger.info("Starting K-Fold Cross-Validation Training")
+            self.logger.info("="*70)
+
+    def setup_seed(self):
+        """Setup random seed for reproducibility"""
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        torch.use_deterministic_algorithms(True)
+        self.seed = self.seed + self.rank
+        set_global_seed(self.seed)
         
-        total = len(video_list)
-        if self.split == 'full':
-            return video_list
+        if self.rank == 0:
+            print(f"Random seed set to: {self.seed}")
+
+    def dataload(self):
+        """Load dataset with K-Fold splits"""
+        if self.rank == 0:
+            self.logger.info(f"Loading UADFV dataset from: {self.dataset_dir}")
+            self.logger.info(f"Number of frames per video: {self.num_frames}")
+            self.logger.info(f"Frame sampling strategy: {self.frame_sampling}")
+            self.logger.info(f"Number of K-Fold splits: {self.n_splits}")
+            self.logger.info(f"Split ratio (train/val/test): {self.split_ratio}")
         
-        train_end = int(total * split_ratio[0])
-        val_end = train_end + int(total * split_ratio[1])
+        self.fold_loaders, self.test_loader = create_kfold_dataloaders(
+            root_dir=self.dataset_dir,
+            n_splits=self.n_splits,
+            num_frames=self.num_frames,
+            image_size=self.image_size,
+            train_batch_size=self.train_batch_size,
+            eval_batch_size=self.eval_batch_size,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
+            ddp=True,
+            seed=self.seed,
+            sampling_strategy=self.frame_sampling,
+            split_ratio=self.split_ratio
+        )
         
-        if self.split == 'train':
-            return video_list[:train_end]
-        elif self.split == 'val':
-            return video_list[train_end:val_end]
-        elif self.split == 'test':
-            return video_list[val_end:]
+        if self.rank == 0:
+            self.logger.info("="*70)
+            self.logger.info("Dataset loading completed successfully!")
+            self.logger.info(f"Number of folds: {len(self.fold_loaders)}")
+            self.logger.info(f"Test loader batches: {len(self.test_loader)}")
+            self.logger.info("="*70)
+
+    def build_model(self):
+        """Build teacher and student models"""
+        if self.rank == 0:
+            self.logger.info("Building models...")
+            self.logger.info(f"Architecture: {self.arch}")
+        
+        # Build teacher model
+        if self.arch == 'resnet50':
+            teacher_model = ResNet_50_hardfakevsreal()
+        elif self.arch == 'mobilenetv2':
+            teacher_model = MobileNetV2_deepfake()
+        elif self.arch == 'googlenet':
+            teacher_model = GoogLeNet_deepfake()
         else:
-            raise ValueError("split must be train/val/test/full")
-
-    def sample_frames(self, total_frames: int):
-        if total_frames <= self.num_frames:
-            idxs = np.random.choice(total_frames, self.num_frames, replace=True)
-            return sorted(idxs.tolist())
+            raise ValueError(f"Unsupported architecture: {self.arch}")
         
-        if self.sampling_strategy == 'uniform':
-            return np.linspace(0, total_frames-1, self.num_frames, dtype=int).tolist()
-        elif self.sampling_strategy == 'random':
-            idxs = np.random.choice(total_frames, self.num_frames, replace=False)
-            return sorted(idxs.tolist())
-        elif self.sampling_strategy == 'first':
-            return list(range(self.num_frames))
+        # Load teacher checkpoint
+        if self.rank == 0:
+            self.logger.info(f"Loading teacher checkpoint from: {self.teacher_ckpt_path}")
+        
+        ckpt_teacher = torch.load(self.teacher_ckpt_path, map_location="cpu")
+        state_dict = ckpt_teacher.get('config_state_dict',
+                                      ckpt_teacher.get('student', ckpt_teacher))
+        
+        # Remove 'module.' prefix if exists
+        if list(state_dict.keys())[0].startswith('module.'):
+            from collections import OrderedDict
+            new_state_dict = OrderedDict()
+            for k, v in state_dict.items():
+                name = k.replace('module.', '', 1)
+                new_state_dict[name] = v
+            state_dict = new_state_dict
+        
+        teacher_model.load_state_dict(state_dict, strict=True)
+        self.teacher = teacher_model.cuda()
+        
+        if self.rank == 0:
+            self.logger.info("Teacher model loaded successfully")
+        
+        # Build student model
+        if self.arch == 'resnet50':
+            StudentModelClass = ResNet_50_sparse_uadfv
+        elif self.arch == 'mobilenetv2':
+            StudentModelClass = MobileNetV2_sparse_deepfake
+        elif self.arch == 'googlenet':
+            StudentModelClass = GoogLeNet_sparse_deepfake
         else:
-            raise ValueError("sampling_strategy: uniform / random / first")
+            raise ValueError(f"Unsupported architecture for student: {self.arch}")
+        
+        self.student = StudentModelClass(
+            gumbel_start_temperature=self.gumbel_start_temperature,
+            gumbel_end_temperature=self.gumbel_end_temperature,
+            num_epochs=self.num_epochs,
+        )
+        self.student.dataset_type = self.args.dataset_type
+        
+        # Adjust final layer for binary classification
+        if self.arch == 'mobilenetv2':
+            num_ftrs = self.student.classifier.in_features
+            self.student.classifier = nn.Linear(num_ftrs, 1)
+        elif self.arch == 'googlenet':
+            num_ftrs = self.student.fc.in_features
+            self.student.fc = nn.Linear(num_ftrs, 1)
+        else:  # resnet50
+            num_ftrs = self.student.fc.in_features
+            self.student.fc = nn.Linear(num_ftrs, 1)
+        
+        self.student = self.student.cuda()
+        self.student = DDP(self.student, device_ids=[self.local_rank])
+        
+        if self.rank == 0:
+            self.logger.info("Student model built and wrapped with DDP")
+            self.logger.info("="*70)
 
-    def load_video(self, path: str):
-        cap = cv2.VideoCapture(path)
-        if not cap.isOpened():
-            raise IOError(f"Cannot open {path}")
+    def define_loss(self):
+        """Define loss functions"""
+        self.ori_loss = nn.BCEWithLogitsLoss().cuda()
+        self.kd_loss = loss.KDLoss().cuda()
+        self.rc_loss = loss.RCLoss().cuda()
+        self.mask_loss = loss.MaskLoss().cuda()
         
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        indices = self.sample_frames(total)
+        if self.rank == 0:
+            self.logger.info("Loss functions initialized")
+
+    def define_optim(self):
+        """Define optimizers and schedulers"""
+        weight_params = map(
+            lambda p: p[1],
+            filter(lambda p: p[1].requires_grad and "mask" not in p[0],
+                   self.student.module.named_parameters())
+        )
+        mask_params = map(
+            lambda p: p[1],
+            filter(lambda p: p[1].requires_grad and "mask" in p[0],
+                   self.student.module.named_parameters())
+        )
         
-        frames = []
-        for i in indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-            ret, frame = cap.read()
-            if ret:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                try:
-                    frame = self.transform(frame)
-                except Exception as e:
-                    print(f"Transform error on frame from {path}: {e}")
-                    frame = torch.zeros(3, self.image_size, self.image_size)
-                frames.append(frame)
+        self.optim_weight = torch.optim.Adamax(
+            weight_params,
+            lr=self.lr,
+            weight_decay=self.weight_decay,
+            eps=1e-7
+        )
+        self.optim_mask = torch.optim.Adamax(mask_params, lr=self.lr, eps=1e-7)
+        
+        self.scheduler_student_weight = scheduler.CosineAnnealingLRWarmup(
+            self.optim_weight,
+            T_max=self.lr_decay_T_max,
+            eta_min=self.lr_decay_eta_min,
+            last_epoch=-1,
+            warmup_steps=self.warmup_steps,
+            warmup_start_lr=self.warmup_start_lr
+        )
+        self.scheduler_student_mask = scheduler.CosineAnnealingLRWarmup(
+            self.optim_mask,
+            T_max=self.lr_decay_T_max,
+            eta_min=self.lr_decay_eta_min,
+            last_epoch=-1,
+            warmup_steps=self.warmup_steps,
+            warmup_start_lr=self.warmup_start_lr
+        )
+        
+        if self.rank == 0:
+            self.logger.info("Optimizers and schedulers initialized")
+
+    def resume_student_ckpt(self):
+        """Resume training from checkpoint"""
+        if not os.path.exists(self.resume):
+            raise FileNotFoundError(f"Checkpoint file not found: {self.resume}")
+        
+        if self.rank == 0:
+            self.logger.info(f"Resuming from checkpoint: {self.resume}")
+        
+        ckpt_student = torch.load(self.resume, map_location="cpu", weights_only=True)
+        self.best_prec1 = ckpt_student["best_prec1"]
+        self.start_epoch = ckpt_student["start_epoch"]
+        self.student.module.load_state_dict(ckpt_student["student"])
+        self.optim_weight.load_state_dict(ckpt_student["optim_weight"])
+        self.optim_mask.load_state_dict(ckpt_student["optim_mask"])
+        self.scheduler_student_weight.load_state_dict(ckpt_student["scheduler_student_weight"])
+        self.scheduler_student_mask.load_state_dict(ckpt_student["scheduler_student_mask"])
+        
+        if self.rank == 0:
+            self.logger.info(f"Continuing from epoch {self.start_epoch + 1}")
+            self.logger.info(f"Best previous accuracy: {self.best_prec1:.2f}%")
+
+    def save_student_ckpt(self, is_best, epoch, fold_idx):
+        """Save model checkpoint"""
+        if self.rank == 0:
+            folder = os.path.join(self.result_dir, f"student_model_fold_{fold_idx}")
+            if not os.path.exists(folder):
+                os.makedirs(folder)
+            
+            ckpt_student = {
+                "best_prec1": self.best_prec1,
+                "start_epoch": epoch,
+                "student": self.student.module.state_dict(),
+                "optim_weight": self.optim_weight.state_dict(),
+                "optim_mask": self.optim_mask.state_dict(),
+                "scheduler_student_weight": self.scheduler_student_weight.state_dict(),
+                "scheduler_student_mask": self.scheduler_student_mask.state_dict(),
+            }
+            
+            if is_best:
+                best_path = os.path.join(folder, self.arch + "_sparse_best.pt")
+                torch.save(ckpt_student, best_path)
+                self.logger.info(f"Best model saved: {best_path}")
+            
+            last_path = os.path.join(folder, self.arch + "_sparse_last.pt")
+            torch.save(ckpt_student, last_path)
+
+    def reduce_tensor(self, tensor):
+        """Reduce tensor across all GPUs"""
+        rt = tensor.clone()
+        dist.all_reduce(rt, op=dist.ReduceOp.SUM)
+        rt /= self.world_size
+        return rt
+
+    def get_mask_averages(self):
+        """Get average mask values for each layer"""
+        mask_avgs = []
+        for m in self.student.module.mask_modules:
+            if isinstance(m, SoftMaskedConv2d):
+                with torch.no_grad():
+                    mask = torch.sigmoid(m.mask_weight)
+                    mask_avgs.append(round(mask.mean().item(), 3))
+        return mask_avgs
+
+    def train(self, fold_idx):
+        """Train one fold"""
+        if self.rank == 0:
+            self.logger.info(f"\n{'='*70}")
+            self.logger.info(f"Training Fold {fold_idx + 1}/{self.n_splits}")
+            self.logger.info(f"Starting from epoch: {self.start_epoch + 1}")
+            self.logger.info(f"{'='*70}\n")
+        
+        torch.cuda.empty_cache()
+        self.teacher.eval()
+        scaler = GradScaler()
+        
+        is_video_dataset = self.dataset_mode in ["uadfv"]
+        
+        # Initialize meters
+        if self.rank == 0:
+            meter_oriloss = meter.AverageMeter("OriLoss", ":.4e")
+            meter_kdloss = meter.AverageMeter("KDLoss", ":.4e")
+            meter_rcloss = meter.AverageMeter("RCLoss", ":.4e")
+            meter_maskloss = meter.AverageMeter("MaskLoss", ":.6e")
+            meter_loss = meter.AverageMeter("Loss", ":.4e")
+            meter_top1 = meter.AverageMeter("Acc@1", ":6.2f")
+            meter_avg_corr = meter.AverageMeter("L_corr", ":.6f")
+            meter_retention = meter.AverageMeter("Retention", ":.4f")
+
+        for epoch in range(self.start_epoch + 1, self.num_epochs + 1):
+            self.train_loader.sampler.set_epoch(epoch)
+            self.student.train()
+            self.student.module.ticket = False
+            
+            if self.rank == 0:
+                meter_oriloss.reset()
+                meter_kdloss.reset()
+                meter_rcloss.reset()
+                meter_maskloss.reset()
+                meter_loss.reset()
+                meter_top1.reset()
+                meter_avg_corr.reset()
+                meter_retention.reset()
+                current_lr = self.optim_weight.param_groups[0]['lr']
+            
+            self.student.module.update_gumbel_temperature(epoch)
+            current_gumbel_temp = self.student.module.gumbel_temperature
+            
+            with tqdm(total=len(self.train_loader), ncols=120, disable=self.rank != 0) as _tqdm:
+                if self.rank == 0:
+                    _tqdm.set_description(f"Fold {fold_idx+1}/{self.n_splits} | Epoch {epoch}/{self.num_epochs}")
+                
+                for batch_data in self.train_loader:
+                    self.optim_weight.zero_grad()
+                    self.optim_mask.zero_grad()
+                    
+                    if is_video_dataset:
+                        videos, targets = batch_data
+                        videos = videos.cuda(non_blocking=True)
+                        targets = targets.cuda(non_blocking=True).float()
+                        
+                        batch_size, num_frames, C, H, W = videos.shape
+                        images = videos.view(-1, C, H, W)
+                        
+                        # Check for NaN/Inf
+                        if torch.isnan(images).any() or torch.isinf(images).any() or \
+                           torch.isnan(targets).any() or torch.isinf(targets).any():
+                            if self.rank == 0:
+                                self.logger.warning("Invalid input detected (NaN or Inf), skipping batch")
+                            continue
+                        
+                        with autocast():
+                            # Student forward
+                            logits_student, feature_list_student = self.student(images)
+                            logits_student = logits_student.squeeze(1)
+                            logits_student = logits_student.view(batch_size, num_frames).mean(dim=1)
+                            
+                            # Teacher forward
+                            with torch.no_grad():
+                                logits_teacher, feature_list_teacher = self.teacher(images)
+                                logits_teacher = logits_teacher.squeeze(1)
+                                logits_teacher = logits_teacher.view(batch_size, num_frames).mean(dim=1)
+                            
+                            # Compute losses
+                            ori_loss = self.ori_loss(logits_student, targets)
+                            kd_loss = (self.target_temperature ** 2) * self.kd_loss(
+                                logits_teacher, logits_student, self.target_temperature
+                            )
+                            
+                            rc_loss = torch.tensor(0.0, device=images.device, dtype=torch.float32)
+                            if len(feature_list_student) > 0:
+                                for i in range(len(feature_list_student)):
+                                    layer_rc_loss = self.rc_loss(
+                                        feature_list_student[i],
+                                        feature_list_teacher[i]
+                                    )
+                                    rc_loss = rc_loss + layer_rc_loss
+                                rc_loss = rc_loss / len(feature_list_student)
+                            else:
+                                if self.rank == 0 and epoch == self.start_epoch + 1:
+                                    self.logger.warning("Feature list is empty!")
+                            
+                            mask_loss = self.mask_loss(self.student.module)
+                            
+                            total_loss = (
+                                ori_loss +
+                                self.coef_kdloss * kd_loss +
+                                self.coef_rcloss * rc_loss +
+                                self.coef_maskloss * mask_loss
+                            )
+                            
+                            # Compute correlation & retention
+                            total_corr, total_ret = 0.0, 0.0
+                            n_layers = 0
+                            for m in self.student.module.mask_modules:
+                                if isinstance(m, SoftMaskedConv2d):
+                                    corr, ret = compute_filter_correlation(
+                                        m.weight, m.mask_weight,
+                                        self.student.module.gumbel_temperature
+                                    )
+                                    total_corr += corr.item()
+                                    total_ret += float(ret)
+                                    n_layers += 1
+                            avg_corr = total_corr / n_layers if n_layers > 0 else 0.0
+                            avg_ret = total_ret / n_layers if n_layers > 0 else 0.0
+                        
+                        # Backward
+                        scaler.scale(total_loss).backward()
+                        scaler.step(self.optim_weight)
+                        scaler.step(self.optim_mask)
+                        scaler.update()
+                        
+                        # Compute accuracy
+                        preds = (torch.sigmoid(logits_student) > 0.5).float()
+                        correct = (preds == targets).sum().item()
+                        prec1 = 100.0 * correct / batch_size
+                    
+                    # Reduce metrics across GPUs
+                    dist.barrier()
+                    reduced_ori_loss = self.reduce_tensor(ori_loss.detach())
+                    reduced_kd_loss = self.reduce_tensor(kd_loss.detach())
+                    reduced_rc_loss = self.reduce_tensor(rc_loss.detach())
+                    reduced_mask_loss = self.reduce_tensor(mask_loss.detach())
+                    reduced_total_loss = self.reduce_tensor(total_loss.detach())
+                    reduced_prec1 = self.reduce_tensor(torch.tensor(prec1, device='cuda'))
+                    reduced_avg_corr = self.reduce_tensor(torch.tensor(avg_corr, device='cuda'))
+                    reduced_avg_ret = self.reduce_tensor(torch.tensor(avg_ret, device='cuda'))
+                    
+                    if self.rank == 0:
+                        n = batch_size
+                        meter_oriloss.update(reduced_ori_loss.item(), n)
+                        meter_kdloss.update(self.coef_kdloss * reduced_kd_loss.item(), n)
+                        meter_rcloss.update(self.coef_rcloss * reduced_rc_loss.item(), n)
+                        meter_maskloss.update(self.coef_maskloss * reduced_mask_loss.item(), n)
+                        meter_loss.update(reduced_total_loss.item(), n)
+                        meter_top1.update(reduced_prec1.item(), n)
+                        meter_avg_corr.update(reduced_avg_corr.item(), n)
+                        meter_retention.update(reduced_avg_ret.item(), n)
+                        
+                        _tqdm.set_postfix(
+                            loss=f"{meter_loss.avg:.4f}",
+                            acc=f"{meter_top1.avg:.2f}%"
+                        )
+                        _tqdm.update(1)
+            
+            # Training epoch summary
+            if self.rank == 0:
+                self.student.module.ticket = False
+                train_flops = self.student.module.get_flops()
+                
+                self.logger.info(
+                    f"[Train][Fold {fold_idx+1}] Epoch {epoch}: "
+                    f"Gumbel_temp={current_gumbel_temp:.2f} LR={current_lr:.6f} "
+                    f"OriLoss={meter_oriloss.avg:.4f} KDLoss={meter_kdloss.avg:.4f} "
+                    f"RCLoss={meter_rcloss.avg:.6f} MaskLoss={meter_maskloss.avg:.6f} "
+                    f"TotalLoss={meter_loss.avg:.4f} Acc={meter_top1.avg:.2f}%"
+                )
+                self.logger.info(
+                    f"[Train FLOPs][Fold {fold_idx+1}] Epoch {epoch}: {train_flops/1e6:.2f}M"
+                )
+            
+            # Validation
+            if self.rank == 0:
+                self.student.eval()
+                self.student.module.ticket = True
+                val_meter = meter.AverageMeter("Acc@1", ":6.2f")
+                
+                with torch.no_grad():
+                    for val_videos, val_targets in self.val_loader:
+                        val_videos = val_videos.cuda(non_blocking=True)
+                        val_targets = val_targets.cuda(non_blocking=True).float()
+                        
+                        val_batch_size, val_num_frames, C, H, W = val_videos.shape
+                        val_frames = val_videos.view(-1, C, H, W)
+                        
+                        val_logits, _ = self.student(val_frames)
+                        val_logits = val_logits.squeeze(1)
+                        val_logits = val_logits.view(val_batch_size, val_num_frames).mean(dim=1)
+                        
+                        val_preds = (torch.sigmoid(val_logits) > 0.5).float()
+                        correct = (val_preds == val_targets).sum().item()
+                        acc1 = 100.0 * correct / val_batch_size
+                        val_meter.update(acc1, val_batch_size)
+                
+                mask_avgs = self.get_mask_averages()
+                val_flops = self.student.module.get_flops()
+                
+                self.logger.info(
+                    f"[Val][Fold {fold_idx+1}] Epoch {epoch}: Val_Acc={val_meter.avg:.2f}%"
+                )
+                self.logger.info(
+                    f"[Val Masks][Fold {fold_idx+1}] Epoch {epoch}: {mask_avgs}"
+                )
+                self.logger.info(
+                    f"[Val FLOPs][Fold {fold_idx+1}] Epoch {epoch}: {val_flops/1e6:.2f}M"
+                )
+                
+                # Step schedulers
+                self.scheduler_student_weight.step()
+                self.scheduler_student_mask.step()
+                
+                # TensorBoard logging
+                self.writer.add_scalar(f"train/fold_{fold_idx+1}/lr", current_lr, epoch)
+                self.writer.add_scalar(f"train/fold_{fold_idx+1}/gumbel_temp", current_gumbel_temp, epoch)
+                self.writer.add_scalar(f"train/fold_{fold_idx+1}/acc", meter_top1.avg, epoch)
+                self.writer.add_scalar(f"train/fold_{fold_idx+1}/loss", meter_loss.avg, epoch)
+                self.writer.add_scalar(f"train/fold_{fold_idx+1}/flops", train_flops, epoch)
+                self.writer.add_scalar(f"val/fold_{fold_idx+1}/acc", val_meter.avg, epoch)
+                self.writer.add_scalar(f"val/fold_{fold_idx+1}/flops", val_flops, epoch)
+                
+                # Save checkpoint
+                if val_meter.avg > self.best_prec1:
+                    self.best_prec1 = val_meter.avg
+                    self.logger.info(
+                        f"=> New best validation accuracy for Fold {fold_idx+1}: {self.best_prec1:.2f}%"
+                    )
+                    self.save_student_ckpt(is_best=True, epoch=epoch, fold_idx=fold_idx)
+                else:
+                    self.save_student_ckpt(is_best=False, epoch=epoch, fold_idx=fold_idx)
+        
+        # Save fold result
+        if self.rank == 0:
+            self.fold_results.append(self.best_prec1)
+            self.logger.info(f"\nFold {fold_idx + 1} finished! Best accuracy: {self.best_prec1:.2f}%\n")
+
+    def main(self):
+        """Main training loop for K-Fold Cross-Validation"""
+        # Initialize
+        self.dist_init()
+        self.result_init()
+        self.setup_seed()
+        self.dataload()
+        self.build_model()
+        self.define_loss()
+        self.define_optim()
+        
+        # Store original resume path
+        original_resume = self.resume
+        
+        # Train each fold
+        for fold_idx, train_loader, val_loader in self.fold_loaders:
+            if self.rank == 0:
+                self.logger.info(f"\n{'='*70}")
+                self.logger.info(f"Preparing Fold {fold_idx + 1}/{self.n_splits}")
+                self.logger.info(f"{'='*70}")
+            
+            # Set loaders for this fold
+            self.train_loader = train_loader
+            self.val_loader = val_loader
+            
+            # Reset for new fold
+            self.best_prec1 = 0
+            self.start_epoch = 0
+            
+            # Only resume from checkpoint for first fold
+            if original_resume and fold_idx == 0:
+                self.resume = original_resume
+                self.resume_student_ckpt()
             else:
-                # fallback
-                fallback = frames[-1].clone() if frames else torch.zeros(3, self.image_size, self.image_size)
-                frames.append(fallback)
+                self.resume = None
+            
+            # Train this fold
+            self.train(fold_idx)
         
-        cap.release()
-        return torch.stack(frames)  # [T, C, H, W]
-
-    def __len__(self):
-        return len(self.video_list)
-
-    def __getitem__(self, idx):
-        path, label = self.video_list[idx]
-        
-        worker_info = torch.utils.data.get_worker_info()
-        if worker_info is not None:
-            seed = self.seed + worker_info.id * 100000 + idx
-        else:
-            seed = self.seed + idx
-        
-        r_state = random.getstate()
-        np_state = np.random.get_state()
-        random.seed(seed)
-        np.random.seed(seed)
-        
-        try:
-            frames = self.load_video(path)
-        except Exception as e:
-            print(f"Error loading {path}: {e}")
-            frames = torch.zeros(self.num_frames, 3, self.image_size, self.image_size)
-        finally:
-            random.setstate(r_state)
-            np.random.set_state(np_state)
-        
-        return frames, torch.tensor(label, dtype=torch.float32)
-
-
-def create_kfold_dataloaders(
-    root_dir,
-    num_frames=16,
-    image_size=256,
-    train_batch_size=8,
-    eval_batch_size=16,
-    val_batch_size=None,  # برای سازگاری با کد قدیمی
-    num_workers=4,
-    pin_memory=True,
-    ddp=False,
-    sampling_strategy='uniform',
-    split_ratio=(0.7, 0.15, 0.15),
-    seed=42,
-    n_splits=5
-):
-    """
-    ایجاد K-Fold Cross Validation dataloaders + test set
-    
-    Returns:
-        tuple: (fold_loaders, test_loader)
-            - fold_loaders: لیست از (fold_idx, train_loader, val_loader)
-            - test_loader: test dataloader مشترک
-    """
-    # Handle val_batch_size parameter
-    if val_batch_size is not None and val_batch_size != eval_batch_size:
-        print(f"Warning: val_batch_size ({val_batch_size}) provided but using eval_batch_size ({eval_batch_size})")
-    
-    # بارگذاری کامل dataset
-    temp_ds = UADFVDataset(
-        root_dir, num_frames, image_size,
-        transform=None, sampling_strategy=sampling_strategy,
-        split='full', split_ratio=split_ratio, seed=seed
-    )
-    
-    video_list = temp_ds.video_list
-    total = len(video_list)
-    
-    # تقسیم به train+val و test
-    train_end = int(total * split_ratio[0])
-    val_end = train_end + int(total * split_ratio[1])
-    
-    trainval_list = video_list[:val_end]
-    test_list = video_list[val_end:]
-    
-    # استخراج labels برای StratifiedKFold
-    labels_trainval = np.array([label for _, label in trainval_list])
-    
-    # ایجاد K-Fold splits
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-    
-    fold_loaders = []
-    
-    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(np.arange(len(trainval_list)), labels_trainval)):
-        print(f"\n{'='*60}")
-        print(f"Preparing Fold {fold_idx + 1}/{n_splits}")
-        print(f"{'='*60}")
-        
-        # ساخت video lists برای این fold
-        train_videos = [trainval_list[i] for i in train_idx]
-        val_videos = [trainval_list[i] for i in val_idx]
-        
-        print(f"Train videos: {len(train_videos)}, Val videos: {len(val_videos)}")
-        
-        # ایجاد datasets
-        train_ds = UADFVDataset(
-            root_dir, num_frames, image_size,
-            transform=None, sampling_strategy=sampling_strategy,
-            split='train', split_ratio=split_ratio, seed=seed,
-            video_list=train_videos
-        )
-        
-        val_ds = UADFVDataset(
-            root_dir, num_frames, image_size,
-            transform=None, sampling_strategy=sampling_strategy,
-            split='val', split_ratio=split_ratio, seed=seed,
-            video_list=val_videos
-        )
-        
-        # ایجاد samplers
-        if ddp:
-            train_sampler = DistributedSampler(train_ds, shuffle=True, seed=seed)
-            val_sampler = DistributedSampler(val_ds, shuffle=False, seed=seed)
-            shuffle = False
-        else:
-            train_sampler = None
-            val_sampler = None
-            shuffle = True
-        
-        g = torch.Generator().manual_seed(seed + fold_idx)
-        
-        # ایجاد dataloaders
-        train_loader = DataLoader(
-            train_ds,
-            batch_size=train_batch_size,
-            shuffle=shuffle,
-            sampler=train_sampler,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            drop_last=True,
-            worker_init_fn=worker_init_fn,
-            generator=g
-        )
-        
-        val_loader = DataLoader(
-            val_ds,
-            batch_size=eval_batch_size,
-            shuffle=False,
-            sampler=val_sampler,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            worker_init_fn=worker_init_fn
-        )
-        
-        fold_loaders.append((fold_idx, train_loader, val_loader))
-        print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
-    
-    # ایجاد test loader
-    print(f"\n{'='*60}")
-    print("Preparing Test Set")
-    print(f"{'='*60}")
-    
-    test_ds = UADFVDataset(
-        root_dir, num_frames, image_size,
-        transform=None, sampling_strategy=sampling_strategy,
-        split='test', split_ratio=split_ratio, seed=seed,
-        video_list=test_list
-    )
-    
-    if ddp:
-        test_sampler = DistributedSampler(test_ds, shuffle=False, seed=seed)
-    else:
-        test_sampler = None
-    
-    test_loader = DataLoader(
-        test_ds,
-        batch_size=eval_batch_size,
-        shuffle=False,
-        sampler=test_sampler,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        worker_init_fn=worker_init_fn
-    )
-    
-    print(f"Test videos: {len(test_list)}, Test batches: {len(test_loader)}")
-    print(f"{'='*60}\n")
-    
-    return fold_loaders, test_loader
-
-
-if __name__ == "__main__":
-    root_dir = "/kaggle/input/uadfv-dataset/UADFV"
-    
-    fold_loaders, test_loader = create_kfold_dataloaders(
-        root_dir=root_dir,
-        num_frames=16,
-        image_size=256,
-        train_batch_size=4,
-        eval_batch_size=8,
-        num_workers=4,
-        pin_memory=True,
-        ddp=False,
-        sampling_strategy='uniform',
-        split_ratio=(0.7, 0.15, 0.15),
-        seed=42,
-        n_splits=5
-    )
-    
-    print(f"\n{'='*60}")
-    print("Testing Data Loaders")
-    print(f"{'='*60}\n")
-    
-    # تست هر fold
-    for fold_idx, train_loader, val_loader in fold_loaders:
-        print(f"\nTesting Fold {fold_idx + 1}:")
-        print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
-        
-        # تست یک batch از train
-        for videos, labels in train_loader:
-            print(f"  Train batch shape: {videos.shape}")  # [B, T, C, H, W]
-            print(f"  Train labels: {labels.tolist()}")
-            break
-        
-        # تست یک batch از val
-        for videos, labels in val_loader:
-            print(f"  Val batch shape: {videos.shape}")
-            print(f"  Val labels: {labels.tolist()}")
-            break
-    
-    # تست test loader
-    print(f"\nTest batches: {len(test_loader)}")
-    for videos, labels in test_loader:
-        print(f"Test batch shape: {videos.shape}")
-        print(f"Test labels: {labels.tolist()}")
-        break
+        # Final results summary
+        if self.rank == 0:
+            self.logger.info("\n" + "="*70)
+            self.logger.info("K-Fold Cross-Validation Results Summary")
+            self.logger.info("="*70)
+            
+            for i, acc in enumerate(self.fold_results):
+                self.logger.info(f"Fold {i+1}: Best Accuracy = {acc:.2f}%")
+            
+            avg_acc = np.mean(self.fold_results)
+            std_acc = np.std(self.fold_results)
+            
+            self.logger.info(f"\nAverage Accuracy: {avg_acc:.2f}% ± {std_acc:.2f}%")
+            self.logger.info("="*70 + "\n")
+            
+            # Save results to file
+            results_file = os.path.join(self.result_dir, "kfold_results.txt")
+            with open(results_file, 'w') as f:
+                f.write("K-Fold Cross-Validation Results\n")
+                f.write("="*50 + "\n\n")
+                f.write(f"Architecture: {self.arch}\n")
+                f.write(f"Number of folds: {self.n_splits}\n")
+                f.write(f"Number of epochs per fold: {self.num_epochs}\n\n")
+                f.write("Results per fold:\n")
+                f.write("-"*50 + "\n")
+                for i, acc in enumerate(self.fold_results):
+                    f.write(f"Fold {i+1}: {acc:.2f}%\n")
+                f.write("\n" + "-"*50 + "\n")
+                f.write(f"Average Accuracy: {avg_acc:.2f}%\n")
+                f.write(f"Standard Deviation: {std_acc:.2f}%\n")
+            
+            self.logger.info(f"Results saved to: {results_file}")
+            self.logger.info("\nTraining completed successfully!")
+            
+            self.writer.close()
