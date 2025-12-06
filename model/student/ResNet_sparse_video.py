@@ -41,32 +41,30 @@ class MaskedNet(nn.Module):
             m.update_gumbel_temperature(self.gumbel_temperature)
 
     def get_flops(self):
-        """
-        این تابع FLOPs را برای یک کلیپ ویدیویی محاسبه می‌کند.
-        این کار را با محاسبه FLOPs برای یک فریم و ضرب آن در تعداد کل فریم‌ها انجام می‌دهد.
-        """
-        # تعیین اندازه ورودی بر اساس نوع دیتاست
+   
         image_sizes = {
             "hardfakevsrealfaces": 300,
             "rvf10k": 256,
             "140k": 256,
-            "uadfv": 256  # اضافه کردن اندازه تصویر برای دیتاست ویدیویی
+            "uadfv": 256
         }
         dataset_type = getattr(self, "dataset_type", "hardfakevsrealfaces")
-        input_size = image_sizes.get(dataset_type, 256)  # مقدار پیش‌فرض 256 در صورت عدم وجود
-        
-        # ایجاد یک تنسور ورودی ساختگی برای یک فریم
-        # شکل: (batch_size, channels, height, width)
-        # ما فقط به یک فریم برای محاسبه FLOPs پایه نیاز داریم
-        dummy_input = torch.randn(1, 3, input_size, input_size)
-        
-        # استفاده از کتابخانه thop برای محاسبه دقیق FLOPs برای یک فریم
-        # این روش بسیار مطمئن‌تر از محاسبه دستی است و برای هر معماری کار می‌کند
+        input_size = image_sizes.get(dataset_type, 256)
+    
+    # --- شروع تغییر ---
+    # دستگاه مدل را دریافت کنید (GPU یا CPU)
+        device = next(self.parameters()).device
+    
+    # یک تنسور ورودی ساختگی برای یک فریم روی همان دستگاه مدل بسازید
+        dummy_input = torch.randn(1, 3, input_size, input_size, device=device)
+    # --- پایان تغییر ---
+    
+    # استفاده از کتابخانه thop برای محاسبه دقیق FLOPs برای یک فریم
         flops_per_frame, _ = profile(self, inputs=(dummy_input,), verbose=False)
 
-        # ضرب FLOPs در تعداد فریم‌ها برای به دست آوردن FLOPs کل ویدیو
+    # ضرب FLOPs در تعداد فریم‌ها برای به دست آوردن FLOPs کل ویدیو
         total_flops = flops_per_frame * self.num_frames
-        
+    
         return total_flops
 
 class BasicBlock_sparse(nn.Module):
