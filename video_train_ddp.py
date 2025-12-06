@@ -523,6 +523,11 @@ class TrainDDP:
             dist.barrier()
             self.student.eval()
             self.student.module.ticket = True
+            
+            for buf in self.student.buffers():
+                if buf.device != torch.device('cuda'):
+                    buf.data = buf.data.cuda()
+                    
             val_meter = meter.AverageMeter("Acc@1", ":6.2f")
                 
             with torch.no_grad():
