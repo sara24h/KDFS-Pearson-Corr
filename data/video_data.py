@@ -13,8 +13,8 @@ from sklearn.model_selection import KFold, StratifiedKFold
 
 def set_global_seed(seed: int = 42):
     random.seed(seed)
-    # استفاده از random و np.random به صورت مستقیم
-    np.random.seed(seed)
+    # از default_rng برای سازگاری با نسخه‌های جدید numpy استفاده می‌کنیم
+    np.random.default_rng(seed).bit_generator.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
@@ -22,11 +22,18 @@ def set_global_seed(seed: int = 42):
     os.environ['PYTHONHASHSEED'] = str(seed)
 
 def worker_init_fn(worker_id):
-    # استفاده از random و np.random به صورت مستقیم
-    seed_val = 42 + worker_id
-    random.seed(seed_val)
-    np.random.seed(seed_val)
-    torch.manual_seed(seed_val)
+    # مطمئن شوید که worker_seed یک عدد صحیح از نوع int باشد
+    worker_seed = 42 + worker_id
+    # تبدیل به int در صورت لزوم
+    worker_seed = int(worker_seed)
+    
+    # از default_rng برای سازگاری با نسخه‌های جدید numpy استفاده می‌کنیم
+    rng = np.random.default_rng(42 + worker_id)
+    rng.bit_generator.seed(42 + worker_id)
+    
+    # تنظیم random و torch با seed صحیح
+    random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
 
 class UADFVDataset(Dataset):
     def __init__(self, root_dir, num_frames=16, image_size=256,
@@ -131,27 +138,27 @@ class UADFVDataset(Dataset):
         worker_info = torch.utils.data.get_worker_info()
         
         if worker_info is not None:
-            # ایجاد یک seed منحصر برای هر worker
             worker_seed = self.seed + worker_info.id * 100000 + idx
         else:
             worker_seed = self.seed + idx
         
-        # ذخیره حالت فعلی random و numpy
-        r_state = random.getstate()
-        np_state = np.random.get_state()
+        # مطمئن شوید که worker_seed یک عدد صحیح از نوع int باشد
+        worker_seed = int(worker_seed)
         
+        # استفاده از default_rng برای سازگاری با نسخه‌های جدید numpy
+        rng = np.random.default_rng(worker_seed)
+        rng.bit_generator.seed(worker_seed)
+        
+        # تنظیم random و torch با seed صحیح
         random.seed(worker_seed)
-        np.random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
 
         try:
             frames = self.load_video(path)
         except Exception as e:
             print(f"Error loading {path}: {e}")
             frames = torch.zeros(self.num_frames, 3, self.image_size, self.image_size)
-        finally:
-            # بازگرداندن حالت اولیه
-            random.setstate(r_state)
-            np.random.setstate(np_state)
+        # دیگر نیازی به finally برای بازگرداندن حالت نیست، چون rng محلی است
         
         return frames, torch.tensor(label, dtype=torch.float32)
 
@@ -182,7 +189,7 @@ def create_kfold_dataloaders(
         kfold = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
         splits = kfold.split(np.zeros(len(labels)), labels)
     else:
-        kfold = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        kfold = KFold(n_splits=n_splits, shuffle=True, random_state=state)
         splits = kfold.split(np.zeros(len(labels)))
    
     for fold_idx, (train_indices, val_indices) in enumerate(splits):
