@@ -316,8 +316,8 @@ class TrainDDP:
             meter_maskloss = meter.AverageMeter("MaskLoss", ":.6e")
             meter_loss = meter.AverageMeter("Loss", ":.4e")
             meter_top1 = meter.AverageMeter("Acc@1", ":6.2f")
-            meter_avg_corr = meter.AverageMeter("L_corr", ":.6f")
-            meter_retention = meter.AverageMeter("Retention", ":.4f")
+            #meter_avg_corr = meter.AverageMeter("L_corr", ":.6f")
+            #meter_retention = meter.AverageMeter("Retention", ":.4f")
         
         for epoch in range(self.start_epoch + 1, self.num_epochs + 1):
             self.train_loader.sampler.set_epoch(epoch)
@@ -331,8 +331,8 @@ class TrainDDP:
                 meter_maskloss.reset()
                 meter_loss.reset()
                 meter_top1.reset()
-                meter_avg_corr.reset()
-                meter_retention.reset()
+                #meter_avg_corr.reset()
+                #meter_retention.reset()
                 current_lr = self.optim_weight.param_groups[0]['lr']
             
             self.student.module.update_gumbel_temperature(epoch)
@@ -428,8 +428,9 @@ class TrainDDP:
                                 total_ret += float(ret)
                                 n_layers += 1
                         
-                        avg_corr = total_corr / n_layers if n_layers > 0 else 0.0
-                        avg_ret = total_ret / n_layers if n_layers > 0 else 0.0
+                        
+                        #avg_corr = total_corr / n_layers if n_layers > 0 else 0.0
+                        #avg_ret = total_ret / n_layers if n_layers > 0 else 0.0
                     
                     # ============ Backward & Optimizer step ============
                     scaler.scale(total_loss).backward()
@@ -450,8 +451,9 @@ class TrainDDP:
                     reduced_mask_loss = self.reduce_tensor(mask_loss.detach())
                     reduced_total_loss = self.reduce_tensor(total_loss.detach())
                     reduced_prec1 = self.reduce_tensor(torch.tensor(prec1, device='cuda'))
-                    reduced_avg_corr = self.reduce_tensor(torch.tensor(avg_corr, device='cuda'))
-                    reduced_avg_ret = self.reduce_tensor(torch.tensor(avg_ret, device='cuda'))
+                    
+                    #reduced_avg_corr = self.reduce_tensor(torch.tensor(avg_corr, device='cuda'))
+                    #reduced_avg_ret = self.reduce_tensor(torch.tensor(avg_ret, device='cuda'))
                     
                     # ============ Update meters (rank 0 only) ============
                     if self.rank == 0:
@@ -461,8 +463,8 @@ class TrainDDP:
                         meter_maskloss.update(self.coef_maskloss * reduced_mask_loss.item(), batch_size)
                         meter_loss.update(reduced_total_loss.item(), batch_size)
                         meter_top1.update(reduced_prec1.item(), batch_size)
-                        meter_avg_corr.update(reduced_avg_corr.item(), batch_size)
-                        meter_retention.update(reduced_avg_ret.item(), batch_size)
+                        #meter_avg_corr.update(reduced_avg_corr.item(), batch_size)
+                        #meter_retention.update(reduced_avg_ret.item(), batch_size)
                         
                         _tqdm.set_postfix(
                             loss=f"{meter_loss.avg:.4f}",
@@ -484,10 +486,7 @@ class TrainDDP:
                     f"Train_Acc {meter_top1.avg:.2f}"
                 )
                 self.logger.info(f"[Train model Flops] Epoch {epoch} : {train_flops/1e6:.6f}M")
-                self.logger.info(
-                    f"[Mask Stats] Avg_Corr {meter_avg_corr.avg:.6f} "
-                    f"Retention {meter_retention.avg:.4f}"
-                )
+               
             
             # ============ Validation ============
             if self.rank == 0:
@@ -533,8 +532,8 @@ class TrainDDP:
                 self.writer.add_scalar("train/rc_loss", meter_rcloss.avg, epoch)
                 self.writer.add_scalar("train/mask_loss", meter_maskloss.avg, epoch)
                 self.writer.add_scalar("train/flops", train_flops, epoch)
-                self.writer.add_scalar("train/avg_corr", meter_avg_corr.avg, epoch)
-                self.writer.add_scalar("train/retention", meter_retention.avg, epoch)
+                #self.writer.add_scalar("train/avg_corr", meter_avg_corr.avg, epoch)
+                #self.writer.add_scalar("train/retention", meter_retention.avg, epoch)
                 self.writer.add_scalar("val/acc", val_meter.avg, epoch)
                 self.writer.add_scalar("val/flops", val_flops, epoch)
                 
