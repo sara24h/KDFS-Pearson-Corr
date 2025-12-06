@@ -1,5 +1,4 @@
 # data/video_data.py
-
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
@@ -12,33 +11,39 @@ from torchvision import transforms
 from sklearn.model_selection import KFold, StratifiedKFold
 
 
+# ====================== SEED تنظیمات سراسری ======================
 def set_global_seed(seed: int = 42):
     random.seed(seed)
-    np.random.seed(seed)                    # درست
+    np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     os.environ['PYTHONHASHSEED'] = str(seed)
 
-def worker_init_fn(worker_id):
+
+def worker_init_fn(worker_id: int):
+    """هر ورکر دیتالودر seed جداگانه و تکرارپذیر داشته باشه"""
     worker_seed = 42 + worker_id
     np.random.seed(worker_seed)
     random.seed(worker_seed)
     torch.manual_seed(worker_seed)
 
+
+# ====================== دیتاست اصلی ======================
 class UADFVDataset(Dataset):
     def __init__(self, root_dir, num_frames=16, image_size=256,
                  transform=None, sampling_strategy='uniform',
                  is_training=True, seed=42):
-       
+
         self.root_dir = Path(root_dir)
         self.num_frames = num_frames
         self.image_size = image_size
         self.sampling_strategy = sampling_strategy
         self.is_training = is_training
         self.seed = seed
-        
+
+        # Transform پیش‌فرض
         if transform is None:
             if is_training:
                 self.transform = transforms.Compose([
@@ -50,7 +55,7 @@ class UADFVDataset(Dataset):
                     transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                          std=[0.229, 0.224, 0.225])
                 ])
-            else: # validation
+            else:
                 self.transform = transforms.Compose([
                     transforms.ToPILImage(),
                     transforms.Resize((image_size, image_size)),
@@ -60,25 +65,27 @@ class UADFVDataset(Dataset):
                 ])
         else:
             self.transform = transform
-            
+
         self.video_list = self._load_videos()
+
         if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
             print(f"Total {len(self.video_list)} videos loaded.")
 
     def _load_videos(self):
         video_list = []
-        # Fake → label 0
         fake_dir = self.root_dir / 'fake'
+        real_dir = self.root_dir / 'real'
+
         if fake_dir.exists():
             for p in sorted(fake_dir.glob('*.mp4')):
                 if not p.name.startswith('.'):
                     video_list.append((str(p), 0))
-        # Real → label 1
-        real_dir = self.root_dir / 'real'
         if real_dir.exists():
             for p in sorted(real_dir.glob('*.mp4')):
                 if not p.name.startswith('.'):
                     video_list.append((str(p), 1))
+
+        # فقط یک بار shuffle با seed ثابت
         rng = random.Random(self.seed)
         rng.shuffle(video_list)
         return video_list
@@ -87,23 +94,26 @@ class UADFVDataset(Dataset):
         if total_frames <= self.num_frames:
             idxs = np.random.choice(total_frames, self.num_frames, replace=True)
             return sorted(idxs.tolist())
+
         if self.sampling_strategy == 'uniform':
-            return np.linspace(0, total_frames-1, self.num_frames, dtype=int).tolist()
+            return np.linspace(0, total_frames - 1, self.num_frames, dtype=int).tolist()
         elif self.sampling_strategy == 'random':
             idxs = np.random.choice(total_frames, self.num_frames, replace=False)
             return sorted(idxs.tolist())
         elif self.sampling_strategy == 'first':
             return list(range(self.num_frames))
         else:
-            raise ValueError("sampling_strategy: uniform / random / first")
+            raise ValueError("sampling_strategy must be: uniform / random / first")
 
     def load_video(self, path: str):
         cap = cv2.VideoCapture(path)
         if not cap.isOpened():
-            raise IOError(f"Cannot open {path}")
+            raise IOError(f"Cannot open video: {path}")
+
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         indices = self.sample_frames(total)
         frames = []
+
         for i in indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, i)
             ret, frame = cap.read()
@@ -112,48 +122,44 @@ class UADFVDataset(Dataset):
                 try:
                     frame = self.transform(frame)
                 except Exception as e:
-                    print(f"Transform error on frame from {path}: {e}")
+                    print(f"Transform error on {path}: {e}")
                     frame = torch.zeros(3, self.image_size, self.image_size)
                 frames.append(frame)
             else:
-                # fallback
                 fallback = frames[-1].clone() if frames else torch.zeros(3, self.image_size, self.image_size)
                 frames.append(fallback)
         cap.release()
-        return torch.stack(frames) # [T, C, H, W]
+        return torch.stack(frames)  # [T, C, H, W]
 
     def __len__(self):
         return len(self.video_list)
 
     def __getitem__(self, idx):
         path, label = self.video_list[idx]
+
+        # seed منحصر به فرد برای هر نمونه + هر ورکر → ۱۰۰٪ تکرارپذیر
         worker_info = torch.utils.data.get_worker_info()
-        
         if worker_info is not None:
-            worker_seed = self.seed + worker_info.id * 100000 + idx
+            base_seed = worker_info.id * 100_000
         else:
-            worker_seed = self.seed + idx
-        
-        # مطمئن شوید که worker_seed یک عدد صحیح از نوع int باشد
-        worker_seed = int(worker_seed)
-        
-        # استفاده از default_rng برای سازگاری با نسخه‌های جدید numpy
-        rng = np.random.default_rng(worker_seed)
-        rng.bit_generator.seed(worker_seed)
-        
-        # تنظیم random و torch با seed صحیح
-        random.seed(worker_seed)
-        torch.manual_seed(worker_seed)
+            base_seed = 0
+        sample_seed = self.seed + idx + base_seed
+
+        # تنظیم seed برای numpy, random, torch
+        random.seed(sample_seed)
+        np.random.seed(sample_seed)
+        torch.manual_seed(sample_seed)
 
         try:
             frames = self.load_video(path)
         except Exception as e:
-            print(f"Error loading {path}: {e}")
+            print(f"Error loading video {path}: {e}")
             frames = torch.zeros(self.num_frames, 3, self.image_size, self.image_size)
-        # دیگر نیازی به finally برای بازگرداندن حالت نیست، چون rng محلی است
-        
+
         return frames, torch.tensor(label, dtype=torch.float32)
 
+
+# ====================== ساخت دیتالودرهای K-Fold ======================
 def create_kfold_dataloaders(
     root_dir,
     n_splits=5,
@@ -176,48 +182,49 @@ def create_kfold_dataloaders(
         is_training=True,
         seed=seed
     )
+
     labels = [label for _, label in full_dataset.video_list]
+
     if stratified:
         kfold = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-        splits = kfold.split(np.zeros(len(labels)), labels)
     else:
-        kfold = KFold(n_splits=n_splits, shuffle=True, random_state=state)
-        splits = kfold.split(np.zeros(len(labels)))
-   
+        kfold = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
+
+    splits = kfold.split(np.zeros(len(labels)), labels if stratified else None)
+
     for fold_idx, (train_indices, val_indices) in enumerate(splits):
         if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
             print(f"\n{'='*60}")
             print(f"Fold {fold_idx + 1}/{n_splits}")
             print(f"Train samples: {len(train_indices)}, Val samples: {len(val_indices)}")
-        
+
         train_dataset = Subset(full_dataset, train_indices)
-        
-        # Create a separate validation dataset with is_training=False
+
+        # Validation بدون augmentation
         val_dataset_full = UADFVDataset(
             root_dir=root_dir,
             num_frames=num_frames,
             image_size=image_size,
             sampling_strategy=sampling_strategy,
-            is_training=False, # validation mode
+            is_training=False,
             seed=seed
         )
         val_dataset = Subset(val_dataset_full, val_indices)
-       
+
         if ddp:
             train_sampler = DistributedSampler(train_dataset, shuffle=True)
             val_sampler = DistributedSampler(val_dataset, shuffle=False)
-            shuffle = False
+            shuffle_train = False
         else:
-            train_sampler = None
-            val_sampler = None
-            shuffle = True
-       
+            train_sampler = val_sampler = None
+            shuffle_train = True
+
         g = torch.Generator().manual_seed(seed + fold_idx)
-       
+
         train_loader = DataLoader(
             train_dataset,
             batch_size=train_batch_size,
-            shuffle=shuffle,
+            shuffle=shuffle_train,
             sampler=train_sampler,
             num_workers=num_workers,
             pin_memory=pin_memory,
@@ -225,7 +232,7 @@ def create_kfold_dataloaders(
             worker_init_fn=worker_init_fn,
             generator=g
         )
-       
+
         val_loader = DataLoader(
             val_dataset,
             batch_size=val_batch_size,
@@ -235,5 +242,5 @@ def create_kfold_dataloaders(
             pin_memory=pin_memory,
             worker_init_fn=worker_init_fn
         )
-       
+
         yield fold_idx, train_loader, val_loader
