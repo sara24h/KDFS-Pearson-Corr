@@ -10,7 +10,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from data.video_data import create_uadfv_dataloaders
 import cv2
 from pathlib import Path
@@ -349,7 +349,7 @@ class TrainDDP:
         
         torch.cuda.empty_cache()
         self.teacher.eval()
-        scaler = GradScaler('cuda')
+        scaler = GradScaler(device='cuda')
         
         if self.resume:
             self.resume_student_ckpt()
@@ -403,7 +403,7 @@ class TrainDDP:
                             self.logger.warning("Invalid input detected (NaN or Inf)")
                         continue
                     
-                    with autocast('cuda'):
+                    with autocast(device_type='cuda'):
                         # ============ Student forward ============
                         logits_student, feature_list_student = self.student(images)
                         logits_student = logits_student.squeeze(1)  # [B*T]
