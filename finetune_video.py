@@ -10,12 +10,15 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import cv2
+from utils import utils, loss, meter, scheduler
 from pathlib import Path
 from data.video_data import create_uadfv_dataloaders
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from model.student.ResNet_sparse_video import ResNet_50_sparse_uadfv
+from utils.schedular import CosineAnnealingLRWarmup
+
 class FinetuneDDP:
     def __init__(self, args):
         """Initialize FinetuneDDP with provided arguments."""
