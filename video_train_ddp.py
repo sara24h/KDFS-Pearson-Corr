@@ -11,11 +11,10 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
-
 from data.video_data import create_kfold_dataloaders, set_global_seed
 from utils import utils, loss, meter, scheduler
 from thop import profile
-from model.student.ResNet_sparse_video import ResNet_50_sparse_uadfv, SoftMaskedConv2d
+from model.student.ResNet_sparse_video import (ResNet_50_sparse_uadfv,SoftMaskedConv2d)
 from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
 from model.student.GoogleNet_sparse import GoogLeNet_sparse_deepfake
 from model.teacher.ResNet import ResNet_50_hardfakevsreal
@@ -24,7 +23,6 @@ from model.teacher.GoogleNet import GoogLeNet_deepfake
 from utils.loss import compute_filter_correlation
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-
 
 class TrainDDP:
     def __init__(self, args):
@@ -39,10 +37,7 @@ class TrainDDP:
         self.num_epochs = args.num_epochs
         self.num_frames = getattr(args, 'num_frames', 16)
         self.frame_sampling = getattr(args, 'frame_sampling', 'uniform')
-        
-        # پارامترهای K-Fold
         self.n_splits = getattr(args, 'n_splits', 5)
-        self.split_ratio = getattr(args, 'split_ratio', (0.7, 0.15, 0.15))
         
         self.lr = args.lr
         self.warmup_steps = args.warmup_steps
@@ -64,103 +59,76 @@ class TrainDDP:
         self.world_size = 0
         self.local_rank = -1
         self.rank = -1
-        self.fold_results = []
-        
+        self.fold_results = [] 
+
         if self.dataset_mode == "uadfv":
             self.args.dataset_type = "uadfv"
             self.num_classes = 1
             self.image_size = 256
         else:
             raise ValueError("dataset_mode must be 'uadfv' for this script")
-        
+
         self.arch = args.arch.lower().replace('_', '')
         if self.arch not in ['resnet50', 'mobilenetv2', 'googlenet']:
             raise ValueError(f"Unsupported architecture: '{args.arch}'. "
                              "It must be 'resnet50', 'mobilenetv2', or 'googlenet'.")
 
     def dist_init(self):
-        """Initialize distributed training"""
         dist.init_process_group("nccl")
         self.world_size = dist.get_world_size()
         self.rank = dist.get_rank()
         self.local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(self.local_rank)
-        
-        if self.rank == 0:
-            print(f"Distributed training initialized: world_size={self.world_size}")
 
     def result_init(self):
-        """Initialize result directories and loggers"""
         if self.rank == 0:
             if not os.path.exists(self.result_dir):
                 os.makedirs(self.result_dir)
-            
             self.writer = SummaryWriter(self.result_dir)
             self.logger = utils.get_logger(
                 os.path.join(self.result_dir, "train_logger.log"), "train_logger"
             )
-            
-            self.logger.info("="*70)
-            self.logger.info("Training Configuration:")
-            self.logger.info("="*70)
+            self.logger.info("train config:")
             self.logger.info(str(json.dumps(vars(self.args), indent=4)))
-            
             utils.record_config(
                 self.args, os.path.join(self.result_dir, "train_config.txt")
             )
-            
-            self.logger.info("="*70)
-            self.logger.info("Starting K-Fold Cross-Validation Training")
-            self.logger.info("="*70)
+            self.logger.info("--------- Train -----------")
 
     def setup_seed(self):
-        """Setup random seed for reproducibility"""
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
         torch.use_deterministic_algorithms(True)
         self.seed = self.seed + self.rank
         set_global_seed(self.seed)
-        
-        if self.rank == 0:
-            print(f"Random seed set to: {self.seed}")
 
     def dataload(self):
-        """Load dataset with K-Fold splits"""
         if self.rank == 0:
             self.logger.info(f"Loading UADFV dataset from: {self.dataset_dir}")
             self.logger.info(f"Number of frames per video: {self.num_frames}")
             self.logger.info(f"Frame sampling strategy: {self.frame_sampling}")
             self.logger.info(f"Number of K-Fold splits: {self.n_splits}")
-            self.logger.info(f"Split ratio (train/val/test): {self.split_ratio}")
         
-        self.fold_loaders, self.test_loader = create_kfold_dataloaders(
+        self.dataloader_generator = create_kfold_dataloaders(
             root_dir=self.dataset_dir,
             n_splits=self.n_splits,
             num_frames=self.num_frames,
             image_size=self.image_size,
             train_batch_size=self.train_batch_size,
-            eval_batch_size=self.eval_batch_size,
+            val_batch_size=self.eval_batch_size,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             ddp=True,
             seed=self.seed,
-            sampling_strategy=self.frame_sampling,
-            split_ratio=self.split_ratio
+            sampling_strategy=self.frame_sampling
         )
         
         if self.rank == 0:
-            self.logger.info("="*70)
-            self.logger.info("Dataset loading completed successfully!")
-            self.logger.info(f"Number of folds: {len(self.fold_loaders)}")
-            self.logger.info(f"Test loader batches: {len(self.test_loader)}")
-            self.logger.info("="*70)
+            self.logger.info("UADFV Dataset loader generator has been created!")
 
     def build_model(self):
-        """Build teacher and student models"""
         if self.rank == 0:
-            self.logger.info("Building models...")
-            self.logger.info(f"Architecture: {self.arch}")
-        
-        # Build teacher model
+            self.logger.info("==> Building model..")
+            self.logger.info("Loading teacher model")
         if self.arch == 'resnet50':
             teacher_model = ResNet_50_hardfakevsreal()
         elif self.arch == 'mobilenetv2':
@@ -170,15 +138,9 @@ class TrainDDP:
         else:
             raise ValueError(f"Unsupported architecture: {self.arch}")
         
-        # Load teacher checkpoint
-        if self.rank == 0:
-            self.logger.info(f"Loading teacher checkpoint from: {self.teacher_ckpt_path}")
-        
         ckpt_teacher = torch.load(self.teacher_ckpt_path, map_location="cpu")
         state_dict = ckpt_teacher.get('config_state_dict',
                                       ckpt_teacher.get('student', ckpt_teacher))
-        
-        # Remove 'module.' prefix if exists
         if list(state_dict.keys())[0].startswith('module.'):
             from collections import OrderedDict
             new_state_dict = OrderedDict()
@@ -186,14 +148,11 @@ class TrainDDP:
                 name = k.replace('module.', '', 1)
                 new_state_dict[name] = v
             state_dict = new_state_dict
-        
         teacher_model.load_state_dict(state_dict, strict=True)
         self.teacher = teacher_model.cuda()
         
         if self.rank == 0:
-            self.logger.info("Teacher model loaded successfully")
-        
-        # Build student model
+            self.logger.info("Building student model")
         if self.arch == 'resnet50':
             StudentModelClass = ResNet_50_sparse_uadfv
         elif self.arch == 'mobilenetv2':
@@ -210,83 +169,51 @@ class TrainDDP:
         )
         self.student.dataset_type = self.args.dataset_type
         
-        # Adjust final layer for binary classification
         if self.arch == 'mobilenetv2':
             num_ftrs = self.student.classifier.in_features
             self.student.classifier = nn.Linear(num_ftrs, 1)
         elif self.arch == 'googlenet':
             num_ftrs = self.student.fc.in_features
             self.student.fc = nn.Linear(num_ftrs, 1)
-        else:  # resnet50
+        else: # resnet50
             num_ftrs = self.student.fc.in_features
             self.student.fc = nn.Linear(num_ftrs, 1)
         
         self.student = self.student.cuda()
         self.student = DDP(self.student, device_ids=[self.local_rank])
-        
-        if self.rank == 0:
-            self.logger.info("Student model built and wrapped with DDP")
-            self.logger.info("="*70)
 
     def define_loss(self):
-        """Define loss functions"""
         self.ori_loss = nn.BCEWithLogitsLoss().cuda()
         self.kd_loss = loss.KDLoss().cuda()
         self.rc_loss = loss.RCLoss().cuda()
         self.mask_loss = loss.MaskLoss().cuda()
-        
-        if self.rank == 0:
-            self.logger.info("Loss functions initialized")
 
     def define_optim(self):
-        """Define optimizers and schedulers"""
-        weight_params = map(
-            lambda p: p[1],
-            filter(lambda p: p[1].requires_grad and "mask" not in p[0],
-                   self.student.module.named_parameters())
-        )
-        mask_params = map(
-            lambda p: p[1],
-            filter(lambda p: p[1].requires_grad and "mask" in p[0],
-                   self.student.module.named_parameters())
-        )
-        
-        self.optim_weight = torch.optim.Adamax(
-            weight_params,
-            lr=self.lr,
-            weight_decay=self.weight_decay,
-            eps=1e-7
-        )
+        weight_params = map(lambda p: p[1],
+                            filter(lambda p: p[1].requires_grad and "mask" not in p[0],
+                                   self.student.module.named_parameters()))
+        mask_params = map(lambda p: p[1],
+                          filter(lambda p: p[1].requires_grad and "mask" in p[0],
+                                 self.student.module.named_parameters()))
+        self.optim_weight = torch.optim.Adamax(weight_params,
+                                              lr=self.lr,
+                                              weight_decay=self.weight_decay,
+                                              eps=1e-7)
         self.optim_mask = torch.optim.Adamax(mask_params, lr=self.lr, eps=1e-7)
-        
         self.scheduler_student_weight = scheduler.CosineAnnealingLRWarmup(
-            self.optim_weight,
-            T_max=self.lr_decay_T_max,
-            eta_min=self.lr_decay_eta_min,
-            last_epoch=-1,
+            self.optim_weight, T_max=self.lr_decay_T_max,
+            eta_min=self.lr_decay_eta_min, last_epoch=-1,
             warmup_steps=self.warmup_steps,
-            warmup_start_lr=self.warmup_start_lr
-        )
+            warmup_start_lr=self.warmup_start_lr)
         self.scheduler_student_mask = scheduler.CosineAnnealingLRWarmup(
-            self.optim_mask,
-            T_max=self.lr_decay_T_max,
-            eta_min=self.lr_decay_eta_min,
-            last_epoch=-1,
+            self.optim_mask, T_max=self.lr_decay_T_max,
+            eta_min=self.lr_decay_eta_min, last_epoch=-1,
             warmup_steps=self.warmup_steps,
-            warmup_start_lr=self.warmup_start_lr
-        )
-        
-        if self.rank == 0:
-            self.logger.info("Optimizers and schedulers initialized")
+            warmup_start_lr=self.warmup_start_lr)
 
     def resume_student_ckpt(self):
-        """Resume training from checkpoint"""
         if not os.path.exists(self.resume):
             raise FileNotFoundError(f"Checkpoint file not found: {self.resume}")
-        
-        if self.rank == 0:
-            self.logger.info(f"Resuming from checkpoint: {self.resume}")
-        
         ckpt_student = torch.load(self.resume, map_location="cpu", weights_only=True)
         self.best_prec1 = ckpt_student["best_prec1"]
         self.start_epoch = ckpt_student["start_epoch"]
@@ -295,18 +222,14 @@ class TrainDDP:
         self.optim_mask.load_state_dict(ckpt_student["optim_mask"])
         self.scheduler_student_weight.load_state_dict(ckpt_student["scheduler_student_weight"])
         self.scheduler_student_mask.load_state_dict(ckpt_student["scheduler_student_mask"])
-        
         if self.rank == 0:
-            self.logger.info(f"Continuing from epoch {self.start_epoch + 1}")
-            self.logger.info(f"Best previous accuracy: {self.best_prec1:.2f}%")
+            self.logger.info(f"=> Continue from epoch {self.start_epoch + 1}...")
 
     def save_student_ckpt(self, is_best, epoch, fold_idx):
-        """Save model checkpoint"""
         if self.rank == 0:
             folder = os.path.join(self.result_dir, f"student_model_fold_{fold_idx}")
             if not os.path.exists(folder):
                 os.makedirs(folder)
-            
             ckpt_student = {
                 "best_prec1": self.best_prec1,
                 "start_epoch": epoch,
@@ -316,17 +239,13 @@ class TrainDDP:
                 "scheduler_student_weight": self.scheduler_student_weight.state_dict(),
                 "scheduler_student_mask": self.scheduler_student_mask.state_dict(),
             }
-            
             if is_best:
-                best_path = os.path.join(folder, self.arch + "_sparse_best.pt")
-                torch.save(ckpt_student, best_path)
-                self.logger.info(f"Best model saved: {best_path}")
-            
-            last_path = os.path.join(folder, self.arch + "_sparse_last.pt")
-            torch.save(ckpt_student, last_path)
+                torch.save(ckpt_student,
+                           os.path.join(folder, self.arch + "_sparse_best.pt"))
+            torch.save(ckpt_student,
+                       os.path.join(folder, self.arch + "_sparse_last.pt"))
 
     def reduce_tensor(self, tensor):
-        """Reduce tensor across all GPUs"""
         rt = tensor.clone()
         dist.all_reduce(rt, op=dist.ReduceOp.SUM)
         rt /= self.world_size
@@ -339,24 +258,20 @@ class TrainDDP:
             if isinstance(m, SoftMaskedConv2d):
                 with torch.no_grad():
                     mask = torch.sigmoid(m.mask_weight)
-                    mask_avgs.append(round(mask.mean().item(), 3))
+                    mask_avgs.append(round(mask.mean().item(), 2))
         return mask_avgs
 
     def train(self, fold_idx):
-        """Train one fold"""
         if self.rank == 0:
-            self.logger.info(f"\n{'='*70}")
-            self.logger.info(f"Training Fold {fold_idx + 1}/{self.n_splits}")
-            self.logger.info(f"Starting from epoch: {self.start_epoch + 1}")
-            self.logger.info(f"{'='*70}\n")
-        
+            self.logger.info(f"Starting training for Fold {fold_idx + 1}/{self.n_splits} from epoch: {self.start_epoch + 1}")
         torch.cuda.empty_cache()
         self.teacher.eval()
         scaler = GradScaler()
         
-        is_video_dataset = self.dataset_mode in ["uadfv"]
+        if self.resume:
+            self.resume_student_ckpt()
         
-        # Initialize meters
+        is_video_dataset = self.dataset_mode in ["uadfv"]
         if self.rank == 0:
             meter_oriloss = meter.AverageMeter("OriLoss", ":.4e")
             meter_kdloss = meter.AverageMeter("KDLoss", ":.4e")
@@ -371,7 +286,6 @@ class TrainDDP:
             self.train_loader.sampler.set_epoch(epoch)
             self.student.train()
             self.student.module.ticket = False
-            
             if self.rank == 0:
                 meter_oriloss.reset()
                 meter_kdloss.reset()
@@ -386,49 +300,44 @@ class TrainDDP:
             self.student.module.update_gumbel_temperature(epoch)
             current_gumbel_temp = self.student.module.gumbel_temperature
             
-            with tqdm(total=len(self.train_loader), ncols=120, disable=self.rank != 0) as _tqdm:
+            with tqdm(total=len(self.train_loader), ncols=100, disable=self.rank != 0) as _tqdm:
                 if self.rank == 0:
-                    _tqdm.set_description(f"Fold {fold_idx+1}/{self.n_splits} | Epoch {epoch}/{self.num_epochs}")
-                
+                    _tqdm.set_description(f"Fold {fold_idx+1}/{self.n_splits} | epoch: {epoch}/{self.num_epochs}")
                 for batch_data in self.train_loader:
                     self.optim_weight.zero_grad()
                     self.optim_mask.zero_grad()
-                    
                     if is_video_dataset:
                         videos, targets = batch_data
                         videos = videos.cuda(non_blocking=True)
                         targets = targets.cuda(non_blocking=True).float()
-                        
                         batch_size, num_frames, C, H, W = videos.shape
                         images = videos.view(-1, C, H, W)
-                        
-                        # Check for NaN/Inf
                         if torch.isnan(images).any() or torch.isinf(images).any() or \
                            torch.isnan(targets).any() or torch.isinf(targets).any():
                             if self.rank == 0:
-                                self.logger.warning("Invalid input detected (NaN or Inf), skipping batch")
+                                self.logger.warning("Invalid input detected (NaN or Inf)")
                             continue
-                        
                         with autocast():
                             # Student forward
                             logits_student, feature_list_student = self.student(images)
                             logits_student = logits_student.squeeze(1)
                             logits_student = logits_student.view(batch_size, num_frames).mean(dim=1)
-                            
                             # Teacher forward
                             with torch.no_grad():
                                 logits_teacher, feature_list_teacher = self.teacher(images)
                                 logits_teacher = logits_teacher.squeeze(1)
                                 logits_teacher = logits_teacher.view(batch_size, num_frames).mean(dim=1)
                             
-                            # Compute losses
+                            # Losses
                             ori_loss = self.ori_loss(logits_student, targets)
                             kd_loss = (self.target_temperature ** 2) * self.kd_loss(
-                                logits_teacher, logits_student, self.target_temperature
-                            )
+                                logits_teacher, logits_student, self.target_temperature)
                             
                             rc_loss = torch.tensor(0.0, device=images.device, dtype=torch.float32)
-                            if len(feature_list_student) > 0:
+                            if len(feature_list_student) == 0:
+                                if self.rank == 0:
+                                    self.logger.warning("Feature list is empty! Model may not be returning features.")
+                            else:
                                 for i in range(len(feature_list_student)):
                                     layer_rc_loss = self.rc_loss(
                                         feature_list_student[i],
@@ -436,9 +345,6 @@ class TrainDDP:
                                     )
                                     rc_loss = rc_loss + layer_rc_loss
                                 rc_loss = rc_loss / len(feature_list_student)
-                            else:
-                                if self.rank == 0 and epoch == self.start_epoch + 1:
-                                    self.logger.warning("Feature list is empty!")
                             
                             mask_loss = self.mask_loss(self.student.module)
                             
@@ -449,33 +355,30 @@ class TrainDDP:
                                 self.coef_maskloss * mask_loss
                             )
                             
-                            # Compute correlation & retention
+                            # Correlation & retention for logging
                             total_corr, total_ret = 0.0, 0.0
                             n_layers = 0
                             for m in self.student.module.mask_modules:
                                 if isinstance(m, SoftMaskedConv2d):
                                     corr, ret = compute_filter_correlation(
                                         m.weight, m.mask_weight,
-                                        self.student.module.gumbel_temperature
-                                    )
+                                        self.student.module.gumbel_temperature)
                                     total_corr += corr.item()
                                     total_ret += float(ret)
                                     n_layers += 1
                             avg_corr = total_corr / n_layers if n_layers > 0 else 0.0
                             avg_ret = total_ret / n_layers if n_layers > 0 else 0.0
                         
-                        # Backward
                         scaler.scale(total_loss).backward()
                         scaler.step(self.optim_weight)
                         scaler.step(self.optim_mask)
                         scaler.update()
                         
-                        # Compute accuracy
                         preds = (torch.sigmoid(logits_student) > 0.5).float()
                         correct = (preds == targets).sum().item()
                         prec1 = 100.0 * correct / batch_size
                     
-                    # Reduce metrics across GPUs
+                    # ----------------- Reduce metrics -----------------
                     dist.barrier()
                     reduced_ori_loss = self.reduce_tensor(ori_loss.detach())
                     reduced_kd_loss = self.reduce_tensor(kd_loss.detach())
@@ -487,7 +390,7 @@ class TrainDDP:
                     reduced_avg_ret = self.reduce_tensor(torch.tensor(avg_ret, device='cuda'))
                     
                     if self.rank == 0:
-                        n = batch_size
+                        n = batch_size if is_video_dataset else images.size(0)
                         meter_oriloss.update(reduced_ori_loss.item(), n)
                         meter_kdloss.update(self.coef_kdloss * reduced_kd_loss.item(), n)
                         meter_rcloss.update(self.coef_rcloss * reduced_rc_loss.item(), n)
@@ -496,116 +399,76 @@ class TrainDDP:
                         meter_top1.update(reduced_prec1.item(), n)
                         meter_avg_corr.update(reduced_avg_corr.item(), n)
                         meter_retention.update(reduced_avg_ret.item(), n)
-                        
                         _tqdm.set_postfix(
                             loss=f"{meter_loss.avg:.4f}",
-                            acc=f"{meter_top1.avg:.2f}%"
+                            acc=f"{meter_top1.avg:.2f}"
                         )
                         _tqdm.update(1)
-            
-            # Training epoch summary
-            if self.rank == 0:
-                self.student.module.ticket = False
-                train_flops = self.student.module.get_flops()
                 
-                self.logger.info(
-                    f"[Train][Fold {fold_idx+1}] Epoch {epoch}: "
-                    f"Gumbel_temp={current_gumbel_temp:.2f} LR={current_lr:.6f} "
-                    f"OriLoss={meter_oriloss.avg:.4f} KDLoss={meter_kdloss.avg:.4f} "
-                    f"RCLoss={meter_rcloss.avg:.6f} MaskLoss={meter_maskloss.avg:.6f} "
-                    f"TotalLoss={meter_loss.avg:.4f} Acc={meter_top1.avg:.2f}%"
-                )
-                self.logger.info(
-                    f"[Train FLOPs][Fold {fold_idx+1}] Epoch {epoch}: {train_flops/1e6:.2f}M"
-                )
-            
-            # Validation
-            dist.barrier()
-            self.student.eval()
-            self.student.module.ticket = True
-            
-            for buf in self.student.buffers():
-                if buf.device != torch.device('cuda'):
-                    buf.data = buf.data.cuda()
-
-            total_correct = 0
-            total_samples = 0
+                if self.rank == 0:
+                    self.student.module.ticket = False
+                    train_flops = self.student.module.get_flops()
                     
-            val_meter = meter.AverageMeter("Acc@1", ":6.2f")
-                
-            with torch.no_grad():
-                for val_videos, val_targets in self.val_loader:
-                    val_videos = val_videos.cuda(non_blocking=True)
-                    val_targets = val_targets.cuda(non_blocking=True).float()
-                        
-                    val_batch_size, val_num_frames, C, H, W = val_videos.shape
-                    val_frames = val_videos.view(-1, C, H, W)
-                        
-                    val_logits, _ = self.student(val_frames)
-                    val_logits = val_logits.squeeze(1)
-                    val_logits = val_logits.view(val_batch_size, val_num_frames).mean(dim=1)
-                        
-                    val_preds = (torch.sigmoid(val_logits) > 0.5).float()
-                    correct = (val_preds == val_targets).sum().item()
-                    prec1 = 100.0 * correct / val_batch_size
-                    n = val_batch_size
-                    val_meter.update(prec1, n)
-                    total_correct += correct
-                    total_samples += val_batch_size
+                    self.logger.info(f"[Train][Fold {fold_idx+1}] Epoch {epoch} : Gumbel_temperature {current_gumbel_temp:.2f} "
+                                    f"LR {current_lr:.6f} OriLoss {meter_oriloss.avg:.4f} "
+                                    f"KDLoss {meter_kdloss.avg:.4f} RCLoss {meter_rcloss.avg:.6f} "
+                                    f"MaskLoss {meter_maskloss.avg:.6f} TotalLoss {meter_loss.avg:.4f} "
+                                    f"Train_Acc {meter_top1.avg:.2f}")
                     
-            total_correct_tensor = torch.tensor(total_correct, device='cuda')
-            total_samples_tensor = torch.tensor(total_samples, device='cuda')
+                    self.logger.info(f"[Train model Flops][Fold {fold_idx+1}] Epoch {epoch} : {train_flops/1e6:.6f}M")
             
-            dist.all_reduce(total_correct_tensor, op=dist.ReduceOp.SUM)
-            dist.all_reduce(total_samples_tensor, op=dist.ReduceOp.SUM)
-
-
+            # ----------------- Validation -----------------
             if self.rank == 0:
-                final_acc = 100.0 * total_correct_tensor.item() / total_samples_tensor.item()
+                self.student.eval()
+                self.student.module.ticket = True
+                val_meter = meter.AverageMeter("Acc@1", ":6.2f")
+                with torch.no_grad():
+                    for val_videos, val_targets in self.val_loader:
+                        val_videos = val_videos.cuda(non_blocking=True)
+                        val_targets = val_targets.cuda(non_blocking=True).float()
+                        val_batch_size, val_num_frames, C, H, W = val_videos.shape
+                        val_frames = val_videos.view(-1, C, H, W)
+                       
+                        val_logits, _ = self.student(val_frames)
+                        val_logits = val_logits.squeeze(1)
+                        val_logits = val_logits.view(val_batch_size, val_num_frames).mean(dim=1)
+                       
+                        val_preds = (torch.sigmoid(val_logits) > 0.5).float()
+                        correct = (val_preds == val_targets).sum().item()
+                        acc1 = 100.0 * correct / val_batch_size
+                        val_meter.update(acc1, val_batch_size)
+                
                 mask_avgs = self.get_mask_averages()
                 val_flops = self.student.module.get_flops()
+               
+                self.logger.info(f"[Val][Fold {fold_idx+1}] Epoch {epoch} : Val_Acc {val_meter.avg:.2f}")
+                self.logger.info(f"[Val mask avg][Fold {fold_idx+1}] Epoch {epoch} : {mask_avgs}")
+                self.logger.info(f"[Val model Flops][Fold {fold_idx+1}] Epoch {epoch} : {val_flops/1e6:.6f}M")
                 
-                self.logger.info(
-                    f"[Val][Fold {fold_idx+1}] Epoch {epoch}: Val_Acc={val_meter.avg:.2f}%"
-                )
-                self.logger.info(
-                    f"[Val Masks][Fold {fold_idx+1}] Epoch {epoch}: {mask_avgs}"
-                )
-                self.logger.info(
-                    f"[Val FLOPs][Fold {fold_idx+1}] Epoch {epoch}: {val_flops/1e6:.2f}M"
-                )
-                
-                # Step schedulers
                 self.scheduler_student_weight.step()
                 self.scheduler_student_mask.step()
                 
-                # TensorBoard logging
                 self.writer.add_scalar(f"train/fold_{fold_idx+1}/lr", current_lr, epoch)
                 self.writer.add_scalar(f"train/fold_{fold_idx+1}/gumbel_temp", current_gumbel_temp, epoch)
                 self.writer.add_scalar(f"train/fold_{fold_idx+1}/acc", meter_top1.avg, epoch)
                 self.writer.add_scalar(f"train/fold_{fold_idx+1}/loss", meter_loss.avg, epoch)
                 self.writer.add_scalar(f"train/fold_{fold_idx+1}/flops", train_flops, epoch)
-                self.writer.add_scalar(f"val/fold_{fold_idx+1}/acc", final_acc, epoch)
+                self.writer.add_scalar(f"val/fold_{fold_idx+1}/acc", val_meter.avg, epoch)
                 self.writer.add_scalar(f"val/fold_{fold_idx+1}/flops", val_flops, epoch)
                 
-                # Save checkpoint
                 if val_meter.avg > self.best_prec1:
                     self.best_prec1 = val_meter.avg
-                    self.logger.info(
-                        f"=> New best validation accuracy for Fold {fold_idx+1}: {self.best_prec1:.2f}%"
-                    )
+                    self.logger.info(f" => Best top1 accuracy on validation for Fold {fold_idx+1}: {self.best_prec1}")
                     self.save_student_ckpt(is_best=True, epoch=epoch, fold_idx=fold_idx)
                 else:
                     self.save_student_ckpt(is_best=False, epoch=epoch, fold_idx=fold_idx)
         
-        # Save fold result
         if self.rank == 0:
             self.fold_results.append(self.best_prec1)
-            self.logger.info(f"\nFold {fold_idx + 1} finished! Best accuracy: {self.best_prec1:.2f}%\n")
+            self.logger.info(f"Training for Fold {fold_idx + 1} finished! Best accuracy: {self.best_prec1:.2f}")
+
 
     def main(self):
-        """Main training loop for K-Fold Cross-Validation"""
-        # Initialize
         self.dist_init()
         self.result_init()
         self.setup_seed()
@@ -613,67 +476,27 @@ class TrainDDP:
         self.build_model()
         self.define_loss()
         self.define_optim()
-        
-        # Store original resume path
-        original_resume = self.resume
 
-        for fold_idx, (train_loader, val_loader) in enumerate(self.fold_loaders):
+        for fold_idx, self.train_loader, self.val_loader in self.dataloader_generator:
 
-            if self.rank == 0:
-                self.logger.info(f"\n{'='*70}")
-                self.logger.info(f"Preparing Fold {fold_idx + 1}/{self.n_splits}")
-                self.logger.info(f"{'='*70}")
-            
-            # Set loaders for this fold
-            self.train_loader = train_loader
-            self.val_loader = val_loader
-            
-            # Reset for new fold
             self.best_prec1 = 0
             self.start_epoch = 0
-            
-            # Only resume from checkpoint for first fold
-            if original_resume and fold_idx == 0:
-                self.resume = original_resume
-                self.resume_student_ckpt()
-            else:
-                self.resume = None
-            
-            # Train this fold
+
+            if self.resume:
+    
+                if fold_idx == 0:
+                    self.resume_student_ckpt()
+                else:
+                    self.resume = None
+
             self.train(fold_idx)
-        
-        # Final results summary
+
         if self.rank == 0:
-            self.logger.info("\n" + "="*70)
-            self.logger.info("K-Fold Cross-Validation Results Summary")
-            self.logger.info("="*70)
-            
+            self.logger.info("="*60)
+            self.logger.info("K-Fold Cross-Validation Finished!")
             for i, acc in enumerate(self.fold_results):
-                self.logger.info(f"Fold {i+1}: Best Accuracy = {acc:.2f}%")
-            
+                self.logger.info(f"Fold {i+1} Best Accuracy: {acc:.2f}%")
             avg_acc = np.mean(self.fold_results)
             std_acc = np.std(self.fold_results)
-            
-            self.logger.info(f"\nAverage Accuracy: {avg_acc:.2f}% ± {std_acc:.2f}%")
-            self.logger.info("="*70 + "\n")
-            
-            # Save results to file
-            results_file = os.path.join(self.result_dir, "kfold_results.txt")
-            with open(results_file, 'w') as f:
-                f.write("K-Fold Cross-Validation Results\n")
-                f.write("="*50 + "\n\n")
-                f.write(f"Architecture: {self.arch}\n")
-                f.write(f"Number of folds: {self.n_splits}\n")
-                f.write(f"Number of epochs per fold: {self.num_epochs}\n\n")
-                f.write("Results per fold:\n")
-                f.write("-"*50 + "\n")
-                for i, acc in enumerate(self.fold_results):
-                    f.write(f"Fold {i+1}: {acc:.2f}%\n")
-                f.write("\n" + "-"*50 + "\n")
-                f.write(f"Average Accuracy: {avg_acc:.2f}%\n")
-                f.write(f"Standard Deviation: {std_acc:.2f}%\n")
-            
-            self.logger.info(f"Results saved to: {results_file}")
-            self.logger.info("\nTraining completed successfully!")
-            
-            self.writer.close()
+            self.logger.info(f"Average Accuracy across all folds: {avg_acc:.2f}% ± {std_acc:.2f}%")
+            self.logger.info("="*60)
