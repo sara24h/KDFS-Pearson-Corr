@@ -17,7 +17,7 @@ from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from model.student.ResNet_sparse_video import ResNet_50_sparse_uadfv
-from utils.schedular import CosineAnnealingLRWarmup
+
 
 class FinetuneDDP:
     def __init__(self, args):
