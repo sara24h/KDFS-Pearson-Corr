@@ -30,6 +30,7 @@ class RCLoss(nn.Module):
 import warnings
 
 def compute_filter_correlation(filters, mask_weight, gumbel_temperature=1.0):
+    device = filters.device 
 
     if torch.isnan(filters).any():
         warnings.warn("Filters contain NaN.")
