@@ -68,6 +68,9 @@ def compute_filter_correlation(filters, mask_weight, gumbel_temperature=1.0):
         warnings.warn("Normalized filters contain Inf values.")
     
     corr_matrix = torch.matmul(filters_normalized, filters_normalized.t())
+    triu_indices = torch.triu_indices(num_filters, num_filters, offset=1, device=device)
+    upper_corr_values = corr_matrix[triu_indices[0], triu_indices[1]]
+    mean_upper_corr = upper_corr_values.mean().item()
     
     if torch.isnan(corr_matrix).any():
         warnings.warn("Correlation matrix contains NaN values.")
@@ -90,9 +93,12 @@ def compute_filter_correlation(filters, mask_weight, gumbel_temperature=1.0):
     if mask_probs.shape[0] != correlation_scores.shape[0]:
         warnings.warn("Shape mismatch between mask_probs and correlation_scores.")
 
+    if mask_probs.shape[0] != correlation_scores.shape[0]:
+        return torch.tensor(0.0, device=device, requires_grad=True), mean_upper_corr
+        
     correlation_loss = torch.mean(correlation_scores * mask_probs)
     
-    return correlation_loss
+    return correlation_loss, mean_upper_corr 
 
 class MaskLoss(nn.Module):
     def __init__(self):
