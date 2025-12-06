@@ -72,10 +72,11 @@ class FinetuneDDP:
         if self.rank == 0:
             os.makedirs(self.result_dir, exist_ok=True)
             self.writer = SummaryWriter(self.result_dir)
-            self.logger = utils.get_logger(os.path.join(self.result_dir, "finetune_logger.log"), "finetune_logger")
+            self.logger = utils.utils.get_logger(os.path.join(self.result_dir, "finetune_logger.log"), "finetune_logger")
+
             self.logger.info("Finetune configuration:")
             self.logger.info(str(vars(self.args)))
-            utils.record_config(self.args, os.path.join(self.result_dir, "finetune_config.txt"))
+            utils.utils.record_config(self.args, os.path.join(self.result_dir, "finetune_config.txt"))
             self.logger.info("--------- Finetune -----------")
 
     def setup_seed(self):
