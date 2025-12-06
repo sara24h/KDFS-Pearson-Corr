@@ -37,7 +37,6 @@ class TrainDDP:
         self.num_frames = getattr(args, 'num_frames', 16)
         self.frame_sampling = getattr(args, 'frame_sampling', 'uniform')
         self.n_splits = getattr(args, 'n_splits', 5)
-        
         self.lr = args.lr
         self.warmup_steps = args.warmup_steps
         self.warmup_start_lr = args.warmup_start_lr
@@ -48,7 +47,7 @@ class TrainDDP:
         self.eval_batch_size = args.eval_batch_size
         self.target_temperature = args.target_temperature
         self.gumbel_start_temperature = args.gumbel_start_temperature
-        self.gumbel_end_temperature = self.gumbel_end_temperature
+        self.gumbel_end_temperature = args.gumbel_end_temperature
         self.coef_kdloss = args.coef_kdloss
         self.coef_rcloss = args.coef_rcloss
         self.coef_maskloss = args.coef_maskloss
@@ -58,7 +57,7 @@ class TrainDDP:
         self.world_size = 0
         self.local_rank = -1
         self.rank = -1
-        self.fold_results = [] # برای ذخیره نتایج هر فولد
+        self.fold_results = [] 
 
         if self.dataset_mode == "uadfv":
             self.args.dataset_type = "uadfv"
