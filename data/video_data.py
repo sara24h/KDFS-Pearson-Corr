@@ -11,10 +11,10 @@ from pathlib import Path
 from torchvision import transforms
 from sklearn.model_selection import KFold, StratifiedKFold
 
+
 def set_global_seed(seed: int = 42):
     random.seed(seed)
-    # از default_rng برای سازگاری با نسخه‌های جدید numpy استفاده می‌کنیم
-    np.random.default_rng(seed).bit_generator.seed(seed)
+    np.random.seed(seed)                    # درست
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
@@ -22,16 +22,8 @@ def set_global_seed(seed: int = 42):
     os.environ['PYTHONHASHSEED'] = str(seed)
 
 def worker_init_fn(worker_id):
-    # مطمئن شوید که worker_seed یک عدد صحیح از نوع int باشد
     worker_seed = 42 + worker_id
-    # تبدیل به int در صورت لزوم
-    worker_seed = int(worker_seed)
-    
-    # از default_rng برای سازگاری با نسخه‌های جدید numpy استفاده می‌کنیم
-    rng = np.random.default_rng(42 + worker_id)
-    rng.bit_generator.seed(42 + worker_id)
-    
-    # تنظیم random و torch با seed صحیح
+    np.random.seed(worker_seed)
     random.seed(worker_seed)
     torch.manual_seed(worker_seed)
 
