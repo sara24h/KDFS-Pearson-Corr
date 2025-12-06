@@ -540,43 +540,45 @@ class TrainDDP:
                         val_preds = (torch.sigmoid(val_logits) > 0.5).float()
                         correct = (val_preds == val_targets).sum().item()
                         acc1 = 100.0 * correct / val_batch_size
+                        reduced_acc1 = self.reduce_tensor(torch.tensor(acc1, device='cuda'))
                         val_meter.update(acc1, val_batch_size)
+
+                if self.rank == 0:
+                    mask_avgs = self.get_mask_averages()
+                    val_flops = self.student.module.get_flops()
                 
-                mask_avgs = self.get_mask_averages()
-                val_flops = self.student.module.get_flops()
-                
-                self.logger.info(
-                    f"[Val][Fold {fold_idx+1}] Epoch {epoch}: Val_Acc={val_meter.avg:.2f}%"
-                )
-                self.logger.info(
-                    f"[Val Masks][Fold {fold_idx+1}] Epoch {epoch}: {mask_avgs}"
-                )
-                self.logger.info(
-                    f"[Val FLOPs][Fold {fold_idx+1}] Epoch {epoch}: {val_flops/1e6:.2f}M"
-                )
+                    self.logger.info(
+                        f"[Val][Fold {fold_idx+1}] Epoch {epoch}: Val_Acc={val_meter.avg:.2f}%"
+                    )
+                    self.logger.info(
+                        f"[Val Masks][Fold {fold_idx+1}] Epoch {epoch}: {mask_avgs}"
+                    )
+                    self.logger.info(
+                        f"[Val FLOPs][Fold {fold_idx+1}] Epoch {epoch}: {val_flops/1e6:.2f}M"
+                    )
                 
                 # Step schedulers
-                self.scheduler_student_weight.step()
-                self.scheduler_student_mask.step()
+                    self.scheduler_student_weight.step()
+                    self.scheduler_student_mask.step()
                 
                 # TensorBoard logging
-                self.writer.add_scalar(f"train/fold_{fold_idx+1}/lr", current_lr, epoch)
-                self.writer.add_scalar(f"train/fold_{fold_idx+1}/gumbel_temp", current_gumbel_temp, epoch)
-                self.writer.add_scalar(f"train/fold_{fold_idx+1}/acc", meter_top1.avg, epoch)
-                self.writer.add_scalar(f"train/fold_{fold_idx+1}/loss", meter_loss.avg, epoch)
-                self.writer.add_scalar(f"train/fold_{fold_idx+1}/flops", train_flops, epoch)
-                self.writer.add_scalar(f"val/fold_{fold_idx+1}/acc", val_meter.avg, epoch)
-                self.writer.add_scalar(f"val/fold_{fold_idx+1}/flops", val_flops, epoch)
+                    self.writer.add_scalar(f"train/fold_{fold_idx+1}/lr", current_lr, epoch)
+                    self.writer.add_scalar(f"train/fold_{fold_idx+1}/gumbel_temp", current_gumbel_temp, epoch)
+                    self.writer.add_scalar(f"train/fold_{fold_idx+1}/acc", meter_top1.avg, epoch)
+                    self.writer.add_scalar(f"train/fold_{fold_idx+1}/loss", meter_loss.avg, epoch)
+                    self.writer.add_scalar(f"train/fold_{fold_idx+1}/flops", train_flops, epoch)
+                    self.writer.add_scalar(f"val/fold_{fold_idx+1}/acc", val_meter.avg, epoch)
+                    self.writer.add_scalar(f"val/fold_{fold_idx+1}/flops", val_flops, epoch)
                 
                 # Save checkpoint
-                if val_meter.avg > self.best_prec1:
-                    self.best_prec1 = val_meter.avg
-                    self.logger.info(
-                        f"=> New best validation accuracy for Fold {fold_idx+1}: {self.best_prec1:.2f}%"
-                    )
-                    self.save_student_ckpt(is_best=True, epoch=epoch, fold_idx=fold_idx)
-                else:
-                    self.save_student_ckpt(is_best=False, epoch=epoch, fold_idx=fold_idx)
+                    if val_meter.avg > self.best_prec1:
+                        self.best_prec1 = val_meter.avg
+                        self.logger.info(
+                            f"=> New best validation accuracy for Fold {fold_idx+1}: {self.best_prec1:.2f}%"
+                        )
+                        self.save_student_ckpt(is_best=True, epoch=epoch, fold_idx=fold_idx)
+                    else:
+                        self.save_student_ckpt(is_best=False, epoch=epoch, fold_idx=fold_idx)
         
         # Save fold result
         if self.rank == 0:
