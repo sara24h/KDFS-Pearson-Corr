@@ -531,7 +531,7 @@ class TrainDDP:
             total_correct = 0
             total_samples = 0
                     
-            #val_meter = meter.AverageMeter("Acc@1", ":6.2f")
+            val_meter = meter.AverageMeter("Acc@1", ":6.2f")
                 
             with torch.no_grad():
                 for val_videos, val_targets in self.val_loader:
@@ -547,7 +547,9 @@ class TrainDDP:
                         
                     val_preds = (torch.sigmoid(val_logits) > 0.5).float()
                     correct = (val_preds == val_targets).sum().item()
-
+                    prec1 = 100.0 * correct / val_batch_size
+                    n = val_batch_size
+                    val_meter.update(prec1, n)
                     total_correct += correct
                     total_samples += val_batch_size
                     
