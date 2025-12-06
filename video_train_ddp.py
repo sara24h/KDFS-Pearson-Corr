@@ -12,7 +12,12 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
 
-#from data.video_data import Dataset_selector
+import cv2
+from pathlib import Path
+from torchvision import transforms
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
+
 from model.student.ResNet_sparse_video import (ResNet_50_sparse_uadfv, SoftMaskedConv2d)
 from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
 from model.student.GoogleNet_sparse import GoogLeNet_sparse_deepfake
@@ -24,7 +29,6 @@ from model.teacher.GoogleNet import GoogLeNet_deepfake
 from utils.loss import compute_filter_correlation
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-
 
 class TrainDDP:
     def __init__(self, args):
@@ -122,8 +126,7 @@ class TrainDDP:
 
     def dataload(self):
         if self.dataset_mode == "uadfv":
-            from data.video_data import dataload
-            
+            # Dataset loader is now defined in this file
             if self.rank == 0:
                 self.logger.info(f"Loading UADFV dataset from: {self.dataset_dir}")
                 self.logger.info(f"Number of frames per video: {self.num_frames}")
@@ -297,13 +300,56 @@ class TrainDDP:
                     mask_avgs.append(round(mask.mean().item(), 2))
         return mask_avgs
 
+    def validate(self, epoch):
+        """Validation function that runs on all GPUs"""
+        self.student.eval()
+        self.student.module.ticket = True
+        
+        val_meter = meter.AverageMeter("Acc@1", ":6.2f")
+        
+        with torch.no_grad():
+            for val_videos, val_targets in self.val_loader:
+                val_videos = val_videos.cuda(non_blocking=True)
+                val_targets = val_targets.cuda(non_blocking=True).float()
+                
+                val_batch_size, val_num_frames, C, H, W = val_videos.shape
+                val_frames = val_videos.view(-1, C, H, W)
+                
+                val_logits, _ = self.student(val_frames)
+                val_logits = val_logits.squeeze(1)
+                val_logits = val_logits.view(val_batch_size, val_num_frames).mean(dim=1)
+                
+                val_preds = (torch.sigmoid(val_logits) > 0.5).float()
+                correct = (val_preds == val_targets).sum().item()
+                acc1 = 100.0 * correct / val_batch_size
+                val_meter.update(acc1, val_batch_size)
+        
+        # Synchronize validation accuracy across all GPUs
+        dist.barrier()
+        val_acc_tensor = torch.tensor(val_meter.avg, device='cuda')
+        reduced_val_acc = self.reduce_tensor(val_acc_tensor)
+        
+        # Get mask averages and FLOPs (only on rank 0)
+        if self.rank == 0:
+            mask_avgs = self.get_mask_averages()
+            val_flops = self.student.module.get_flops()
+            
+            self.logger.info(f"[Val] Epoch {epoch} : Val_Acc {reduced_val_acc.item():.2f}")
+            self.logger.info(f"[Val mask avg] Epoch {epoch} : {mask_avgs}")
+            self.logger.info(f"[Val model Flops] Epoch {epoch} : {val_flops/1e6:.6f}M")
+        else:
+            mask_avgs = None
+            val_flops = None
+        
+        return reduced_val_acc.item(), mask_avgs, val_flops
+
     def train(self):
         if self.rank == 0:
             self.logger.info(f"Starting training from epoch: {self.start_epoch + 1}")
         
         torch.cuda.empty_cache()
         self.teacher.eval()
-        scaler = GradScaler()
+        scaler = GradScaler('cuda')
         
         if self.resume:
             self.resume_student_ckpt()
@@ -316,8 +362,6 @@ class TrainDDP:
             meter_maskloss = meter.AverageMeter("MaskLoss", ":.6e")
             meter_loss = meter.AverageMeter("Loss", ":.4e")
             meter_top1 = meter.AverageMeter("Acc@1", ":6.2f")
-            #meter_avg_corr = meter.AverageMeter("L_corr", ":.6f")
-            #meter_retention = meter.AverageMeter("Retention", ":.4f")
         
         for epoch in range(self.start_epoch + 1, self.num_epochs + 1):
             self.train_loader.sampler.set_epoch(epoch)
@@ -331,8 +375,6 @@ class TrainDDP:
                 meter_maskloss.reset()
                 meter_loss.reset()
                 meter_top1.reset()
-                #meter_avg_corr.reset()
-                #meter_retention.reset()
                 current_lr = self.optim_weight.param_groups[0]['lr']
             
             self.student.module.update_gumbel_temperature(epoch)
@@ -361,7 +403,7 @@ class TrainDDP:
                             self.logger.warning("Invalid input detected (NaN or Inf)")
                         continue
                     
-                    with autocast():
+                    with autocast('cuda'):
                         # ============ Student forward ============
                         logits_student, feature_list_student = self.student(images)
                         logits_student = logits_student.squeeze(1)  # [B*T]
@@ -383,10 +425,7 @@ class TrainDDP:
                         # ============ RC Loss (FIXED) ============
                         rc_loss = torch.tensor(0.0, device=images.device, dtype=torch.float32)
                         
-                        if len(feature_list_student) == 0:
-                            if self.rank == 0 and batch_idx == 0:
-                                self.logger.warning("Feature list is empty! Model may not be returning features.")
-                        else:
+                        if len(feature_list_student) > 0:
                             num_layers = len(feature_list_student)
                             
                             for i in range(num_layers):
@@ -415,22 +454,6 @@ class TrainDDP:
                             self.coef_rcloss * rc_loss +
                             self.coef_maskloss * mask_loss
                         )
-                        
-                        # ============ Compute correlation & retention ============
-                        total_corr, total_ret = 0.0, 0.0
-                        n_layers = 0
-                        for m in self.student.module.mask_modules:
-                            if isinstance(m, SoftMaskedConv2d):
-                                corr, ret = compute_filter_correlation(
-                                    m.weight, m.mask_weight,
-                                    self.student.module.gumbel_temperature)
-                                total_corr += corr.item()
-                                total_ret += float(ret)
-                                n_layers += 1
-                        
-                        
-                        #avg_corr = total_corr / n_layers if n_layers > 0 else 0.0
-                        #avg_ret = total_ret / n_layers if n_layers > 0 else 0.0
                     
                     # ============ Backward & Optimizer step ============
                     scaler.scale(total_loss).backward()
@@ -452,9 +475,6 @@ class TrainDDP:
                     reduced_total_loss = self.reduce_tensor(total_loss.detach())
                     reduced_prec1 = self.reduce_tensor(torch.tensor(prec1, device='cuda'))
                     
-                    #reduced_avg_corr = self.reduce_tensor(torch.tensor(avg_corr, device='cuda'))
-                    #reduced_avg_ret = self.reduce_tensor(torch.tensor(avg_ret, device='cuda'))
-                    
                     # ============ Update meters (rank 0 only) ============
                     if self.rank == 0:
                         meter_oriloss.update(reduced_ori_loss.item(), batch_size)
@@ -463,8 +483,6 @@ class TrainDDP:
                         meter_maskloss.update(self.coef_maskloss * reduced_mask_loss.item(), batch_size)
                         meter_loss.update(reduced_total_loss.item(), batch_size)
                         meter_top1.update(reduced_prec1.item(), batch_size)
-                        #meter_avg_corr.update(reduced_avg_corr.item(), batch_size)
-                        #meter_retention.update(reduced_avg_ret.item(), batch_size)
                         
                         _tqdm.set_postfix(
                             loss=f"{meter_loss.avg:.4f}",
@@ -486,38 +504,12 @@ class TrainDDP:
                     f"Train_Acc {meter_top1.avg:.2f}"
                 )
                 self.logger.info(f"[Train model Flops] Epoch {epoch} : {train_flops/1e6:.6f}M")
-               
             
-            # ============ Validation ============
+            # ============ Validation (runs on ALL GPUs) ============
+            val_acc, mask_avgs, val_flops = self.validate(epoch)
+            
+            # ============ Update schedulers & save checkpoints (rank 0 only) ============
             if self.rank == 0:
-                self.student.eval()
-                self.student.module.ticket = True
-                val_meter = meter.AverageMeter("Acc@1", ":6.2f")
-                
-                with torch.no_grad():
-                    for val_videos, val_targets in self.val_loader:
-                        val_videos = val_videos.cuda(non_blocking=True)
-                        val_targets = val_targets.cuda(non_blocking=True).float()
-                        
-                        val_batch_size, val_num_frames, C, H, W = val_videos.shape
-                        val_frames = val_videos.view(-1, C, H, W)
-                        
-                        val_logits, _ = self.student(val_frames)
-                        val_logits = val_logits.squeeze(1)
-                        val_logits = val_logits.view(val_batch_size, val_num_frames).mean(dim=1)
-                        
-                        val_preds = (torch.sigmoid(val_logits) > 0.5).float()
-                        correct = (val_preds == val_targets).sum().item()
-                        acc1 = 100.0 * correct / val_batch_size
-                        val_meter.update(acc1, val_batch_size)
-                
-                mask_avgs = self.get_mask_averages()
-                val_flops = self.student.module.get_flops()
-                
-                self.logger.info(f"[Val] Epoch {epoch} : Val_Acc {val_meter.avg:.2f}")
-                self.logger.info(f"[Val mask avg] Epoch {epoch} : {mask_avgs}")
-                self.logger.info(f"[Val model Flops] Epoch {epoch} : {val_flops/1e6:.6f}M")
-                
                 # Update schedulers
                 self.scheduler_student_weight.step()
                 self.scheduler_student_mask.step()
@@ -532,14 +524,12 @@ class TrainDDP:
                 self.writer.add_scalar("train/rc_loss", meter_rcloss.avg, epoch)
                 self.writer.add_scalar("train/mask_loss", meter_maskloss.avg, epoch)
                 self.writer.add_scalar("train/flops", train_flops, epoch)
-                #self.writer.add_scalar("train/avg_corr", meter_avg_corr.avg, epoch)
-                #self.writer.add_scalar("train/retention", meter_retention.avg, epoch)
-                self.writer.add_scalar("val/acc", val_meter.avg, epoch)
+                self.writer.add_scalar("val/acc", val_acc, epoch)
                 self.writer.add_scalar("val/flops", val_flops, epoch)
                 
                 # Save checkpoint
-                if val_meter.avg > self.best_prec1:
-                    self.best_prec1 = val_meter.avg
+                if val_acc > self.best_prec1:
+                    self.best_prec1 = val_acc
                     self.logger.info(f" => Best top1 accuracy on validation: {self.best_prec1:.2f}")
                     self.save_student_ckpt(is_best=True, epoch=epoch)
                 else:
