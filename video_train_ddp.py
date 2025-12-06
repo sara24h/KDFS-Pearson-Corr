@@ -527,8 +527,11 @@ class TrainDDP:
             for buf in self.student.buffers():
                 if buf.device != torch.device('cuda'):
                     buf.data = buf.data.cuda()
+
+            total_correct = 0
+            total_samples = 0
                     
-            val_meter = meter.AverageMeter("Acc@1", ":6.2f")
+            #val_meter = meter.AverageMeter("Acc@1", ":6.2f")
                 
             with torch.no_grad():
                 for val_videos, val_targets in self.val_loader:
@@ -544,9 +547,15 @@ class TrainDDP:
                         
                     val_preds = (torch.sigmoid(val_logits) > 0.5).float()
                     correct = (val_preds == val_targets).sum().item()
-                    acc1 = 100.0 * correct / val_batch_size
-                    reduced_acc1 = self.reduce_tensor(torch.tensor(acc1, device='cuda'))
-                    val_meter.update(reduced_acc1.item(), val_batch_size)
+
+                    total_correct += correct
+                    total_samples += val_batch_size
+                    
+            total_correct_tensor = torch.tensor(total_correct, device='cuda')
+            total_samples_tensor = torch.tensor(total_samples, device='cuda')
+            
+            dist.all_reduce(total_correct_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(total_samples_tensor, op=dist.ReduceOp.SUM)
 
 
             if self.rank == 0:
