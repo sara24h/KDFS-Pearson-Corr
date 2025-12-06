@@ -116,7 +116,7 @@ class MaskLoss(nn.Module):
                 filters = m.weight  
                 mask_weight = m.mask_weight 
                 gumbel_temperature = m.gumbel_temperature 
-                pruning_loss = compute_filter_correlation(filters, mask_weight, gumbel_temperature)
+                pruning_loss, _ = compute_filter_correlation(filters, mask_weight, gumbel_temperature)
                 total_pruning_loss += pruning_loss
                 num_layers += 1
         
