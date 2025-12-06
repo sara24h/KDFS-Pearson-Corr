@@ -616,9 +616,9 @@ class TrainDDP:
         
         # Store original resume path
         original_resume = self.resume
-        
-        # Train each fold
-        for fold_idx, train_loader, val_loader in self.fold_loaders:
+
+        for fold_idx, (train_loader, val_loader) in enumerate(self.fold_loaders):
+
             if self.rank == 0:
                 self.logger.info(f"\n{'='*70}")
                 self.logger.info(f"Preparing Fold {fold_idx + 1}/{self.n_splits}")
