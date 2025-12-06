@@ -476,21 +476,21 @@ class TrainDDP:
         self.build_model()
         self.define_loss()
         self.define_optim()
-
-        for fold_idx, self.train_loader, self.val_loader in self.dataloader_generator:
-
+    
+    # دریافت fold_loaders و test_loader
+        fold_loaders, test_loader = self.dataloader_generator
+    
+    # حلقه روی fold_loaders
+        for fold_idx, self.train_loader, self.val_loader in fold_loaders:
             self.best_prec1 = 0
             self.start_epoch = 0
-
             if self.resume:
-    
                 if fold_idx == 0:
                     self.resume_student_ckpt()
                 else:
                     self.resume = None
-
             self.train(fold_idx)
-
+    
         if self.rank == 0:
             self.logger.info("="*60)
             self.logger.info("K-Fold Cross-Validation Finished!")
