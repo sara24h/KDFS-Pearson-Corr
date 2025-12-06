@@ -1,26 +1,16 @@
-import json
-import os
-import random
-import time
-from datetime import datetime
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
-from torch.cuda.amp import autocast, GradScaler
-# --- بخش دیتالودر که از کد اولیه شما کپی شده ---
+# data/video_dataset.py
+
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 import cv2
+import numpy as np
+import random
+import os
 from pathlib import Path
 from torchvision import transforms
 from sklearn.model_selection import KFold, StratifiedKFold
 
-# !!! تعریف تابع set_global_seed در اینجا قرار دارد !!!
 def set_global_seed(seed: int = 42):
     random.seed(seed)
     np.random.seed(seed)
@@ -47,7 +37,7 @@ class UADFVDataset(Dataset):
         self.sampling_strategy = sampling_strategy
         self.is_training = is_training
         self.seed = seed
-        # اگر transform داده نشده، بر اساس is_training تصمیم‌گیری می‌شود
+        
         if transform is None:
             if is_training:
                 self.transform = transforms.Compose([
@@ -69,8 +59,10 @@ class UADFVDataset(Dataset):
                 ])
         else:
             self.transform = transform
+            
         self.video_list = self._load_videos()
-        if dist.is_initialized() and dist.get_rank() == 0:
+        # چاپ فقط در رنک 0 برای جلوگیری از شلوغی در DDP
+        if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
             print(f"Total {len(self.video_list)} videos loaded.")
 
     def _load_videos(self):
@@ -185,7 +177,7 @@ def create_kfold_dataloaders(
         splits = kfold.split(np.zeros(len(labels)))
    
     for fold_idx, (train_indices, val_indices) in enumerate(splits):
-        if dist.is_initialized() and dist.get_rank() == 0:
+        if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
             print(f"\n{'='*60}")
             print(f"Fold {fold_idx + 1}/{n_splits}")
             print(f"Train samples: {len(train_indices)}, Val samples: {len(val_indices)}")
