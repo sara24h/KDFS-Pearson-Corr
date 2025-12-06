@@ -17,7 +17,6 @@ from pathlib import Path
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
-
 from model.student.ResNet_sparse_video import (ResNet_50_sparse_uadfv, SoftMaskedConv2d)
 from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
 from model.student.GoogleNet_sparse import GoogLeNet_sparse_deepfake
@@ -27,9 +26,7 @@ from model.teacher.ResNet import ResNet_50_hardfakevsreal
 from model.teacher.Mobilenetv2 import MobileNetV2_deepfake
 from model.teacher.GoogleNet import GoogLeNet_deepfake
 from utils.loss import compute_filter_correlation
-
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-
 class TrainDDP:
     def __init__(self, args):
         self.args = args
@@ -72,6 +69,8 @@ class TrainDDP:
         self.local_rank = -1
         self.rank = -1
         
+        self.device = torch.device(f'cuda:{self.local_rank}' if torch.cuda.is_available() else 'cpu')
+        
         if self.dataset_mode == "uadfv":
             self.args.dataset_type = "uadfv"
             self.num_classes = 1
@@ -83,14 +82,12 @@ class TrainDDP:
         if self.arch not in ['resnet50', 'mobilenetv2', 'googlenet']:
             raise ValueError(f"Unsupported architecture: '{args.arch}'. "
                            "It must be 'resnet50', 'mobilenetv2', or 'googlenet'.")
-
     def dist_init(self):
         dist.init_process_group("nccl")
         self.world_size = dist.get_world_size()
         self.rank = dist.get_rank()
         self.local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(self.local_rank)
-
     def result_init(self):
         if self.rank == 0:
             if not os.path.exists(self.result_dir):
@@ -106,7 +103,6 @@ class TrainDDP:
                 self.args, os.path.join(self.result_dir, "train_config.txt")
             )
             self.logger.info("--------- Train -----------")
-
     def setup_seed(self):
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
         torch.use_deterministic_algorithms(True)
@@ -123,7 +119,6 @@ class TrainDDP:
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
             torch.backends.cudnn.enabled = True
-
     def dataload(self):
         if self.dataset_mode == "uadfv":
             # Dataset loader is now defined in this file
@@ -148,7 +143,6 @@ class TrainDDP:
             
             if self.rank == 0:
                 self.logger.info("UADFV Dataset has been loaded!")
-
     def build_model(self):
         if self.rank == 0:
             self.logger.info("==> Building model..")
@@ -177,7 +171,7 @@ class TrainDDP:
             state_dict = new_state_dict
         
         teacher_model.load_state_dict(state_dict, strict=True)
-        self.teacher = teacher_model.cuda()
+        self.teacher = teacher_model.to(self.device)
         
         # Student model
         if self.rank == 0:
@@ -196,36 +190,29 @@ class TrainDDP:
             gumbel_start_temperature=self.gumbel_start_temperature,
             gumbel_end_temperature=self.gumbel_end_temperature,
             num_epochs=self.num_epochs,
-        )
+        ).to(self.device)
         self.student.dataset_type = self.args.dataset_type
         
         # Modify final layer for binary classification
         if self.arch == 'mobilenetv2':
             num_ftrs = self.student.classifier.in_features
-            self.student.classifier = nn.Linear(num_ftrs, 1)
+            self.student.classifier = nn.Linear(num_ftrs, 1).to(self.device)
         elif self.arch == 'googlenet':
             num_ftrs = self.student.fc.in_features
-            self.student.fc = nn.Linear(num_ftrs, 1)
-        else:  # resnet50
+            self.student.fc = nn.Linear(num_ftrs, 1).to(self.device)
+        else: # resnet50
             num_ftrs = self.student.fc.in_features
-            self.student.fc = nn.Linear(num_ftrs, 1)
+            self.student.fc = nn.Linear(num_ftrs, 1).to(self.device)
         
-        self.student = self.student.cuda()
-        self.student = DDP(self.student, device_ids=[self.local_rank])
-
+        self.student = DDP(self.student, device_ids=[self.local_rank], find_unused_parameters=True)
     def define_loss(self):
-        self.ori_loss = nn.BCEWithLogitsLoss().cuda()
-        self.kd_loss = loss.KDLoss().cuda()
-        self.rc_loss = loss.RCLoss().cuda()
-        self.mask_loss = loss.MaskLoss().cuda()
-
+        self.ori_loss = nn.BCEWithLogitsLoss().to(self.device)
+        self.kd_loss = loss.KDLoss().to(self.device)
+        self.rc_loss = loss.RCLoss().to(self.device)
+        self.mask_loss = loss.MaskLoss().to(self.device)
     def define_optim(self):
-        weight_params = map(lambda p: p[1],
-                          filter(lambda p: p[1].requires_grad and "mask" not in p[0],
-                                self.student.module.named_parameters()))
-        mask_params = map(lambda p: p[1],
-                        filter(lambda p: p[1].requires_grad and "mask" in p[0],
-                              self.student.module.named_parameters()))
+        weight_params = [p[1] for p in self.student.named_parameters() if p[1].requires_grad and "mask" not in p[0]]
+        mask_params = [p[1] for p in self.student.named_parameters() if p[1].requires_grad and "mask" in p[0]]
         
         self.optim_weight = torch.optim.Adamax(weight_params,
                                              lr=self.lr,
@@ -244,15 +231,14 @@ class TrainDDP:
             eta_min=self.lr_decay_eta_min, last_epoch=-1,
             warmup_steps=self.warmup_steps,
             warmup_start_lr=self.warmup_start_lr)
-
     def resume_student_ckpt(self):
         if not os.path.exists(self.resume):
             raise FileNotFoundError(f"Checkpoint file not found: {self.resume}")
         
-        ckpt_student = torch.load(self.resume, map_location="cpu", weights_only=True)
+        ckpt_student = torch.load(self.resume, map_location=self.device, weights_only=True)
         self.best_prec1 = ckpt_student["best_prec1"]
         self.start_epoch = ckpt_student["start_epoch"]
-        self.student.module.load_state_dict(ckpt_student["student"])
+        self.student.load_state_dict(ckpt_student["student"])
         self.optim_weight.load_state_dict(ckpt_student["optim_weight"])
         self.optim_mask.load_state_dict(ckpt_student["optim_mask"])
         self.scheduler_student_weight.load_state_dict(ckpt_student["scheduler_student_weight"])
@@ -260,7 +246,6 @@ class TrainDDP:
         
         if self.rank == 0:
             self.logger.info(f"=> Continue from epoch {self.start_epoch + 1}...")
-
     def save_student_ckpt(self, is_best, epoch):
         if self.rank == 0:
             folder = os.path.join(self.result_dir, "student_model")
@@ -270,7 +255,7 @@ class TrainDDP:
             ckpt_student = {
                 "best_prec1": self.best_prec1,
                 "start_epoch": epoch,
-                "student": self.student.module.state_dict(),
+                "student": self.student.state_dict(),
                 "optim_weight": self.optim_weight.state_dict(),
                 "optim_mask": self.optim_mask.state_dict(),
                 "scheduler_student_weight": self.scheduler_student_weight.state_dict(),
@@ -283,34 +268,31 @@ class TrainDDP:
             
             torch.save(ckpt_student,
                      os.path.join(folder, self.arch + "_sparse_last.pt"))
-
     def reduce_tensor(self, tensor):
         rt = tensor.clone()
         dist.all_reduce(rt, op=dist.ReduceOp.SUM)
         rt /= self.world_size
         return rt
-
     def get_mask_averages(self):
         """Get average mask values for each layer"""
         mask_avgs = []
-        for m in self.student.module.mask_modules:
+        for m in self.student.mask_modules:
             if isinstance(m, SoftMaskedConv2d):
                 with torch.no_grad():
                     mask = torch.sigmoid(m.mask_weight)
                     mask_avgs.append(round(mask.mean().item(), 2))
         return mask_avgs
-
     def validate(self, epoch):
         """Validation function that runs on all GPUs"""
         self.student.eval()
-        self.student.module.ticket = True
+        self.student.ticket = True
         
         val_meter = meter.AverageMeter("Acc@1", ":6.2f")
         
         with torch.no_grad():
             for val_videos, val_targets in self.val_loader:
-                val_videos = val_videos.cuda(non_blocking=True)
-                val_targets = val_targets.cuda(non_blocking=True).float()
+                val_videos = val_videos.to(self.device, non_blocking=True)
+                val_targets = val_targets.to(self.device, non_blocking=True).float()
                 
                 val_batch_size, val_num_frames, C, H, W = val_videos.shape
                 val_frames = val_videos.view(-1, C, H, W)
@@ -326,13 +308,13 @@ class TrainDDP:
         
         # Synchronize validation accuracy across all GPUs
         dist.barrier()
-        val_acc_tensor = torch.tensor(val_meter.avg, device='cuda')
+        val_acc_tensor = torch.tensor(val_meter.avg, device=self.device)
         reduced_val_acc = self.reduce_tensor(val_acc_tensor)
         
         # Get mask averages and FLOPs (only on rank 0)
         if self.rank == 0:
             mask_avgs = self.get_mask_averages()
-            val_flops = self.student.module.get_flops()
+            val_flops = self.student.get_flops()
             
             self.logger.info(f"[Val] Epoch {epoch} : Val_Acc {reduced_val_acc.item():.2f}")
             self.logger.info(f"[Val mask avg] Epoch {epoch} : {mask_avgs}")
@@ -342,14 +324,13 @@ class TrainDDP:
             val_flops = None
         
         return reduced_val_acc.item(), mask_avgs, val_flops
-
     def train(self):
         if self.rank == 0:
             self.logger.info(f"Starting training from epoch: {self.start_epoch + 1}")
         
         torch.cuda.empty_cache()
         self.teacher.eval()
-        scaler = GradScaler(device='cuda')
+        scaler = GradScaler('cuda')
         
         if self.resume:
             self.resume_student_ckpt()
@@ -366,7 +347,7 @@ class TrainDDP:
         for epoch in range(self.start_epoch + 1, self.num_epochs + 1):
             self.train_loader.sampler.set_epoch(epoch)
             self.student.train()
-            self.student.module.ticket = False
+            self.student.ticket = False
             
             if self.rank == 0:
                 meter_oriloss.reset()
@@ -377,8 +358,8 @@ class TrainDDP:
                 meter_top1.reset()
                 current_lr = self.optim_weight.param_groups[0]['lr']
             
-            self.student.module.update_gumbel_temperature(epoch)
-            current_gumbel_temp = self.student.module.gumbel_temperature
+            self.student.update_gumbel_temperature(epoch)
+            current_gumbel_temp = self.student.gumbel_temperature
             
             with tqdm(total=len(self.train_loader), ncols=100, disable=self.rank != 0) as _tqdm:
                 if self.rank == 0:
@@ -390,11 +371,11 @@ class TrainDDP:
                     
                     # Video dataset processing
                     videos, targets = batch_data
-                    videos = videos.cuda(non_blocking=True)
-                    targets = targets.cuda(non_blocking=True).float()
+                    videos = videos.to(self.device, non_blocking=True)
+                    targets = targets.to(self.device, non_blocking=True).float()
                     
                     batch_size, num_frames, C, H, W = videos.shape
-                    images = videos.view(-1, C, H, W)  # [B*T, C, H, W]
+                    images = videos.view(-1, C, H, W) # [B*T, C, H, W]
                     
                     # Check for invalid inputs
                     if torch.isnan(images).any() or torch.isinf(images).any() or \
@@ -406,14 +387,14 @@ class TrainDDP:
                     with autocast(device_type='cuda'):
                         # ============ Student forward ============
                         logits_student, feature_list_student = self.student(images)
-                        logits_student = logits_student.squeeze(1)  # [B*T]
-                        logits_student = logits_student.view(batch_size, num_frames).mean(dim=1)  # [B]
+                        logits_student = logits_student.squeeze(1) # [B*T]
+                        logits_student = logits_student.view(batch_size, num_frames).mean(dim=1) # [B]
                         
                         # ============ Teacher forward ============
                         with torch.no_grad():
                             logits_teacher, feature_list_teacher = self.teacher(images)
-                            logits_teacher = logits_teacher.squeeze(1)  # [B*T]
-                            logits_teacher = logits_teacher.view(batch_size, num_frames).mean(dim=1)  # [B]
+                            logits_teacher = logits_teacher.squeeze(1) # [B*T]
+                            logits_teacher = logits_teacher.view(batch_size, num_frames).mean(dim=1) # [B]
                         
                         # ============ Original Loss ============
                         ori_loss = self.ori_loss(logits_student, targets)
@@ -423,19 +404,19 @@ class TrainDDP:
                             logits_teacher, logits_student, self.target_temperature)
                         
                         # ============ RC Loss (FIXED) ============
-                        rc_loss = torch.tensor(0.0, device=images.device, dtype=torch.float32)
+                        rc_loss = torch.tensor(0.0, device=self.device, dtype=torch.float32)
                         
                         if len(feature_list_student) > 0:
                             num_layers = len(feature_list_student)
                             
                             for i in range(num_layers):
-                                feat_s = feature_list_student[i]  # [B*T, C, H, W]
-                                feat_t = feature_list_teacher[i]  # [B*T, C, H, W]
+                                feat_s = feature_list_student[i] # [B*T, C, H, W]
+                                feat_t = feature_list_teacher[i] # [B*T, C, H, W]
                                 
                                 # Reshape to [B, T, C, H, W] then average over time
                                 _, c, h, w = feat_s.shape
-                                feat_s_video = feat_s.view(batch_size, num_frames, c, h, w).mean(dim=1)  # [B, C, H, W]
-                                feat_t_video = feat_t.view(batch_size, num_frames, c, h, w).mean(dim=1)  # [B, C, H, W]
+                                feat_s_video = feat_s.view(batch_size, num_frames, c, h, w).mean(dim=1) # [B, C, H, W]
+                                feat_t_video = feat_t.view(batch_size, num_frames, c, h, w).mean(dim=1) # [B, C, H, W]
                                 
                                 # Compute RC loss for this layer
                                 layer_rc_loss = self.rc_loss(feat_s_video, feat_t_video)
@@ -445,7 +426,7 @@ class TrainDDP:
                             rc_loss = rc_loss / num_layers
                         
                         # ============ Mask Loss ============
-                        mask_loss = self.mask_loss(self.student.module)
+                        mask_loss = self.mask_loss(self.student)
                         
                         # ============ Total Loss ============
                         total_loss = (
@@ -473,7 +454,7 @@ class TrainDDP:
                     reduced_rc_loss = self.reduce_tensor(rc_loss.detach())
                     reduced_mask_loss = self.reduce_tensor(mask_loss.detach())
                     reduced_total_loss = self.reduce_tensor(total_loss.detach())
-                    reduced_prec1 = self.reduce_tensor(torch.tensor(prec1, device='cuda'))
+                    reduced_prec1 = self.reduce_tensor(torch.tensor(prec1, device=self.device))
                     
                     # ============ Update meters (rank 0 only) ============
                     if self.rank == 0:
@@ -493,8 +474,8 @@ class TrainDDP:
             # ============ Log training results ============
             if self.rank == 0:
                 # Calculate train FLOPs
-                self.student.module.ticket = False
-                train_flops = self.student.module.get_flops()
+                self.student.ticket = False
+                train_flops = self.student.get_flops()
                 
                 self.logger.info(
                     f"[Train] Epoch {epoch} : Gumbel_temp {current_gumbel_temp:.2f} "
@@ -538,7 +519,6 @@ class TrainDDP:
         if self.rank == 0:
             self.logger.info("Training finished!")
             self.writer.close()
-
     def main(self):
         self.dist_init()
         self.result_init()
