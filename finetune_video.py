@@ -14,7 +14,7 @@ from data.video_data import create_uadfv_dataloaders
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
-
+from model.student.ResNet_sparse_video import ResNet_50_sparse_uadfv
 class FinetuneDDP:
     def __init__(self, args):
         """Initialize FinetuneDDP with provided arguments."""
@@ -121,7 +121,7 @@ class FinetuneDDP:
             self.logger.info("Loading student model")
         
         # اگر چک‌پوینت وجود داشت، لود می‌کنیم، در غیر این صورت مدل رو از نو می‌سازیم
-        self.student = ResNet_50_sparse_hardfakevsreal()
+        self.student = ResNet_50_sparse_uadfv()
         if os.path.exists(self.finetune_student_ckpt_path):
             ckpt_student = torch.load(self.finetune_student_ckpt_path, map_location="cpu")
             # فرض می‌کنیم چک‌پوینت state_dict مدل را تحت کلید 'student' دارد
