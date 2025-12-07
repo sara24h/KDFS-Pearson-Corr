@@ -9,10 +9,11 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from pathlib import Path
 import random
+from torchvision.models import resnet50 # اضافه شده
+from thop import profile 
 from model.student.ResNet_sparse_video import ResNet_50_sparse_uadfv
-from thop import profile
-from utils import meter
 
+# --- تنظیم اولیه برای تکرارپذیری نتایج ---
 def set_global_seed(seed: int = 42):
     random.seed(seed)
     np.random.seed(seed)
@@ -127,7 +128,6 @@ def create_uadfv_dataloaders(root_dir, num_frames=16, image_size=256, train_batc
     val_ds   = UADFVDataset(root_dir, num_frames, image_size, sampling_strategy=sampling_strategy, split='val', seed=seed)
     test_ds  = UADFVDataset(root_dir, num_frames, image_size, sampling_strategy=sampling_strategy, split='test', seed=seed)
     sampler = None
-    shuffle = True
     test_loader = DataLoader(test_ds, batch_size=eval_batch_size, shuffle=False, sampler=sampler, num_workers=num_workers, pin_memory=pin_memory, worker_init_fn=worker_init_fn)
     return test_loader
 
@@ -150,7 +150,6 @@ class Test:
 
     def dataload(self):
         print(f"==> Loading {self.dataset_mode} test dataset..")
-        # --- اصلاح: استفاده مستقیم از تابع سازنده دیتالودر UADFV ---
         if self.dataset_mode == 'uadfv':
             self.test_loader = create_uadfv_dataloaders(
                 root_dir=self.dataset_dir,
@@ -169,9 +168,8 @@ class Test:
 
     def build_model(self):
         print("==> Building student model..")
-        # --- اصلاح: استفاده از مدل صحیح UADFV ---
         self.student = ResNet_50_sparse_uadfv()
-        self.student.dataset_type = "uadfv" # تنظیم نوع دیتاست برای محاسبه صحیح FLOPs
+        self.student.dataset_type = "uadfv" 
         
         if not os.path.exists(self.sparsed_student_ckpt_path):
             raise FileNotFoundError(f"Checkpoint file not found: {self.sparsed_student_ckpt_path}")
@@ -192,56 +190,66 @@ class Test:
         print(f"Model loaded on {self.device}")
 
     def test(self):
-        meter_top1 = meter.AverageMeter("Acc@1", ":6.2f")
         self.student.eval()
         self.student.ticket = True  # فعال کردن حالت نهایی پرuning
 
+        # --- بخش جدید: محاسبه FLOPs و پارامترهای مدل دانشجو ---
         input_tensor = torch.randn(1, 3, self.image_size, self.image_size).to(self.device)
-        flops_per_frame, params = profile(self.student, inputs=(input_tensor,), verbose=False)
+        flops_pruned, params_pruned = profile(self.student, inputs=(input_tensor,), verbose=False)
         
-
-        avg_frames_per_video = 348
-        flops_per_avg_video = flops_per_frame * avg_frames_per_video
+        # --- بخش جدید: محاسبه FLOPs و پارامترهای مدل پایه (Baseline) ---
+        print("\nCalculating baseline metrics for standard ResNet-50...")
+        baseline_model = resnet50(pretrained=False)
+        baseline_model.fc = nn.Linear(baseline_model.fc.in_features, 1) # تطبیق لایه نهایی
+        baseline_model.to(self.device)
+        flops_baseline, params_baseline = profile(baseline_model, inputs=(input_tensor,), verbose=False)
         
+        # --- بخش جدید: محاسبه درصد کاهش ---
+        params_reduction = (params_baseline - params_pruned) / params_baseline * 100
+        flops_reduction = (flops_baseline - flops_pruned) / flops_baseline * 100
+        
+        # --- گزارش نهایی ---
         print("\n" + "="*70)
-        print("Model Metrics (after pruning):")
+        print("Final Comparison Report")
         print("="*70)
-        print(f"  - Total Parameters: {params/1e6:.2f} M")
-        print(f"  - FLOPs per Frame: {flops_per_frame/1e9:.2f} GFLOPs")
-        print(f"  - FLOPs per Avg Video: {flops_per_avg_video/1e12:.2f} TFLOPs")
+        print(f"Baseline Model (Standard ResNet-50):")
+        print(f"  - Total Parameters: {params_baseline/1e6:.2f} M")
+        print(f"  - FLOPs per Frame: {flops_baseline/1e9:.2f} GFLOPs")
+        print("-" * 70)
+        print(f"Pruned Student Model:")
+        print(f"  - Total Parameters: {params_pruned/1e6:.2f} M")
+        print(f"  - FLOPs per Frame: {flops_pruned/1e9:.2f} GFLOPs")
+        print("-" * 70)
+        print(f"Reduction:")
+        print(f"  - Params reduction: {params_reduction:.2f}%")
+        print(f"  - FLOPs reduction: {flops_reduction:.2f}%")
         print("="*70)
+        
+        # --- بخش تست دقت ---
+        # از آنجایی که meter را نداریم، یک ساده پیاده‌سازی می‌کنیم
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            with tqdm(total=len(self.test_loader), ncols=100, desc="Testing") as _tqdm:
+                for images, targets in self.test_loader:
+                    images = images.to(self.device, non_blocking=True)
+                    targets = targets.to(self.device, non_blocking=True).float()
+                    
+                    batch_size, num_frames, C, H, W = images.shape
+                    images = images.view(-1, C, H, W)
 
-        try:
-            with torch.no_grad():
-                with tqdm(total=len(self.test_loader), ncols=100, desc="Testing") as _tqdm:
-                    for images, targets in self.test_loader:
-                        images = images.to(self.device, non_blocking=True)
-                        targets = targets.to(self.device, non_blocking=True).float()
-                        
-                        # --- اصلاح: تغییر شکل ورودی برای مدل ---
-                        # مدل ورودی (batch, C, H, W) می‌خواهد، نه (batch, T, C, H, W)
-                        batch_size, num_frames, C, H, W = images.shape
-                        images = images.view(-1, C, H, W) # (batch * T, C, H, W)
-                        
-                        logits_student, _ = self.student(images)
-                        
-                        # --- اصلاح: بازگرداندن شکل خروجی و میانگین‌گیری بر روی فریم‌ها ---
-                        logits_student = logits_student.squeeze(1)
-                        logits_student = logits_student.view(batch_size, num_frames).mean(dim=1)
-                        
-                        preds = (torch.sigmoid(logits_student) > 0.5).float()
-                        correct = (preds == targets).sum().item()
-                        prec1 = 100.0 * correct / targets.size(0)
-                        meter_top1.update(prec1, targets.size(0))
+                    logits_student, _ = self.student(images)
+                    logits_student = logits_student.squeeze(1)
+                    logits_student = logits_student.view(batch_size, num_frames).mean(dim=1)
+                    
+                    preds = (torch.sigmoid(logits_student) > 0.5).float()
+                    correct += (preds == targets).sum().item()
+                    total += targets.size(0)
 
-                        _tqdm.set_postfix(Acc=f"{meter_top1.avg:.2f}%")
-                        _tqdm.update(1)
+                    _tqdm.set_postfix(Acc=f"{(100.*correct/total):.2f}%")
+                    _tqdm.update(1)
 
-            print(f"\n[Test] Final Accuracy on {self.dataset_mode} dataset: {meter_top1.avg:.2f}%")
-           
-        except Exception as e:
-            print(f"Error during testing: {str(e)}")
-            raise
+        print(f"\n[Test] Final Accuracy on {self.dataset_mode} dataset: {100.*correct/total:.2f}%")
 
     def main(self):
         print(f"Starting test pipeline for dataset: {self.dataset_mode}")
@@ -258,17 +266,16 @@ class Args:
         self.pin_memory = True
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.test_batch_size = 8
-        self.sparsed_student_ckpt_path = '/kaggle/working/results/run_resnet50_imagenet_prune1/student_model/resnet50_sparse_best.pt' # <-- مسیر فایل مدل خود را اینجا قرار دهید
+        self.sparsed_student_ckpt_path = '/path/to/your/resnet50_sparse_best.pt' # <-- مسیر فایل مدل خود را اینجا قرار دهید
         self.num_frames = 16
 
 if __name__ == '__main__':
     set_global_seed(42)
     args = Args()
     
-    # قبل از اجرا، مطمئن شوید که مسیر فایل مدل (ckpt_path) را صحیح وارد کرده‌اید
     if not os.path.exists(args.sparsed_student_ckpt_path):
         print(f"ERROR: Student checkpoint not found at '{args.sparsed_student_ckpt_path}'")
-        print("Please update the 'sparsed_student_ckpt_path' in the Args class.")
+        print("Please update to 'sparsed_student_ckpt_path' in the Args class.")
     else:
         test_pipeline = Test(args)
         test_pipeline.main()
