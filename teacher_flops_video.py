@@ -265,12 +265,11 @@ def calculate_flops_params_for_video(model_path, avg_frames, image_size=256):
         print("Please ensure the model architecture in 'get_model()' matches the checkpoint.")
         return
     model.eval() # تنظیم مدل در حالت ارزیابی
-    # 3. ایجاد ورودی جعلی برای thop
-    # ورودی برای ResNet50 باید یک فریم باشد
+
     input_tensor = torch.randn(1, 3, image_size, image_size)
-    # 4. محاسبه FLOPs و پارامترها برای یک فریم با thop
+
     flops_per_frame_thop, params_thop = profile(model, inputs=(input_tensor,), verbose=False)
-    # 5. محاسبه FLOPs برای کل ویدیو با thop
+
     flops_per_video_thop = flops_per_frame_thop * avg_frames
     # ptflops
     flops_ptflops, params_ptflops = get_model_complexity_info(model, (3, image_size, image_size), as_strings=True,
@@ -296,7 +295,7 @@ def calculate_flops_params_for_video(model_path, avg_frames, image_size=256):
 
 if __name__ == "__main__":
     root_dir = "/kaggle/input/uadfv-dataset/UADFV"
-    TEACHER_MODEL_PATH = "/kaggle/input/10k_teacher_beaet/pytorch/default/1/10k-teacher_model_best.pth"
+    TEACHER_MODEL_PATH = "/kaggle/working/teacher_uadfv_resnet50/teacher_resnet50_uadfv_best.pth"
     IMAGE_SIZE = 256
 
     train_loader, val_loader, test_loader, train_ds, val_ds, test_ds = create_uadfv_dataloaders(
