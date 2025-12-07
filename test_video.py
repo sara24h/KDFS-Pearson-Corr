@@ -11,6 +11,7 @@ from pathlib import Path
 import random
 from model.student.ResNet_sparse_video import ResNet_50_sparse_uadfv
 from thop import profile
+from utils import meter
 
 def set_global_seed(seed: int = 42):
     random.seed(seed)
