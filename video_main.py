@@ -13,40 +13,16 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from torch.cuda.amp import autocast, GradScaler
 import torch.distributed as dist
-
-def setup_ddp():
-    """Initializes DDP and sets the correct CUDA device for the process."""
-    # 'RANK' and 'WORLD_SIZE' are set by torchrun
-    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        rank = int(os.environ["RANK"])
-        world_size = int(os.environ['WORLD_SIZE'])
-        # LOCAL_RANK is the GPU ID for the current process on the current node
-        local_rank = int(os.environ['LOCAL_RANK'])
-        
-        # Initialize the process group
-        dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
-        
-        # Set the device for this process
-        torch.cuda.set_device(local_rank)
-        
-        print(f"DDP setup complete. Rank {rank}, Local Rank {local_rank}, using device cuda:{local_rank}")
-        return torch.device(f'cuda:{local_rank}')
-    else:
-        # Fallback for non-DDP runs
-        print("DDP environment variables not found. Running in non-DDP mode.")
-        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-
 matplotlib.use('Agg')
 from data.dataset import Dataset_selector
 from model.teacher.ResNet import ResNet_50_hardfakevsreal
-from model.student.ResNet_sparse_video import ResNet_50_sparse_uadfv
+from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal, ResNet_50_sparse_rvf10k
 from utils import utils, loss, meter, scheduler
 from train import Train
 from test import Test
 from finetune import Finetune
 from video_train_ddp import TrainDDP
-from finetune_video import FinetuneDDP
+from finetune_ddp import FinetuneDDP
 import json
 import time
 
@@ -61,9 +37,7 @@ def parse_args():
         choices=("train", "finetune", "test"),
         help="train, finetune or test",
     )
-    parser.add_argument('--num_frames', type=int, default=16, help='Number of frames to sample from each video')
-    parser.add_argument('--image_size', type=int, default=256, help='Size to resize video frames')
-    parser.add_argument('--sampling_strategy', type=str, default='uniform',choices=['uniform', 'random'],help='Strategy for sampling frames from video')
+
     parser.add_argument(
         "--dataset_mode",
         type=str,
@@ -373,9 +347,7 @@ def validate_args(args):
         if not os.path.exists(args.sparsed_student_ckpt_path):
             raise FileNotFoundError(f"Sparsed student checkpoint not found: {args.sparsed_student_ckpt_path}")
 
-# در فایل video_main.py
-
-def main(device):
+def main():
     args = parse_args()
     validate_args(args)
 
@@ -402,26 +374,16 @@ def main(device):
 
     # Execute the corresponding phase
     if args.ddp:
-        # --- این بخش را اضافه کنید ---
-        # Get DDP parameters from environment variables set by torchrun
-        rank = int(os.environ.get("RANK", 0))
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        world_size = int(os.environ.get("WORLD_SIZE", 1))
-        # ------------------------------
-
         if args.phase == "train":
-            # --- این خط را تغییر دهید ---
-            train = TrainDDP(args=args, rank=rank, local_rank=local_rank, world_size=world_size)
+            train = TrainDDP(args=args)
             train.main()
         elif args.phase == "finetune":
-            # اگر FinetuneDDP هم از همین ساختار استفاده می‌کند، آن را هم باید اصلاح کنید
-            finetune = FinetuneDDP(args=args, rank=rank, local_rank=local_rank, world_size=world_size)
+            finetune = FinetuneDDP(args=args)
             finetune.main()
         elif args.phase == "test":
             test = Test(args=args)
             test.main()
     else:
-        # ... (بخش else بدون تغییر باقی می‌ماند)
         if args.phase == "train":
             train = Train(args=args)
             train.main()
@@ -431,3 +393,6 @@ def main(device):
         elif args.phase == "test":
             test = Test(args=args)
             test.main()
+
+if __name__ == "__main__":
+    main()
