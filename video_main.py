@@ -19,7 +19,7 @@ from model.teacher.ResNet import ResNet_50_hardfakevsreal
 from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal, ResNet_50_sparse_rvf10k
 from utils import utils, loss, meter, scheduler
 from train import Train
-from test import Test
+from test_video import Test
 from finetune import Finetune
 from video_train_ddp import TrainDDP
 from finetune_ddp import FinetuneDDP
