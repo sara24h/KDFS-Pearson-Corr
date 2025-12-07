@@ -1,5 +1,3 @@
-# %%writefile /kaggle/working/KDFS-Pearson-Corr/video_train_ddp.py
-
 import json
 import os
 import random
@@ -14,7 +12,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
 #from data.video_data import Dataset_selector
-from model.student.ResNet_sparse_video import (ResNet_50_sparse_uadfv,SoftMaskedConv3d)
+from model.student.ResNet_sparse import (ResNet_50_sparse_uadfv,SoftMaskedConv2d)
 from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
 from model.student.GoogleNet_sparse import GoogLeNet_sparse_deepfake
 from utils import utils, loss, meter, scheduler
@@ -28,13 +26,8 @@ os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 
 class TrainDDP:
-    # --- متد __init__ را تغییر دهید تا اطلاعات DDP را بپذیرد ---
-    def __init__(self, args, rank, local_rank, world_size):
+    def __init__(self, args):
         self.args = args
-        self.rank = rank
-        self.local_rank = local_rank
-        self.world_size = world_size
-
         self.dataset_dir = args.dataset_dir
         self.dataset_mode = args.dataset_mode
         self.num_workers = args.num_workers
@@ -48,7 +41,7 @@ class TrainDDP:
         self.split_ratio = getattr(args, 'split_ratio', (0.7, 0.15, 0.15))
         self.lr = args.lr
         self.warmup_steps = args.warmup_steps
-        self.warmup_start_lr = self.warmup_start_lr
+        self.warmup_start_lr = args.warmup_start_lr
         self.lr_decay_T_max = args.lr_decay_T_max
         self.lr_decay_eta_min = args.lr_decay_eta_min
         self.weight_decay = args.weight_decay
@@ -63,6 +56,10 @@ class TrainDDP:
         self.resume = args.resume
         self.start_epoch = 0
         self.best_prec1 = 0
+        self.world_size = 0
+        self.local_rank = -1
+        self.rank = -1
+
 
         if self.dataset_mode == "uadfv":
             self.args.dataset_type = "uadfv"
@@ -76,13 +73,12 @@ class TrainDDP:
             raise ValueError(f"Unsupported architecture: '{args.arch}'. "
                              "It must be 'resnet50', 'mobilenetv2', or 'googlenet'.")
 
-    # --- متد dist_init را به طور کامل حذف کنید ---
-    # def dist_init(self):
-    #     dist.init_process_group("nccl")
-    #     self.world_size = dist.get_world_size()
-    #     self.rank = dist.get_rank()
-    #     self.local_rank = int(os.environ["LOCAL_RANK"])
-    #     torch.cuda.set_device(self.local_rank)
+    def dist_init(self):
+        dist.init_process_group("nccl")
+        self.world_size = dist.get_world_size()
+        self.rank = dist.get_rank()
+        self.local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(self.local_rank)
 
     def result_init(self):
         if self.rank == 0:
@@ -536,9 +532,8 @@ class TrainDDP:
         if self.rank == 0:
             self.logger.info("Training finished!")
 
-    # --- متد main را تغییر دهید ---
     def main(self):
-
+        self.dist_init()
         self.result_init()
         self.setup_seed()
         self.dataload()
