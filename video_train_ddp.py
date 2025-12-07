@@ -41,9 +41,9 @@ class TrainDDP:
         self.split_ratio = getattr(args, 'split_ratio', (0.7, 0.15, 0.15))
         self.lr = args.lr
         self.warmup_steps = args.warmup_steps
-        self.warmup_start_lr = args.warmup_start_lr
-        self.lr_decay_T_max = args.lr_decay_T_max
-        self.lr_decay_eta_min = args.lr_decay_eta_min
+        self.warmup_start_lr = self.warmup_start_lr
+        self.lr_decay_T_max = self.lr_decay_T_max
+        self.lr_decay_eta_min = self.lr_decay_eta_min
         self.weight_decay = args.weight_decay
         self.train_batch_size = args.train_batch_size
         self.eval_batch_size = args.eval_batch_size
@@ -59,7 +59,6 @@ class TrainDDP:
         self.world_size = 0
         self.local_rank = -1
         self.rank = -1
-
 
         if self.dataset_mode == "uadfv":
             self.args.dataset_type = "uadfv"
@@ -199,6 +198,13 @@ class TrainDDP:
         self.student = self.student.cuda()
         self.student = DDP(self.student, device_ids=[self.local_rank])
 
+        # --- DEBUGGING LOG: List all model parameters ---
+        if self.rank == 0:
+            self.logger.info("--- Student Model Parameters ---")
+            for name, param in self.student.module.named_parameters():
+                self.logger.info(f"Name: {name}, Shape: {param.shape}, Requires Grad: {param.requires_grad}")
+            self.logger.info("--- End of Parameters List ---")
+
     def define_loss(self):
         self.ori_loss = nn.BCEWithLogitsLoss().cuda()
         self.kd_loss = loss.KDLoss().cuda()
@@ -206,27 +212,48 @@ class TrainDDP:
         self.mask_loss = loss.MaskLoss().cuda()
 
     def define_optim(self):
-        weight_params = map(lambda p: p[1],
-                            filter(lambda p: p[1].requires_grad and "mask" not in p[0],
-                                   self.student.module.named_parameters()))
-        mask_params = map(lambda p: p[1],
-                          filter(lambda p: p[1].requires_grad and "mask" in p[0],
-                                 self.student.module.named_parameters()))
+        weight_params = []
+        mask_params = []
+
+        # --- DEBUGGING LOG: Show which params go to which optimizer ---
+        if self.rank == 0:
+            self.logger.info("--- Separating Parameters for Optimizers ---")
+        
+        for name, param in self.student.module.named_parameters():
+            if param.requires_grad:
+                if "mask" in name.lower():
+                    mask_params.append(param)
+                    if self.rank == 0:
+                        self.logger.info(f"Adding to MASK optimizer: {name}")
+                else:
+                    weight_params.append(param)
+                    if self.rank == 0:
+                        self.logger.info(f"Adding to WEIGHT optimizer: {name}")
+
+        if self.rank == 0:
+            self.logger.info(f"Found {len(weight_params)} weight parameters and {len(mask_params)} mask parameters.")
+            self.logger.info("--- End of Parameter Separation ---")
 
         self.optim_weight = torch.optim.Adamax(weight_params,
                                               lr=self.lr,
                                               weight_decay=self.weight_decay,
                                               eps=1e-7)
-        self.optim_mask = torch.optim.Adamax(mask_params, lr=self.lr, eps=1e-7)
+
+        self.optim_mask = None
+        self.scheduler_student_mask = None
+
+        if mask_params:
+            self.optim_mask = torch.optim.Adamax(mask_params, lr=self.lr, eps=1e-7)
+            self.scheduler_student_mask = scheduler.CosineAnnealingLRWarmup(
+                self.optim_mask, T_max=self.lr_decay_T_max,
+                eta_min=self.lr_decay_eta_min, last_epoch=-1,
+                warmup_steps=self.warmup_steps,
+                warmup_start_lr=self.warmup_start_lr)
+        elif self.rank == 0:
+            self.logger.warning("Warning: No mask parameters found. 'optim_mask' and 'scheduler_student_mask' will be None.")
 
         self.scheduler_student_weight = scheduler.CosineAnnealingLRWarmup(
             self.optim_weight, T_max=self.lr_decay_T_max,
-            eta_min=self.lr_decay_eta_min, last_epoch=-1,
-            warmup_steps=self.warmup_steps,
-            warmup_start_lr=self.warmup_start_lr)
-
-        self.scheduler_student_mask = scheduler.CosineAnnealingLRWarmup(
-            self.optim_mask, T_max=self.lr_decay_T_max,
             eta_min=self.lr_decay_eta_min, last_epoch=-1,
             warmup_steps=self.warmup_steps,
             warmup_start_lr=self.warmup_start_lr)
@@ -240,9 +267,20 @@ class TrainDDP:
         self.start_epoch = ckpt_student["start_epoch"]
         self.student.module.load_state_dict(ckpt_student["student"])
         self.optim_weight.load_state_dict(ckpt_student["optim_weight"])
-        self.optim_mask.load_state_dict(ckpt_student["optim_mask"])
+        
+        if self.optim_mask is not None and "optim_mask" in ckpt_student:
+            self.optim_mask.load_state_dict(ckpt_student["optim_mask"])
+        elif self.optim_mask is None and "optim_mask" in ckpt_student:
+            if self.rank == 0:
+                self.logger.warning("Checkpoint contains 'optim_mask' but current model has no mask parameters. Skipping load.")
+        
         self.scheduler_student_weight.load_state_dict(ckpt_student["scheduler_student_weight"])
-        self.scheduler_student_mask.load_state_dict(ckpt_student["scheduler_student_mask"])
+
+        if self.scheduler_student_mask is not None and "scheduler_student_mask" in ckpt_student:
+            self.scheduler_student_mask.load_state_dict(ckpt_student["scheduler_student_mask"])
+        elif self.scheduler_student_mask is None and "scheduler_student_mask" in ckpt_student:
+            if self.rank == 0:
+                self.logger.warning("Checkpoint contains 'scheduler_student_mask' but current model has no mask scheduler. Skipping load.")
 
         if self.rank == 0:
             self.logger.info(f"=> Continue from epoch {self.start_epoch + 1}...")
@@ -258,10 +296,13 @@ class TrainDDP:
                 "start_epoch": epoch,
                 "student": self.student.module.state_dict(),
                 "optim_weight": self.optim_weight.state_dict(),
-                "optim_mask": self.optim_mask.state_dict(),
                 "scheduler_student_weight": self.scheduler_student_weight.state_dict(),
-                "scheduler_student_mask": self.scheduler_student_mask.state_dict(),
             }
+
+            if self.optim_mask is not None:
+                ckpt_student["optim_mask"] = self.optim_mask.state_dict()
+            if self.scheduler_student_mask is not None:
+                ckpt_student["scheduler_student_mask"] = self.scheduler_student_mask.state_dict()
 
             if is_best:
                 torch.save(ckpt_student,
@@ -334,7 +375,8 @@ class TrainDDP:
 
                 for batch_data in self.train_loader:
                     self.optim_weight.zero_grad()
-                    self.optim_mask.zero_grad()
+                    if self.optim_mask is not None:
+                        self.optim_mask.zero_grad()
 
                     if is_video_dataset:
                         videos, targets = batch_data
@@ -351,18 +393,15 @@ class TrainDDP:
                             continue
 
                         with autocast():
-                            # Student forward
                             logits_student, feature_list_student = self.student(images)
                             logits_student = logits_student.squeeze(1)
                             logits_student = logits_student.view(batch_size, num_frames).mean(dim=1)
 
-                            # Teacher forward
                             with torch.no_grad():
                                 logits_teacher, feature_list_teacher = self.teacher(images)
                                 logits_teacher = logits_teacher.squeeze(1)
                                 logits_teacher = logits_teacher.view(batch_size, num_frames).mean(dim=1)
 
-                            # Debug: Log feature list info (first batch only)
                             if self.rank == 0 and epoch == 1 and not hasattr(self, '_features_logged'):
                                 self._features_logged = True
                                 self.logger.info(f"Student features: {len(feature_list_student)} layers")
@@ -372,12 +411,10 @@ class TrainDDP:
                                 if len(feature_list_teacher) > 0:
                                     self.logger.info(f"First teacher feature shape: {feature_list_teacher[0].shape}")
 
-                            # Losses
                             ori_loss = self.ori_loss(logits_student, targets)
                             kd_loss = (self.target_temperature ** 2) * self.kd_loss(
                                 logits_teacher, logits_student, self.target_temperature)
 
-                            # ✅ RC Loss - Fixed version (similar to image code)
                             rc_loss = torch.tensor(0.0, device=images.device, dtype=torch.float32)
                             
                             if len(feature_list_student) == 0:
@@ -385,33 +422,27 @@ class TrainDDP:
                                     self.logger.warning("Feature list is empty! Model may not be returning features.")
                             else:
                                 for i in range(len(feature_list_student)):
-                                    # Features shape: [B*T, C, H, W]
-                                    # Directly pass to RCLoss (it will handle flattening)
                                     layer_rc_loss = self.rc_loss(
                                         feature_list_student[i], 
                                         feature_list_teacher[i]
                                     )
                                     rc_loss = rc_loss + layer_rc_loss
                                 
-                                # Average over layers (like image code)
                                 rc_loss = rc_loss / len(feature_list_student)
                                 
-                                # Debug logging for first epoch
                                 if self.rank == 0 and epoch == 1 and not hasattr(self, '_rc_logged'):
                                     self._rc_logged = True
                                     self.logger.info(f"RC Loss per layer: {rc_loss.item():.6f}")
 
                             mask_loss = self.mask_loss(self.student.module)
 
-                            # ✅ Total loss - no division by len(feature_list_student) here
                             total_loss = (
                                 ori_loss +
                                 self.coef_kdloss * kd_loss +
-                                self.coef_rcloss * rc_loss +  # Already averaged
+                                self.coef_rcloss * rc_loss +
                                 self.coef_maskloss * mask_loss
                             )
 
-                            # Correlation & retention for logging
                             total_corr, total_ret = 0.0, 0.0
                             n_layers = 0
                             for m in self.student.module.mask_modules:
@@ -427,14 +458,14 @@ class TrainDDP:
 
                         scaler.scale(total_loss).backward()
                         scaler.step(self.optim_weight)
-                        scaler.step(self.optim_mask)
+                        if self.optim_mask is not None:
+                            scaler.step(self.optim_mask)
                         scaler.update()
 
                         preds = (torch.sigmoid(logits_student) > 0.5).float()
                         correct = (preds == targets).sum().item()
                         prec1 = 100.0 * correct / batch_size
 
-                    # ----------------- Reduce metrics -----------------
                     dist.barrier()
                     reduced_ori_loss = self.reduce_tensor(ori_loss.detach())
                     reduced_kd_loss = self.reduce_tensor(kd_loss.detach())
@@ -449,7 +480,6 @@ class TrainDDP:
                         n = batch_size if is_video_dataset else images.size(0)
                         meter_oriloss.update(reduced_ori_loss.item(), n)
                         meter_kdloss.update(self.coef_kdloss * reduced_kd_loss.item(), n)
-                        # ✅ No division here - rc_loss is already averaged
                         meter_rcloss.update(self.coef_rcloss * reduced_rc_loss.item(), n)
                         meter_maskloss.update(self.coef_maskloss * reduced_mask_loss.item(), n)
                         meter_loss.update(reduced_total_loss.item(), n)
@@ -463,13 +493,10 @@ class TrainDDP:
                         )
                         _tqdm.update(1)
 
-                # Log training details
                 if self.rank == 0:
-                    # Calculate train FLOPs with ticket=False
                     self.student.module.ticket = False
                     train_flops = self.student.module.get_flops()
                     
-                    # Debug RC Loss
                     if meter_rcloss.avg < 0.0001:
                         self.logger.warning(f"RC Loss is near zero! This might indicate a problem.")
                     
@@ -481,7 +508,6 @@ class TrainDDP:
                     
                     self.logger.info(f"[Train model Flops] Epoch {epoch} : {train_flops/1e6:.6f}M")
 
-            # ----------------- Validation -----------------
             if self.rank == 0:
                 self.student.eval()
                 self.student.module.ticket = True
@@ -512,7 +538,8 @@ class TrainDDP:
                 self.logger.info(f"[Val model Flops] Epoch {epoch} : {val_flops/1e6:.6f}M")
 
                 self.scheduler_student_weight.step()
-                self.scheduler_student_mask.step()
+                if self.scheduler_student_mask is not None:
+                    self.scheduler_student_mask.step()
 
                 self.writer.add_scalar("train/lr", current_lr, epoch)
                 self.writer.add_scalar("train/gumbel_temp", current_gumbel_temp, epoch)
