@@ -260,7 +260,7 @@ class FinetuneDDP:
                     self.finetune_optim_weight.step()
 
                     preds = (torch.sigmoid(logits_student) > 0.5).float()
-                    correct = (preds.squeeze(1) == targets).sum().item()
+                    correct = (preds == targets).sum().item()
                     prec1 = torch.tensor(100. * correct / B, device=images.device)
 
                     n = B
@@ -297,7 +297,7 @@ class FinetuneDDP:
                             logits_student = logits_student_raw.mean(dim=1)
                             
                             preds = (torch.sigmoid(logits_student) > 0.5).float()
-                            correct = (preds.squeeze(1) == targets).sum().item()
+                            correct = (preds == targets).sum().item()
                             prec1 = 100. * correct / B
                             meter_top1.update(prec1, B)
                             _tqdm.set_postfix(top1=f"{meter_top1.avg:.2f}")
