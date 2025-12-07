@@ -373,10 +373,17 @@ def validate_args(args):
         if not os.path.exists(args.sparsed_student_ckpt_path):
             raise FileNotFoundError(f"Sparsed student checkpoint not found: {args.sparsed_student_ckpt_path}")
 
-def main():
+# ... (کدهای قبلی شما بدون تغییر)
+
+# تعریف تابع main را برای پذیرفتن آرگومان device تغییر دهید
+def main(device):  # <-- این خط را تغییر دهید
     args = parse_args()
     validate_args(args)
+
+    # --- این خط را اضافه کنید ---
+    # مقدار args.device را با دستگاه صحیحی که از setup_ddp گرفته‌ایم، جایگزین کنید
     args.device = device
+    # -----------------------------
 
     # Set seeds for reproducibility
     random.seed(args.seed)
@@ -391,7 +398,7 @@ def main():
     # Log basic information
     print(f"Running phase: {args.phase}")
     print(f"Dataset mode: {args.dataset_mode}")
-    print(f"Device: {args.device}")
+    print(f"Device: {args.device}") # حالا این چاپ دستگاه صحیح (مثلا cuda:0 یا cuda:1) را نشان می‌دهد
     print(f"Architecture: {args.arch}")
 
     if args.dali:
@@ -423,5 +430,4 @@ def main():
 
 if __name__ == "__main__":
     device = setup_ddp()
-    main(device=device)
-    main()
+    main(device=device) # این خط درست است و تغیاری نمی‌خواهد
