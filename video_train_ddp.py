@@ -133,6 +133,16 @@ class TrainDDP:
                 sampling_strategy=self.frame_sampling
             )
 
+            # --- شروع بخش جدید: مشخصات میانگین ویدیو ---
+            if self.rank == 0:
+                self.logger.info("Using pre-calculated average video properties for FLOPs reporting.")
+                # مقادیر میانگین برای دیتاست UADFV که از قبل محاسبه کرده‌اید
+                self.avg_video_duration = 11.6  # <-- این مقدار را با میانگین واقعی خود جایگزین کنید
+                self.avg_video_fps = 30.00      # <-- این مقدار را با میانگین واقعی خود جایگزین کنید
+                self.logger.info(f"Average video duration set to: {self.avg_video_duration}s")
+                self.logger.info(f"Average video FPS set to: {self.avg_video_fps}")
+            # --- پایان بخش جدید ---
+
             if self.rank == 0:
                 self.logger.info("UADFV Dataset has been loaded!")
 
@@ -496,18 +506,22 @@ class TrainDDP:
 
                 if self.rank == 0:
                     self.student.module.ticket = False
-                    train_flops = self.student.module.get_flops()
                     
-                    if meter_rcloss.avg < 0.0001:
-                        self.logger.warning(f"RC Loss is near zero! This might indicate a problem.")
-                    
+                    # --- شروع بخش اصلاح‌شده برای محاسبه FLOPs ویدیو ---
+                    avg_video_flops = self.student.module.get_video_flops(
+                        video_duration_seconds=self.avg_video_duration, 
+                        fps=self.avg_video_fps
+                    )
+                    # --- پایان بخش اصلاح‌شده ---
+
                     self.logger.info(f"[Train] Epoch {epoch} : Gumbel_temperature {current_gumbel_temp:.2f} "
                                     f"LR {current_lr:.6f} OriLoss {meter_oriloss.avg:.4f} "
                                     f"KDLoss {meter_kdloss.avg:.4f} RCLoss {meter_rcloss.avg:.6f} "
                                     f"MaskLoss {meter_maskloss.avg:.6f} TotalLoss {meter_loss.avg:.4f} "
                                     f"Train_Acc {meter_top1.avg:.2f}")
                     
-                    self.logger.info(f"[Train model Flops] Epoch {epoch} : {train_flops/1e6:.6f}M")
+                    # لاگ FLOPs بر حسب TFLOPs برای خوانایی بهتر
+                    self.logger.info(f"[Train Avg Video Flops] Epoch {epoch} : {avg_video_flops/1e12:.2f} TFLOPs")
 
             if self.rank == 0:
                 self.student.eval()
@@ -532,11 +546,17 @@ class TrainDDP:
                         val_meter.update(acc1, val_batch_size)
 
                 mask_avgs = self.get_mask_averages()
-                val_flops = self.student.module.get_flops()
+                
+                # --- شروع بخش اصلاح‌شده برای محاسبه FLOPs ویدیو ---
+                val_avg_video_flops = self.student.module.get_video_flops(
+                    video_duration_seconds=self.avg_video_duration, 
+                    fps=self.avg_video_fps
+                )
+                # --- پایان بخش اصلاح‌شده ---
                 
                 self.logger.info(f"[Val] Epoch {epoch} : Val_Acc {val_meter.avg:.2f}")
                 self.logger.info(f"[Val mask avg] Epoch {epoch} : {mask_avgs}")
-                self.logger.info(f"[Val model Flops] Epoch {epoch} : {val_flops/1e6:.6f}M")
+                self.logger.info(f"[Val Avg Video Flops] Epoch {epoch} : {val_avg_video_flops/1e12:.2f} TFLOPs")
 
                 self.scheduler_student_weight.step()
                 if self.scheduler_student_mask is not None:
@@ -546,9 +566,10 @@ class TrainDDP:
                 self.writer.add_scalar("train/gumbel_temp", current_gumbel_temp, epoch)
                 self.writer.add_scalar("train/acc", meter_top1.avg, epoch)
                 self.writer.add_scalar("train/loss", meter_loss.avg, epoch)
-                self.writer.add_scalar("train/flops", train_flops, epoch)
+                # اضافه کردن FLOPs ویدیو به TensorBoard
+                self.writer.add_scalar("train/avg_video_flops", avg_video_flops, epoch)
                 self.writer.add_scalar("val/acc", val_meter.avg, epoch)
-                self.writer.add_scalar("val/flops", val_flops, epoch)
+                self.writer.add_scalar("val/avg_video_flops", val_avg_video_flops, epoch)
 
                 if val_meter.avg > self.best_prec1:
                     self.best_prec1 = val_meter.avg
