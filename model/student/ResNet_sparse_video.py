@@ -7,16 +7,18 @@ from thop import profile
 from .layer import SoftMaskedConv2d
 
 class MaskedNet(nn.Module):
+
     def __init__(self, gumbel_start_temperature=2.0, gumbel_end_temperature=0.5, num_epochs=200):
         super().__init__()
         self.gumbel_start_temperature = gumbel_start_temperature
         self.gumbel_end_temperature = gumbel_end_temperature
         self.num_epochs = num_epochs
         self.gumbel_temperature = gumbel_start_temperature
-        self.ticket = False
+        self.ticket = False  # حالتی که در آن ماسک‌ها باینری شده‌اند
         self.mask_modules = []
 
     def checkpoint(self):
+        """از وضعیت فعلی وزن‌ها و ماسک‌ها یک نسخه پشتیبان تهیه می‌کند."""
         for m in self.mask_modules:
             m.checkpoint()
         for m in self.modules():
@@ -24,13 +26,15 @@ class MaskedNet(nn.Module):
                 m.checkpoint = copy.deepcopy(m.state_dict())
 
     def rewind_weights(self):
+        """وزن‌ها را به آخرین نقطه چک‌پوینت بازمی‌گرداند."""
         for m in self.mask_modules:
             m.rewind_weights()
         for m in self.modules():
-            if isinstance(m, nn.Conv2d) or isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.Linear):
+            if hasattr(m, 'checkpoint'):
                 m.load_state_dict(m.checkpoint)
 
     def update_gumbel_temperature(self, epoch):
+        """دمای گامبل را بر اساس اپوک فعلی به‌روزرسانی می‌کند."""
         self.gumbel_temperature = self.gumbel_start_temperature * math.pow(
             self.gumbel_end_temperature / self.gumbel_start_temperature,
             epoch / self.num_epochs,
@@ -39,134 +43,129 @@ class MaskedNet(nn.Module):
             m.update_gumbel_temperature(self.gumbel_temperature)
 
     def get_flops(self):
+      
         device = next(self.parameters()).device
         Flops_total = torch.tensor(0.0, device=device)
         
-        # اندازه تصویر برای دیتاست‌های مختلف
+        # دیکشنری اندازه تصاویر ورودی برای هر دیتاست
         image_sizes = {
             "hardfakevsrealfaces": 300,
             "rvf10k": 256,
             "140k": 256,
-            "uadfv": 256  # اضافه شده - اگر اندازه دیگری است تغییر دهید
+            "uadfv": 256  # اضافه کردن اندازه تصویر برای دیتاست UADFV
         }
         
         dataset_type = getattr(self, "dataset_type", "hardfakevsrealfaces")
-        input_size = image_sizes.get(dataset_type, 256)
+        input_size = image_sizes.get(dataset_type, 256) # مقدار پیش‌فرض 256 در صورت عدم وجود
         
-        # محاسبه اندازه feature map بعد از conv1 و maxpool
+        # محاسبه FLOPs برای لایه‌های اولیه (conv1, bn1, maxpool)
+        # این بخش یک تخمین ساده است و ممکن است با محاسبات thop متفاوت باشد
         conv1_h = (input_size - 7 + 2 * 3) // 2 + 1
         maxpool_h = (conv1_h - 3 + 2 * 1) // 2 + 1
-        conv1_w = conv1_h
-        maxpool_w = maxpool_h
         
-        # FLOPs برای لایه اول (conv1 + bn1)
         Flops_total = Flops_total + (
-            conv1_h * conv1_w * 7 * 7 * 3 * 64 +
-            conv1_h * conv1_w * 64
+            conv1_h * conv1_h * 7 * 7 * 3 * 64 +  # FLOPs for conv1
+            conv1_h * conv1_h * 64                 # FLOPs for bn1 (simplified)
         )
         
-        # محاسبه FLOPs برای لایه‌های masked
+        # محاسبه FLOPs برای بلوک‌های ResNet با کانولوشن‌های ماسک‌دار
         for i, m in enumerate(self.mask_modules):
             m = m.to(device)
             Flops_shortcut_conv = 0
             Flops_shortcut_bn = 0
             
-            if len(self.mask_modules) == 48:  # ResNet-50
-                if i % 3 == 0:
+            # محاسبات مخصوص ResNet-50 (48 لایه ماسک‌دار)
+            if len(self.mask_modules) == 48:
+                if i % 3 == 0:  # لایه اول در هر بلوک Bottleneck
                     Flops_conv = (
                         m.feature_map_h * m.feature_map_w * m.kernel_size * m.kernel_size *
                         m.in_channels * m.mask.sum()
                     )
-                else:
+                else:  # لایه‌های دوم و سوم در هر بلوک Bottleneck
                     Flops_conv = (
                         m.feature_map_h * m.feature_map_w * m.kernel_size * m.kernel_size *
                         self.mask_modules[i - 1].mask.to(device).sum() * m.mask.sum()
                     )
                 Flops_bn = m.feature_map_h * m.feature_map_w * m.mask.sum()
                 
-                if i % 3 == 2:
-                    Flops_shortcut_conv = (
+                # محاسبه FLOPs برای اتصال کوتاه (shortcut) در صورت وجود
+                if i % 3 == 2 and m.stride != 1:
+                     Flops_shortcut_conv = (
                         m.feature_map_h * m.feature_map_w * 1 * 1 *
                         (m.out_channels // 4) * m.out_channels
                     )
-                    Flops_shortcut_bn = m.feature_map_h * m.feature_map_w * m.out_channels
-                    
-            elif len(self.mask_modules) in [16, 32]:  # ResNet-18 یا ResNet-34
-                if i % 2 == 0:
-                    Flops_conv = (
-                        m.feature_map_h * m.feature_map_w * m.kernel_size * m.kernel_size *
-                        m.in_channels * m.mask.sum()
-                    )
-                else:
-                    Flops_conv = (
-                        m.feature_map_h * m.feature_map_w * m.kernel_size * m.kernel_size *
-                        self.mask_modules[i - 1].mask.to(device).sum() * m.mask.sum()
-                    )
-                Flops_bn = m.feature_map_h * m.feature_map_w * m.mask.sum()
-                
-                if i % 2 == 1 and i != 1:
-                    Flops_shortcut_conv = (
-                        m.feature_map_h * m.feature_map_w * 1 * 1 *
-                        m.out_channels * m.out_channels
-                    )
-                    Flops_shortcut_bn = m.feature_map_h * m.feature_map_w * m.out_channels
+                     Flops_shortcut_bn = m.feature_map_h * m.feature_map_w * m.out_channels
 
             Flops_total = (
                 Flops_total + Flops_conv + Flops_bn + Flops_shortcut_conv + Flops_shortcut_bn
             )
-        
         return Flops_total
 
 class BasicBlock_sparse(nn.Module):
     expansion = 1
-
     def __init__(self, in_planes, planes, stride=1):
         super().__init__()
-        # فرض می‌کنیم SoftMaskedConv2d تعریف شده است
-        # برای تست می‌توان از nn.Conv2d استفاده کرد
-        self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.conv1 = SoftMaskedConv2d(
+            in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False
+        )
         self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv2 = SoftMaskedConv2d(
+            planes, planes, kernel_size=3, stride=1, padding=1, bias=False
+        )
         self.bn2 = nn.BatchNorm2d(planes)
 
         self.downsample = nn.Sequential()
         if stride != 1 or in_planes != self.expansion * planes:
             self.downsample = nn.Sequential(
-                nn.Conv2d(in_planes, self.expansion * planes, kernel_size=1, stride=stride, bias=False),
+                nn.Conv2d(
+                    in_planes,
+                    self.expansion * planes,
+                    kernel_size=1,
+                    stride=stride,
+                    bias=False
+                ),
                 nn.BatchNorm2d(self.expansion * planes),
             )
 
-    def forward(self, x, ticket=False):
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
+    def forward(self, x, ticket):
+        out = F.relu(self.bn1(self.conv1(x, ticket)))
+        out = self.bn2(self.conv2(out, ticket))
         out += self.downsample(x)
         out = F.relu(out)
         return out
 
 class Bottleneck_sparse(nn.Module):
     expansion = 4
-
     def __init__(self, in_planes, planes, stride=1):
         super().__init__()
-        # فرض می‌کنیم SoftMaskedConv2d تعریف شده است
-        self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=1, bias=False)
+        self.conv1 = SoftMaskedConv2d(in_planes, planes, kernel_size=1, bias=False)
         self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.conv2 = SoftMaskedConv2d(
+            planes, planes, kernel_size=3, stride=stride, padding=1, bias=False
+        )
         self.bn2 = nn.BatchNorm2d(planes)
-        self.conv3 = nn.Conv2d(planes, self.expansion * planes, kernel_size=1, bias=False)
+        self.conv3 = SoftMaskedConv2d(
+            planes, self.expansion * planes, kernel_size=1, bias=False
+        )
         self.bn3 = nn.BatchNorm2d(self.expansion * planes)
 
         self.downsample = nn.Sequential()
         if stride != 1 or in_planes != self.expansion * planes:
             self.downsample = nn.Sequential(
-                nn.Conv2d(in_planes, self.expansion * planes, kernel_size=1, stride=stride, bias=False),
+                nn.Conv2d(
+                    in_planes,
+                    self.expansion * planes,
+                    kernel_size=1,
+                    stride=stride,
+                    bias=False
+                ),
                 nn.BatchNorm2d(self.expansion * planes),
             )
 
-    def forward(self, x, ticket=False):
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = F.relu(self.bn2(self.conv2(out)))
-        out = self.bn3(self.conv3(out))
+    def forward(self, x, ticket):
+        out = F.relu(self.bn1(self.conv1(x, ticket)))
+        out = F.relu(self.bn2(self.conv2(out, ticket)))
+        out = self.bn3(self.conv3(out, ticket))
         out += self.downsample(x)
         out = F.relu(out)
         return out
@@ -176,13 +175,17 @@ class ResNet_sparse(MaskedNet):
         self,
         block,
         num_blocks,
-        num_classes=1,
+        num_classes=1,  # تغییر به 1 برای خروجی باینری (واقعی/جعلی)
         gumbel_start_temperature=2.0,
         gumbel_end_temperature=0.5,
         num_epochs=200,
         dataset_type="hardfakevsrealfaces"
     ):
-        super().__init__(gumbel_start_temperature, gumbel_end_temperature, num_epochs)
+        super().__init__(
+            gumbel_start_temperature,
+            gumbel_end_temperature,
+            num_epochs,
+        )
         self.in_planes = 64
         self.dataset_type = dataset_type
 
@@ -194,26 +197,23 @@ class ResNet_sparse(MaskedNet):
         self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2)
         self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2)
         self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2)
-        self.avgpool = nn.Sequential(nn.AvgPool2d(7))
+        
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1)) # استفاده از AdaptiveAvgPool2d برای انعطاف‌پذیری بیشتر
         self.fc = nn.Linear(512 * block.expansion, num_classes)
 
-        if block == BasicBlock_sparse:
-            expansion = 1
-        elif block == Bottleneck_sparse:
-            expansion = 4
-        self.feat1 = nn.Conv2d(64 * expansion, 64 * expansion, kernel_size=1)
-        self.feat2 = nn.Conv2d(128 * expansion, 128 * expansion, kernel_size=1)
-        self.feat3 = nn.Conv2d(256 * expansion, 256 * expansion, kernel_size=1)
-        self.feat4 = nn.Conv2d(512 * expansion, 512 * expansion, kernel_size=1)
+        # لایه‌هایی برای استخراج ویژگی از هر استیج
+        self.feat1 = nn.Conv2d(64 * block.expansion, 64 * block.expansion, kernel_size=1)
+        self.feat2 = nn.Conv2d(128 * block.expansion, 128 * block.expansion, kernel_size=1)
+        self.feat3 = nn.Conv2d(256 * block.expansion, 256 * block.expansion, kernel_size=1)
+        self.feat4 = nn.Conv2d(512 * block.expansion, 512 * block.expansion, kernel_size=1)
 
-        # جمع‌آوری mask modules
-        # self.mask_modules = [m for m in self.modules() if isinstance(m, SoftMaskedConv2d)]
-        self.mask_modules = []  # برای تست بدون SoftMaskedConv2d
+        self.mask_modules = [m for m in self.modules() if isinstance(m, SoftMaskedConv2d)]
+        self.mask_modules = [m.to(next(self.parameters()).device) for m in self.mask_modules]
 
     def _make_layer(self, block, planes, num_blocks, stride):
         strides = [stride] + [1] * (num_blocks - 1)
         layers = []
-        for stride in strides:
+        for i, stride in enumerate(strides):
             layers.append(block(self.in_planes, planes, stride))
             self.in_planes = planes * block.expansion
         return nn.Sequential(*layers)
@@ -244,7 +244,24 @@ class ResNet_sparse(MaskedNet):
         out = self.fc(out)
         return out, feature_list
 
+
 def ResNet_50_sparse_uadfv(
+    gumbel_start_temperature=2.0, gumbel_end_temperature=0.5, num_epochs=200
+):
+   
+    return ResNet_sparse(
+        block=Bottleneck_sparse,
+        num_blocks=[3, 4, 6, 3],
+        num_classes=1,
+        gumbel_start_temperature=gumbel_start_temperature,
+        gumbel_end_temperature=gumbel_end_temperature,
+        num_epochs=num_epochs,
+        dataset_type="uadfv"  # مهم برای محاسبه صحیح FLOPs
+    )
+
+
+
+def ResNet_50_sparse_rvf10k(
     gumbel_start_temperature=2.0, gumbel_end_temperature=0.5, num_epochs=200
 ):
     return ResNet_sparse(
@@ -254,41 +271,5 @@ def ResNet_50_sparse_uadfv(
         gumbel_start_temperature=gumbel_start_temperature,
         gumbel_end_temperature=gumbel_end_temperature,
         num_epochs=num_epochs,
-        dataset_type="uadfv"
+        dataset_type="rvf10k"
     )
-
-if __name__ == "__main__":
-    print("=" * 60)
-    print("محاسبه FLOPs برای ResNet-50 روی دیتاست UADFV")
-    print("=" * 60)
-    
-    # ایجاد مدل
-    model = ResNet_50_sparse_uadfv(
-        gumbel_start_temperature=2.0,
-        gumbel_end_temperature=0.5,
-        num_epochs=200
-    )
-    
-    # انتقال به GPU در صورت وجود
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
-    print(f"\n✓ مدل به {device} منتقل شد")
-    
-
-    if len(model.mask_modules) > 0:
-        flops_custom = model.get_flops()
-        print(f"FLOPs (Custom Method): {flops_custom:.2e}")
-        print(f"GFLOPs: {flops_custom / 1e9:.4f}")
-    else:
-        print("⚠️  هیچ mask module پیدا نشد (نیاز به SoftMaskedConv2d)")
-
-    
-    print("\n---for all videos ---")
-    frames_per_video = 32 
-    print(f"FLOPs برای یک فریم: {flops / 1e9:.4f} GFLOPs")
-    print(f"FLOPs برای {frames_per_video} فریم: {(flops * frames_per_video) / 1e9:.4f} GFLOPs")
-    
-    print("\n" + "=" * 60)
-    print("- FLOPs is calculating for 1 frame")
-    print("-total Flops: Flops per frame × num frames")
-    print("=" * 60)
