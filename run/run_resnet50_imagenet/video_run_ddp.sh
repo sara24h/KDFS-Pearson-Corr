@@ -1,5 +1,3 @@
-%%writefile /kaggle/working/KDFS-Pearson-Corr/run/run_resnet50_imagenet/video_run_ddp.sh
-
 #!/bin/bash
 
 arch=${ARCH:-ResNet_50}
@@ -135,7 +133,6 @@ echo "Running torchrun with arguments:"
 
 if [ "$PHASE" = "train" ]; then
     echo "Starting training phase..."
-    # --- REVERTED BACK TO NCCL (default) ---
     torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson-Corr/video_main.py \
         --phase train \
         --arch "$arch" \
@@ -172,7 +169,6 @@ elif [ "$PHASE" = "finetune" ]; then
         exit 1
     fi
 
-    # --- REVERTED BACK TO NCCL (default) ---
     torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson-Corr/video_main.py \
         --phase finetune \
         --arch "$arch" \
