@@ -373,17 +373,11 @@ def validate_args(args):
         if not os.path.exists(args.sparsed_student_ckpt_path):
             raise FileNotFoundError(f"Sparsed student checkpoint not found: {args.sparsed_student_ckpt_path}")
 
-# ... (کدهای قبلی شما بدون تغییر)
+# در فایل video_main.py
 
-# تعریف تابع main را برای پذیرفتن آرگومان device تغییر دهید
-def main(device):  # <-- این خط را تغییر دهید
+def main(device):
     args = parse_args()
     validate_args(args)
-
-    # --- این خط را اضافه کنید ---
-    # مقدار args.device را با دستگاه صحیحی که از setup_ddp گرفته‌ایم، جایگزین کنید
-    args.device = device
-    # -----------------------------
 
     # Set seeds for reproducibility
     random.seed(args.seed)
@@ -398,7 +392,7 @@ def main(device):  # <-- این خط را تغییر دهید
     # Log basic information
     print(f"Running phase: {args.phase}")
     print(f"Dataset mode: {args.dataset_mode}")
-    print(f"Device: {args.device}") # حالا این چاپ دستگاه صحیح (مثلا cuda:0 یا cuda:1) را نشان می‌دهد
+    print(f"Device: {args.device}")
     print(f"Architecture: {args.arch}")
 
     if args.dali:
@@ -408,16 +402,26 @@ def main(device):  # <-- این خط را تغییر دهید
 
     # Execute the corresponding phase
     if args.ddp:
+        # --- این بخش را اضافه کنید ---
+        # Get DDP parameters from environment variables set by torchrun
+        rank = int(os.environ.get("RANK", 0))
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
+        # ------------------------------
+
         if args.phase == "train":
-            train = TrainDDP(args=args)
+            # --- این خط را تغییر دهید ---
+            train = TrainDDP(args=args, rank=rank, local_rank=local_rank, world_size=world_size)
             train.main()
         elif args.phase == "finetune":
-            finetune = FinetuneDDP(args=args)
+            # اگر FinetuneDDP هم از همین ساختار استفاده می‌کند، آن را هم باید اصلاح کنید
+            finetune = FinetuneDDP(args=args, rank=rank, local_rank=local_rank, world_size=world_size)
             finetune.main()
         elif args.phase == "test":
             test = Test(args=args)
             test.main()
     else:
+        # ... (بخش else بدون تغییر باقی می‌ماند)
         if args.phase == "train":
             train = Train(args=args)
             train.main()
@@ -427,7 +431,3 @@ def main(device):  # <-- این خط را تغییر دهید
         elif args.phase == "test":
             test = Test(args=args)
             test.main()
-
-if __name__ == "__main__":
-    device = setup_ddp()
-    main(device=device) # این خط درست است و تغیاری نمی‌خواهد
