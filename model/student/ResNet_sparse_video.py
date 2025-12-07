@@ -221,7 +221,7 @@ class ResNet_3D_sparse(MaskedNet_3D):
         out = self.fc(out)
         return out
 
-def ResNet_50_sparse_uafdv(num_classes=400):
+def ResNet_50_sparse_uadfv(num_classes=400):
     return ResNet_3D_sparse(
         block=Bottleneck_3D,
         num_blocks=[3, 4, 6, 3],
