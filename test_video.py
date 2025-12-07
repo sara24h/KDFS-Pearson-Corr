@@ -196,12 +196,10 @@ class Test:
         self.student.eval()
         self.student.ticket = True  # فعال کردن حالت نهایی پرuning
 
-        # --- بخش جدید: محاسبه FLOPs با thop ---
-        input_tensor = torch.randn(1, 3, self.image_size, self.image_size)
+        input_tensor = torch.randn(1, 3, self.image_size, self.image_size).to(self.device)
         flops_per_frame, params = profile(self.student, inputs=(input_tensor,), verbose=False)
         
-        # محاسبه FLOPs برای یک ویدیوی متوسط (98 ویدیو در دیتاست)
-        # برای مقایسه، فرض می‌کنیم هر ویدیو به طور متوسط 348 فریم دارد (11.6s * 30fps)
+
         avg_frames_per_video = 348
         flops_per_avg_video = flops_per_frame * avg_frames_per_video
         
