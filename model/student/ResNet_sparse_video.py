@@ -4,15 +4,10 @@ import torch.nn.functional as F
 import copy
 import math
 from thop import profile
-# فرض بر این است که فایل layer.py در کنار این فایل قرار دارد
-# و شامل کلاس SoftMaskedConv2d است.
 from .layer import SoftMaskedConv2d
 
 class MaskedNet(nn.Module):
-    """
-    کلاس پایه برای شبکه‌های عصبی با ماسک‌های قابل یادگیری (برای پرuning).
-    این کلاس عملیات مربوط به دمای گامبل، چک‌پوینت وزن‌ها و محاسبه FLOPs را مدیریت می‌کند.
-    """
+
     def __init__(self, gumbel_start_temperature=2.0, gumbel_end_temperature=0.5, num_epochs=200):
         super().__init__()
         self.gumbel_start_temperature = gumbel_start_temperature
@@ -48,10 +43,7 @@ class MaskedNet(nn.Module):
             m.update_gumbel_temperature(self.gumbel_temperature)
 
     def get_flops(self):
-        """
-        FLOPs (تعداد عملیات شناور) را برای مدل بر روی یک تصویر ورودی محاسبه می‌کند.
-        این محاسبه به اندازه تصویر ورودی بستگی دارد که از طریق dataset_type مشخص می‌شود.
-        """
+        
         device = next(self.parameters()).device
         Flops_total = torch.tensor(0.0, device=device)
         
@@ -108,31 +100,18 @@ class MaskedNet(nn.Module):
             )
         return Flops_total
 
-    def get_video_flops(self, video_duration_seconds, fps):
-        """
-        FLOPs کل را برای پردازش یک ویدیو کامل محاسبه می‌کند.
-        این فرض را در نظر می‌گیرد که ویدیو به صورت فریم به فریم پردازش می‌شود.
-
-        Args:
-            video_duration_seconds (float): مدت زمان ویدیو به ثانیه.
-            fps (int): نرخ فریم ویدیو (فریم بر ثانیه).
-
-        Returns:
-            torch.Tensor: FLOPs کل برای پردازش کل ویدیو.
-        """
-        # 1. محاسبه FLOPs برای یک فریم واحد
-        flops_per_frame = self.get_flops()
-        
-        # 2. محاسبه تعداد کل فریم‌های ویدیو
-        total_frames = video_duration_seconds * fps
-        
-        # 3. محاسبه FLOPs کل برای ویدیو
-        total_video_flops = flops_per_frame * total_frames
-        
+    def get_video_flops(self, video_duration_seconds=None, fps=None):
+   
+        flops_per_frame = self.get_flops()  # این تابع دستی شما درست کار می‌کند
+    
+    # تعداد فریم‌هایی که واقعاً به مدل داده می‌شود
+        num_sampled_frames =16
+    
+    # FLOPs واقعی برای یک ویدیو
+        total_video_flops = flops_per_frame * num_sampled_frames
+    
         return total_video_flops
 
-# کلاس‌های BasicBlock_sparse و Bottleneck_sparse بدون تغییر باقی می‌مانند
-# ... (کدهای این کلاس‌ها را از پاسخ قبلی کپی کنید) ...
 class BasicBlock_sparse(nn.Module):
     expansion = 1
     def __init__(self, in_planes, planes, stride=1):
