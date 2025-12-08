@@ -22,11 +22,6 @@ from model.teacher.Mobilenetv2 import MobileNetV2_deepfake
 from model.teacher.GoogleNet import GoogLeNet_deepfake
 from torch import amp
 
-# اضافه کردن کتابخانه‌های مورد نیاز برای ROC و ماتریس درهم‌ریختگی
-from sklearn.metrics import roc_curve, auc, confusion_matrix
-import matplotlib.pyplot as plt
-import seaborn as sns
-
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 class TrainDDP:
@@ -42,15 +37,15 @@ class TrainDDP:
         self.num_epochs = args.num_epochs
         self.lr = args.lr
         self.warmup_steps = args.warmup_steps
-        self.warmup_start_lr = self.warmup_start_lr
+        self.warmup_start_lr = args.warmup_start_lr
         self.lr_decay_T_max = args.lr_decay_T_max
-        self.lr_decay_eta_min = self.lr_decay_eta_min
-        self.weight_decay = self.weight_decay
+        self.lr_decay_eta_min = args.lr_decay_eta_min
+        self.weight_decay = args.weight_decay
         self.train_batch_size = args.train_batch_size
         self.eval_batch_size = args.eval_batch_size
         self.target_temperature = args.target_temperature
-        self.gumbel_start_temperature = self.gumbel_start_temperature
-        self.gumbel_end_temperature = self.gumbel_end_temperature
+        self.gumbel_start_temperature = args.gumbel_start_temperature
+        self.gumbel_end_temperature = args.gumbel_end_temperature
         self.coef_kdloss = args.coef_kdloss
         self.coef_rcloss = args.coef_rcloss
         self.coef_maskloss = args.coef_maskloss
@@ -466,12 +461,6 @@ class TrainDDP:
                 self.student.eval()
                 self.student.module.ticket = True
                 meter_top1 = meter.AverageMeter("Acc@1", ":6.2f")
-                
-                # متغیرهای جدید برای جمع‌آوری پیش‌بینی‌ها و برچسب‌های واقعی
-                all_targets = []
-                all_preds = []
-                all_probs = []
-                
                 with torch.no_grad():
                     with tqdm(total=len(self.val_loader), ncols=100) as _tqdm:
                         _tqdm.set_description("Validation epoch: {}/{}".format(epoch, self.num_epochs))
@@ -480,16 +469,7 @@ class TrainDDP:
                             targets = targets.cuda().float()
                             logits_student, _ = self.student(images)
                             logits_student = logits_student.squeeze(1)
-                            
-                            # محاسبه احتمالات و پیش‌بینی‌ها
-                            probs = torch.sigmoid(logits_student)
-                            preds = (probs > 0.5).float()
-                            
-                            # ذخیره نتایج برای محاسبات بعدی
-                            all_targets.extend(targets.cpu().numpy())
-                            all_preds.extend(preds.cpu().numpy())
-                            all_probs.extend(probs.cpu().numpy())
-                            
+                            preds = (torch.sigmoid(logits_student) > 0.5).float()
                             correct = (preds == targets).sum().item()
                             prec1 = 100. * correct / images.size(0)
                             n = images.size(0)
@@ -498,56 +478,9 @@ class TrainDDP:
                             _tqdm.update(1)
                             time.sleep(0.01)
 
-                # محاسبه TP, FP, TN, FN
-                tn, fp, fn, tp = confusion_matrix(all_targets, all_preds).ravel()
-                self.logger.info(f"[Validation Metrics] Epoch {epoch}: TP={tp}, FP={fp}, TN={tn}, FN={fn}")
-                
-                # محاسبه و ذخیره نمودار ROC
-                fpr, tpr, thresholds = roc_curve(all_targets, all_probs)
-                roc_auc = auc(fpr, tpr)
-                
-                plt.figure(figsize=(8, 6))
-                plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc:.2f})')
-                plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-                plt.xlim([0.0, 1.0])
-                plt.ylim([0.0, 1.05])
-                plt.xlabel('False Positive Rate')
-                plt.ylabel('True Positive Rate')
-                plt.title(f'ROC Curve - Epoch {epoch}')
-                plt.legend(loc="lower right")
-                plt.savefig(os.path.join(self.result_dir, f'roc_curve_epoch_{epoch}.png'))
-                plt.close()
-                
-                # محاسبه و ذخیره ماتریس درهم‌ریختگی
-                cm = confusion_matrix(all_targets, all_preds)
-                plt.figure(figsize=(8, 6))
-                sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                           xticklabels=['Real', 'Fake'], 
-                           yticklabels=['Real', 'Fake'])
-                plt.title(f'Confusion Matrix - Epoch {epoch}')
-                plt.ylabel('True Label')
-                plt.xlabel('Predicted Label')
-                plt.savefig(os.path.join(self.result_dir, f'confusion_matrix_epoch_{epoch}.png'))
-                plt.close()
-                
-                # ذخیره مقادیر در فایل
-                with open(os.path.join(self.result_dir, f'metrics_epoch_{epoch}.txt'), 'w') as f:
-                    f.write(f"Epoch {epoch}\n")
-                    f.write(f"TP: {tp}\n")
-                    f.write(f"FP: {fp}\n")
-                    f.write(f"TN: {tn}\n")
-                    f.write(f"FN: {fn}\n")
-                    f.write(f"AUC: {roc_auc:.4f}\n")
-                    f.write(f"Accuracy: {meter_top1.avg:.2f}\n")
-
                 Flops = self.student.module.get_flops()
                 self.writer.add_scalar("val/acc/top1", meter_top1.avg, global_step=epoch)
                 self.writer.add_scalar("val/Flops", Flops, global_step=epoch)
-                self.writer.add_scalar("val/auc", roc_auc, global_step=epoch)
-                self.writer.add_scalar("val/tp", tp, global_step=epoch)
-                self.writer.add_scalar("val/fp", fp, global_step=epoch)
-                self.writer.add_scalar("val/tn", tn, global_step=epoch)
-                self.writer.add_scalar("val/fn", fn, global_step=epoch)
 
                 self.logger.info("[Val] Epoch {0}: Val_Acc {val_acc:.2f}".format(epoch, val_acc=meter_top1.avg))
 
