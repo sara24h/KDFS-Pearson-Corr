@@ -15,7 +15,7 @@ ROOT_DIR = '/kaggle/input/uadfv-dataset/UADFV'  # مسیر دیتاست ویدی
 MODEL_SAVE_PATH = 'best_resnet50_video_model.pth'
 BATCH_SIZE_TRAIN = 4
 BATCH_SIZE_EVAL = 8
-NUM_EPOCHS = 30
+NUM_EPOCHS = 10
 # تغییر: کاهش نرخ یادگیری
 LEARNING_RATE = 1e-4 
 
