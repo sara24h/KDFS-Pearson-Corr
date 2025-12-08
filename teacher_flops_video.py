@@ -9,14 +9,15 @@ import random
 from pathlib import Path
 from torchvision import transforms, models
 import time
-# فرض می‌کنیم این فایل در ساختار پروژه شما قرار دارد
 from data.video_data import create_uadfv_dataloaders
 from torchinfo import summary
 from thop import profile
-# اضافه کردن کتابخانه argparse
 import argparse
 
-def create_model(num_classes=1):
+# تغییر 1: اضافه کردن RandAugment برای افزایش داده قوی‌تر
+from torchvision.transforms import RandAugment
+
+def create_model(num_classes=1, dropout_prob=0.5):
     """
     یک مدل ResNet50 از پیش آموزش دیده را بارگذاری کرده و برای Fine-tuning آماده می‌کند.
     """
@@ -28,10 +29,16 @@ def create_model(num_classes=1):
 
     # جایگزینی لایه آخر (classifier) برای تعداد کلاس‌های مورد نظر
     num_ftrs = model.fc.in_features
-    model.fc = nn.Linear(num_ftrs, num_classes)
+    
+    # تغییر 2: اضافه کردن لایه Dropout
+    model.fc = nn.Sequential(
+        nn.Dropout(p=dropout_prob),
+        nn.Linear(num_ftrs, num_classes)
+    )
 
-    # unfreeze کردن لایه‌های آخر برای آموزش (Partial Fine-tuning)
-    # شما می‌توانید لایه‌های بیشتری را unfreeze کنید
+    # تغییر 3: باز کردن لایه‌های layer3 و layer4 برای آموزش
+    for param in model.layer3.parameters():
+        param.requires_grad = True
     for param in model.layer4.parameters():
         param.requires_grad = True
     for param in model.fc.parameters():
@@ -58,17 +65,12 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device):
         outputs = outputs.view(batch_size, num_frames, -1).mean(dim=1)
 
         loss = criterion(outputs, labels)
-        
-        # --- اصلاح شده: محاسبه صحیح پیش‌بینی‌ها ---
-        # خروجی مدل (logit) را با آستانه 0 مقایسه می‌کنیم
         preds = (outputs > 0).float()
         
         loss.backward()
         optimizer.step()
 
         running_loss += loss.item() * videos.size(0)
-        # --- اصلاح شده: محاسبه صحیح تعداد پیش‌بینی‌های درست ---
-        # مطمئن می‌شویم که شکل preds و labels یکسان است
         running_corrects += torch.sum(preds == labels.data).item()
         total_samples += videos.size(0)
 
@@ -94,12 +96,9 @@ def validate(model, dataloader, criterion, device):
             outputs = outputs.view(batch_size, num_frames, -1).mean(dim=1)
             
             loss = criterion(outputs, labels)
-            
-            # --- اصلاح شده: محاسبه صحیح پیش‌بینی‌ها ---
             preds = (outputs > 0).float()
 
             running_loss += loss.item() * videos.size(0)
-            # --- اصلاح شده: محاسبه صحیح تعداد پیش‌بینی‌های درست ---
             running_corrects += torch.sum(preds == labels.data).item()
             total_samples += videos.size(0)
 
@@ -112,37 +111,25 @@ def validate(model, dataloader, criterion, device):
 # ==============================================================================
 
 if __name__ == "__main__":
-    # --- بخش اضافه شده برای پارس کردن آرگومان‌های خط فرمان ---
     parser = argparse.ArgumentParser(description="Fine-tune ResNet50 on UADFV video dataset.")
+    parser.add_argument('--root_dir', type=str, default="/kaggle/input/uadfv-dataset/UADFV", help='Root directory of the dataset.')
+    parser.add_argument('--num_frames', type=int, default=32, help='Number of frames to sample from each video.')
+    parser.add_argument('--image_size', type=int, default=256, help='Size of the input images.')
+    parser.add_argument('--train_batch_size', type=int, default=4, help='Batch size for training.')
+    parser.add_argument('--eval_batch_size', type=int, default=8, help='Batch size for validation and testing.')
+    parser.add_argument('--num_epochs', type=int, default=50, help='Number of training epochs.')
+    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Initial learning rate for new layers.')
+    parser.add_argument('--num_workers', type=int, default=4, help='Number of worker processes for data loading.')
+    parser.add_argument('--dropout_prob', type=float, default=0.5, help='Dropout probability.')
+    parser.add_argument('--early_stopping_patience', type=int, default=7, help='Patience for early stopping.')
 
-    # اضافه کردن آرگومان‌ها با نوع، مقدار پیش‌فرض و توضیحات
-    parser.add_argument('--root_dir', type=str, default="/kaggle/input/uadfv-dataset/UADFV", 
-                        help='Root directory of the dataset.')
-    parser.add_argument('--num_frames', type=int, default=32, 
-                        help='Number of frames to sample from each video.')
-    parser.add_argument('--image_size', type=int, default=256, 
-                        help='Size of the input images.')
-    parser.add_argument('--train_batch_size', type=int, default=4, 
-                        help='Batch size for training.')
-    parser.add_argument('--eval_batch_size', type=int, default=8, 
-                        help='Batch size for validation and testing.')
-    parser.add_argument('--num_epochs', type=int, default=15, 
-                        help='Number of training epochs.')
-    parser.add_argument('--learning_rate', type=float, default=1e-4, 
-                        help='Initial learning rate.')
-    parser.add_argument('--num_workers', type=int, default=4, 
-                        help='Number of worker processes for data loading.')
-
-    # پارس کردن آرگومان‌های ورودی
     args = parser.parse_args()
 
-    # --- استفاده از آرگومان‌های دریافتی ---
     print("--- Running with the following arguments ---")
     for arg, value in vars(args).items():
         print(f"{arg}: {value}")
     print("-------------------------------------------")
 
-    # --- تنظیم دستگاه (GPU/CPU) ---
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -160,10 +147,10 @@ if __name__ == "__main__":
     )
 
     # --- ایجاد مدل ---
-    model = create_model(num_classes=1)
+    model = create_model(num_classes=1, dropout_prob=args.dropout_prob)
     model = model.to(device)
 
-    # --- چاپ پیچیدگی مدل (تعداد پارامتر و FLOPs) ---
+    # --- چاپ پیچیدگی مدل ---
     print("\n" + "="*50)
     print("Model Architecture Summary (torchinfo):")
     print("="*50)
@@ -178,13 +165,20 @@ if __name__ == "__main__":
     print(f"Model Parameters (thop): {params/1e6:.2f} M")
     print("="*50 + "\n")
 
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.learning_rate, weight_decay=1e-4)
+    # تغییر 4: استفاده از نرخ یادگیری متفاوت برای بخش‌های مختلف مدل
+    optimizer = optim.Adam([
+        {'params': model.layer3.parameters(), 'lr': args.learning_rate / 10},
+        {'params': model.layer4.parameters(), 'lr': args.learning_rate / 10},
+        {'params': model.fc.parameters(), 'lr': args.learning_rate}
+    ], weight_decay=1e-4)
+
     criterion = nn.BCEWithLogitsLoss()
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5, verbose=True)
 
-    # --- حلقه آموزش ---
+    # تغییر 5: پیاده‌سازی Early Stopping
     best_val_acc = 0.0
     best_model_wts = None
+    epochs_no_improve = 0
 
     since = time.time()
     for epoch in range(args.num_epochs):
@@ -194,7 +188,6 @@ if __name__ == "__main__":
         train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
         val_loss, val_acc = validate(model, val_loader, criterion, device)
         
-        # فراخوانی scheduler با مقدار loss روی مجموعه اعتبارسنجی
         scheduler.step(val_loss)
 
         print(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}')
@@ -204,8 +197,16 @@ if __name__ == "__main__":
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             best_model_wts = model.state_dict()
-            torch.save(best_model_wts, 'best_resnet50_partial_finetuned.pth')
+            torch.save(best_model_wts, 'best_resnet50_improved.pth')
             print(f"Saved best model with validation accuracy: {best_val_acc:.4f} at epoch {epoch + 1}")
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+
+        # شرط خروج برای Early Stopping
+        if epochs_no_improve >= args.early_stopping_patience:
+            print(f'Early stopping triggered after {epoch + 1} epochs!')
+            break
 
     time_elapsed = time.time() - since
     print(f'Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.0f}s')
