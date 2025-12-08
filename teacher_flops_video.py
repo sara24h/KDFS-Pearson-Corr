@@ -9,7 +9,7 @@ import random
 from pathlib import Path
 from torchvision import transforms, models
 import time
-from data.video_data
+from data import video_data
 from torchinfo import summary
 from thop import profile
 
