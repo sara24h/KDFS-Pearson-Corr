@@ -11,7 +11,7 @@ import ptflops
 from ptflops import get_model_complexity_info
 
 # وارد کردن تابع ایجاد دیتالودر از فایل جداگانه
-from dataset import create_uadfv_dataloaders
+from data.video_data import create_uadfv_dataloaders
 
 # --- بخش ۱: تنظیمات و هایپرپارامترها ---
 ROOT_DIR = '/kaggle/input/uadfv-dataset/UADFV'  # مسیر دیتاست ویدیویی
