@@ -1,207 +1,243 @@
-# train.py
-
+import os
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torchvision import models
-from torchvision.models import ResNet50_Weights
-import time
-import copy
-from thop import profile
-import ptflops
-from ptflops import get_model_complexity_info
+from torch.utils.data import Dataset, DataLoader
+from torchvision import models, transforms
+import torchvision.io as io
+from torchvision.transforms import functional as F
+import numpy as np
+from sklearn.metrics import accuracy_score
+import matplotlib.pyplot as plt
+from torchinfo import summary  # فرض کنید torchinfo نصب شده است
+# اگر ptflops و thop نصب شده باشند، می‌توانید از آن‌ها استفاده کنید؛ در غیر این صورت کامنت کنید
 
-# وارد کردن تابع ایجاد دیتالودر از فایل جداگانه
-from data.video_data import create_uadfv_dataloaders
-
-# --- بخش ۱: تنظیمات و هایپرپارامترها ---
-ROOT_DIR = '/kaggle/input/uadfv-dataset/UADFV'  # مسیر دیتاست ویدیویی
-MODEL_SAVE_PATH = 'best_resnet50_video_model.pth'
-BATCH_SIZE_TRAIN = 4
-BATCH_SIZE_EVAL = 8
-NUM_EPOCHS = 30
-LEARNING_RATE = 0.001
-
-# --- هایپرپارامترهای جدید بر اساس اطلاعات دیتاست ---
-NUM_FRAMES = 32
-IMAGE_SIZE = 256
-AVG_VIDEO_SECONDS = 11
-VIDEO_FPS = 30
-
-# --- بخش ۲: تعریف مدل و فاین تیون ---
-def initialize_model(feature_extract=False, use_pretrained=True):
-    model_ft = models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V1 if use_pretrained else None)
-    if feature_extract:
-        for param in model_ft.parameters():
-            param.requires_grad = False
-    num_ftrs = model_ft.fc.in_features
-    model_ft.fc = nn.Linear(num_ftrs, 1)
-    params_to_update = [p for p in model_ft.parameters() if p.requires_grad]
-    print(f"Params to learn: {len(params_to_update)}")
-    if len(params_to_update) == 0:
-        print("Warning: No parameters to learn. Check the feature_extract flag.")
-    return model_ft, params_to_update
-
-# --- بخش ۳: توابع آموزش و اعتبارسنجی ---
-def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, device='cpu'):
-    since = time.time()
-    best_model_wts = copy.deepcopy(model.state_dict())
-    best_acc = 0.0
-
-    for epoch in range(num_epochs):
-        print(f'Epoch {epoch + 1}/{num_epochs}')
-        print('-' * 10)
-
-        for phase in ['Train', 'Val']:
-            if phase == 'Train':
-                model.train()
-            else:
-                model.eval()
-
-            running_loss = 0.0
-            running_corrects = 0
-
-            for inputs, labels in dataloaders[phase]:
-                inputs = inputs.to(device)
-                labels = labels.to(device).float().unsqueeze(1)
-
-                optimizer.zero_grad()
-
-                with torch.set_grad_enabled(phase == 'Train'):
-                    B, T, C, H, W = inputs.shape
-                    inputs = inputs.view(B * T, C, H, W)
-                    labels_repeated = labels.repeat_interleave(T)
-                    
-                    outputs = model(inputs)
-                    preds = torch.sigmoid(outputs) > 0.5
-                    
-                    loss = criterion(outputs, labels_repeated.unsqueeze(1))
-                    
-                    outputs = outputs.view(B, T)
-                    preds = preds.view(B, T)
-                    
-                    # --- اصلاح شده: تبدیل به float قبل از mean ---
-                    final_preds = preds.float().mean(dim=1)
-                    final_labels = labels.squeeze(1).float()
-
-                    if phase == 'Train':
-                        loss.backward()
-                        optimizer.step()
-
-                running_loss += loss.item() * inputs.size(0)
-                running_corrects += torch.sum(final_preds > 0.5).float() # مقایسه نهایی نیز باید با float انجام شود
-
-            dataset_size = len(dataloaders[phase].dataset)
-            epoch_loss = running_loss / (dataset_size * NUM_FRAMES)
-            epoch_acc = running_corrects.double() / dataset_size
-
-            print(f'{phase} Loss: {epoch_loss:.4f}, {phase} Accuracy: {epoch_acc:.2%}')
-
-            if phase == 'Val' and epoch_acc > best_acc:
-                best_acc = epoch_acc
-                best_model_wts = copy.deepcopy(model.state_dict())
-                print(f"Saved best model with validation accuracy: {best_acc:.2%} at epoch {epoch + 1}")
-        print()
-
-    time_elapsed = time.time() - since
-    print(f'Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.0f}s')
-    print(f'Best val Acc: {best_acc:4f}')
+# کلاس دیتاست برای ویدیوها
+class VideoDataset(Dataset):
+    def __init__(self, root_dir, split='Train', transform=None, num_frames=32, fps=30):
+        self.root_dir = root_dir
+        self.split = split
+        self.transform = transform
+        self.num_frames = num_frames
+        self.samples = []
+        
+        # اسکن فولدرها برای ویدیوها (فرض: فرمت mp4)
+        for label_name in ['Fake', 'Real']:
+            label = 0 if label_name == 'Fake' else 1
+            label_dir = os.path.join(root_dir, split, label_name)
+            if os.path.exists(label_dir):
+                for file in os.listdir(label_dir):
+                    if file.endswith('.mp4'):
+                        video_path = os.path.join(label_dir, file)
+                        self.samples.append((video_path, label))
+        
+        self.samples_df = pd.DataFrame(self.samples, columns=['video_path', 'label'])
+        print(f"{len(self.split)} dataset statistics:")
+        print(f"Sample {self.split.lower()} video paths:")
+        print(self.samples_df['video_path'].head())
+        print(f"Total {self.split.lower()} dataset size: {len(self.samples_df)}")
+        print(f"{self.split} label distribution:")
+        print(self.samples_df['label'].value_counts().rename(index={0: 'Fake', 1: 'Real'}))
     
-    model.load_state_dict(best_model_wts)
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        video_path, label = self.samples[idx]
+        
+        # خواندن ویدیو
+        video, _, info = io.read_video(video_path, pts_unit='sec')
+        if len(video) == 0:
+            # اگر ویدیو خالی باشد، یک ویدیو dummy بسازید (برای سادگی)
+            video = torch.zeros(self.num_frames, 240, 320, 3).byte()
+        
+        # نمونه‌برداری یکنواخت از فریم‌ها (uniform sampling)
+        total_frames = len(video)
+        indices = torch.linspace(0, total_frames - 1, self.num_frames).long()
+        frames = video[indices].float().permute(0, 3, 1, 2) / 255.0  # T C H W
+        
+        # تغییر اندازه به 256x256
+        frames = F.interpolate(frames, size=(256, 256), mode='bilinear', align_corners=False)
+        
+        # نرمال‌سازی (ImageNet stats)
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        frames = normalize(frames)  # اعمال روی همه فریم‌ها
+        
+        label = torch.tensor(label, dtype=torch.float32)
+        return frames, label
+
+# تابع collate برای stack کردن فریم‌ها
+def collate_fn(batch):
+    frames, labels = zip(*batch)
+    frames = torch.stack(frames)  # B T C H W
+    labels = torch.stack(labels)
+    return frames, labels
+
+# مدل ResNet50 برای ویدیو (frame-level aggregation)
+class VideoResNet50(nn.Module):
+    def __init__(self, num_classes=1):
+        super(VideoResNet50, self).__init__()
+        self.resnet = models.resnet50(pretrained=True)
+        self.resnet.fc = nn.Linear(self.resnet.fc.in_features, num_classes)
+        self.sigmoid = nn.Sigmoid()
+    
+    def forward(self, x):
+        # x: B T C H W
+        B, T, C, H, W = x.shape
+        x = x.view(B * T, C, H, W)  # (B*T) C H W
+        feats = self.resnet.fc[: -1](x)  # ویژگی‌ها بدون fc نهایی: B*T 2048
+        feats = feats.view(B, T, -1)  # B T 2048
+        feats = feats.mean(dim=1)  # میانگین روی T: B 2048
+        out = self.resnet.fc(feats)  # B 1
+        out = self.sigmoid(out)  # برای BCE
+        return out
+
+# تابع آموزش
+def train_model(model, train_loader, val_loader, num_epochs=30, lr=0.001, device='cuda'):
+    criterion = nn.BCELoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    best_val_acc = 0.0
+    
+    for epoch in range(num_epochs):
+        # Train
+        model.train()
+        train_loss, train_correct, train_total = 0.0, 0, 0
+        for frames, labels in train_loader:
+            frames, labels = frames.to(device), labels.to(device).unsqueeze(1)
+            optimizer.zero_grad()
+            outputs = model(frames)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item()
+            predicted = (outputs > 0.5).float()
+            train_total += labels.size(0)
+            train_correct += (predicted == labels).sum().item()
+        
+        train_acc = 100 * train_correct / train_total
+        
+        # Val
+        model.eval()
+        val_loss, val_correct, val_total = 0.0, 0, 0
+        with torch.no_grad():
+            for frames, labels in val_loader:
+                frames, labels = frames.to(device), labels.to(device).unsqueeze(1)
+                outputs = model(frames)
+                loss = criterion(outputs, labels)
+                
+                val_loss += loss.item()
+                predicted = (outputs > 0.5).float()
+                val_total += labels.size(0)
+                val_correct += (predicted == labels).sum().item()
+        
+        val_acc = 100 * val_correct / val_total
+        
+        print(f"Epoch {epoch+1}, Train Loss: {train_loss/len(train_loader):.4f}, Train Accuracy: {train_acc:.2f}%")
+        print(f"Validation Loss: {val_loss/len(val_loader):.4f}, Validation Accuracy: {val_acc:.2f}%")
+        
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save(model.state_dict(), 'best_resnet50_video.pth')
+            print(f"Saved best resnet50 model with validation accuracy: {best_val_acc:.2f}% at epoch {epoch+1}")
+    
+    # ذخیره مدل نهایی
+    torch.save(model.state_dict(), 'final_resnet50_video.pth')
+    print("Saved final resnet50 model at epoch {}".format(num_epochs))
+    
     return model
 
-def evaluate_model(model, dataloader, criterion, device='cpu'):
+# تابع تست
+def test_model(model, test_loader, device='cuda'):
     model.eval()
-    running_loss = 0.0
-    running_corrects = 0
-    dataset_size = len(dataloader.dataset)
-
-    for inputs, labels in dataloader:
-        inputs = inputs.to(device)
-        labels = labels.to(device).float().unsqueeze(1)
-
-        with torch.no_grad():
-            B, T, C, H, W = inputs.shape
-            inputs = inputs.view(B * T, C, H, W)
-            labels_repeated = labels.repeat_interleave(T)
+    criterion = nn.BCELoss()
+    test_loss, test_correct, test_total = 0.0, 0, 0
+    all_preds, all_labels = [], []
+    
+    with torch.no_grad():
+        for frames, labels in test_loader:
+            frames, labels = frames.to(device), labels.to(device).unsqueeze(1)
+            outputs = model(frames)
+            loss = criterion(outputs, labels)
             
-            outputs = model(inputs)
-            loss = criterion(outputs, labels_repeated.unsqueeze(1))
+            test_loss += loss.item()
+            predicted = (outputs > 0.5).float()
+            test_total += labels.size(0)
+            test_correct += (predicted == labels).sum().item()
             
-            outputs = outputs.view(B, T)
-            preds = torch.sigmoid(outputs) > 0.5
-            preds = preds.view(B, T)
-            
-            # --- اصلاح شده: تبدیل به float قبل از mean ---
-            final_preds = preds.float().mean(dim=1)
-            final_labels = labels.squeeze(1).float()
-        
-        running_loss += loss.item() * inputs.size(0)
-        # مقایسه نهایی نیز باید با float انجام شود
-        running_corrects += torch.sum(final_preds > 0.5).float()
-
-    test_loss = running_loss / (dataset_size * NUM_FRAMES)
-    test_acc = running_corrects.double() / dataset_size
-    print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.2%}")
-
-def analyze_model_complexity(model, image_size=256, avg_video_seconds=11, fps=30):
-    print("\n" + "="*70)
-    print("Model Complexity Analysis after Fine-Tuning")
-    print("="*70)
+            all_preds.extend(predicted.cpu().numpy().flatten())
+            all_labels.extend(labels.cpu().numpy().flatten())
     
-    input_tensor = torch.randn(1, 3, image_size, image_size)
-    flops_per_frame, params_thop = profile(model, inputs=(input_tensor,), verbose=False)
+    test_acc = 100 * test_correct / test_total
+    print(f"Test Loss: {test_loss/len(test_loader):.4f}, Test Accuracy: {test_acc:.2f}%")
     
-    avg_frames_per_video = int(avg_video_seconds * fps)
-    flops_per_avg_video = flops_per_frame * avg_frames_per_video
+    # نمایش confusion matrix (اختیاری)
+    from sklearn.metrics import confusion_matrix
+    cm = confusion_matrix(all_labels, all_preds)
+    print("Confusion Matrix:\n", cm)
     
-    print("\n--- Computational Cost Summary ---")
-    print(f"Total Parameters: {params_thop/1e6:.2f} M")
-    print(f"FLOPs per Frame: {flops_per_frame / 1e9:.2f} GFLOPs")
-    print(f"Average Frames per Video ({avg_video_seconds}s @ {fps}fps): {avg_frames_per_video}")
-    print(f"FLOPs per Average Video: {flops_per_avg_video / 1e9:.2f} GFLOPs")
-    print("-" * 35)
+    return test_acc
+
+# اجرای اصلی
+if __name__ == "__main__":
+    # تنظیمات
+    root_dir = '/path/to/your/dataset'  # مسیر دیتاست خود را وارد کنید
+    batch_size = 8  # کوچکتر برای ویدیوها به دلیل حافظه (با num_frames=32)
+    num_frames = 32  # تعداد فریم‌های نمونه‌برداری شده (می‌توانید تنظیم کنید، مثلاً 16 برای سرعت بیشتر)
+    num_epochs = 30
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    required_gflops_per_second = (flops_per_frame * fps) / 1e9
-    print(f"Required Hardware Power for Real-Time Processing ({fps} FPS): {required_gflops_per_second:.2f} GFLOP/s")
-    print("="*70)
-
-
-# --- بخش ۴: اجرای اصلی ---
-if __name__ == '__main__':
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
-    print("="*70)
-    print("Dataset Configuration")
-    print("="*70)
-    print(f"Average Video Duration: {AVG_VIDEO_SECONDS} seconds")
-    print(f"Video Frame Rate (FPS): {VIDEO_FPS}")
-    print(f"Average Frames per Video: {AVG_VIDEO_SECONDS * VIDEO_FPS}")
-    print(f"Frames Sampled per Video for Training: {NUM_FRAMES}")
-    print("="*70)
-
-    train_loader, val_loader, test_loader = create_uadfv_dataloaders(
-        root_dir=ROOT_DIR, 
-        num_frames=NUM_FRAMES, 
-        image_size=IMAGE_SIZE,
-        train_batch_size=BATCH_SIZE_TRAIN, 
-        eval_batch_size=BATCH_SIZE_EVAL,
-        num_workers=2
-    )
-    dataloaders = {'Train': train_loader, 'Val': val_loader, 'Test': test_loader}
-
-    model_ft, params_to_update = initialize_model(feature_extract=True, use_pretrained=True)
-    model_ft = model_ft.to(device)
-
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer_ft = optim.Adam(params_to_update, lr=LEARNING_RATE)
-
-    model_ft = train_model(model_ft, dataloaders, criterion, optimizer_ft, num_epochs=NUM_EPOCHS, device=device)
+    # ترانسفورم (فقط نرمال‌سازی، resize در دیتاست انجام می‌شود)
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     
-    torch.save(model_ft.state_dict(), MODEL_SAVE_PATH)
-    print(f"Saved final model at epoch {NUM_EPOCHS}")
-
-    evaluate_model(model_ft, test_loader, criterion, device=device)
-
-    analyze_model_complexity(model_ft, IMAGE_SIZE, AVG_VIDEO_SECONDS, VIDEO_FPS)
+    # دیتاست‌ها
+    train_dataset = VideoDataset(root_dir, 'Train', transform=normalize, num_frames=num_frames)
+    val_dataset = VideoDataset(root_dir, 'Validation', transform=normalize, num_frames=num_frames)
+    test_dataset = VideoDataset(root_dir, 'Test', transform=normalize, num_frames=num_frames)
+    
+    # DataLoaderها
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=4)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=4)
+    
+    print(f"Train loader batches: {len(train_loader)}")
+    print(f"Validation loader batches: {len(val_loader)}")
+    print(f"Test loader batches: {len(test_loader)}")
+    
+    # نمونه batch
+    sample_train_batch = next(iter(train_loader))
+    print(f"Sample train batch image shape: {sample_train_batch[0].shape}")  # [B, T, C, H, W]
+    print(f"Sample train batch labels: {sample_train_batch[1]}")
+    
+    sample_val_batch = next(iter(val_loader))
+    print(f"Sample validation batch image shape: {sample_val_batch[0].shape}")
+    print(f"Sample validation batch labels: {sample_val_batch[1]}")
+    
+    sample_test_batch = next(iter(test_loader))
+    print(f"Sample test batch image shape: {sample_test_batch[0].shape}")
+    print(f"Sample test batch labels: {sample_test_batch[1]}")
+    
+    # مدل
+    model = VideoResNet50(num_classes=1).to(device)
+    
+    # دانلود خودکار pretrained weights
+    print("Downloading pretrained ResNet50...")
+    
+    # آموزش
+    model = train_model(model, train_loader, val_loader, num_epochs, device=device)
+    
+    # تست
+    test_acc = test_model(model, test_loader, device=device)
+    
+    # خلاصه مدل (با torchinfo، اگر نصب نباشد کامنت کنید)
+    try:
+        summary(model.resnet, input_size=(batch_size * num_frames, 3, 256, 256))
+    except:
+        print("torchinfo not available. Install with: pip install torchinfo")
+    
+    sample_frame = sample_train_batch[0][0, 0].detach().cpu()  # اولین فریم از اولین batch
+    sample_frame = (sample_frame - sample_frame.min()) / (sample_frame.max() - sample_frame.min())  # normalize for viz
+    plt.imshow(sample_frame.permute(1, 2, 0))
+    plt.title("Sample Frame from Video")
+    plt.show()
