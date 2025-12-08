@@ -1,6 +1,7 @@
+# dataset.py
+
 import torch
 from torch.utils.data import Dataset, DataLoader
-from torch.utils.data.distributed import DistributedSampler
 import cv2
 import numpy as np
 import os
@@ -9,6 +10,9 @@ from pathlib import Path
 from torchvision import transforms
 
 def set_global_seed(seed: int = 42):
+    """
+    تنظیم یک بذر ثابت برای تکرارپذیری نتایج در کتابخانه‌های مختلف
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -17,9 +21,10 @@ def set_global_seed(seed: int = 42):
     torch.backends.cudnn.benchmark = False
     os.environ['PYTHONHASHSEED'] = str(seed)
 
-set_global_seed(42)
-
 def worker_init_fn(worker_id):
+    """
+    تابعی برای مقداردهی اولیه هر worker در DataLoader برای تکرارپذیری
+    """
     seed = 42 + worker_id
     random.seed(seed)
     np.random.seed(seed)
@@ -27,6 +32,9 @@ def worker_init_fn(worker_id):
 
 
 class UADFVDataset(Dataset):
+    """
+    کلاس دیتاست برای کار با ویدیوهای UADFV
+    """
     def __init__(self, root_dir, num_frames=16, image_size=256,
                  transform=None, sampling_strategy='uniform',
                  split='train', split_ratio=(0.7, 0.15, 0.15), seed=42):
@@ -66,6 +74,9 @@ class UADFVDataset(Dataset):
         print(f"[{split.upper()}] {len(self.video_list)} videos loaded.")
 
     def _load_and_split(self, split_ratio):
+        """
+        بارگذاری لیست ویدیوها و تقسیم آن‌ها به مجموعه‌های train/val/test
+        """
         video_list = []
 
         # Fake → label 0
@@ -78,7 +89,7 @@ class UADFVDataset(Dataset):
             if not p.name.startswith('.'):
                 video_list.append((str(p), 1))
 
-        # Shuffle ثابت
+        # Shuffle ثابت برای تقسیم یکسان
         rng = random.Random(self.seed)
         rng.shuffle(video_list)
 
@@ -96,6 +107,9 @@ class UADFVDataset(Dataset):
             raise ValueError("split must be train/val/test")
 
     def sample_frames(self, total_frames: int):
+        """
+        استخراج ایندکس فریم‌ها بر اساس استراتژی نمونه‌برداری
+        """
         if total_frames <= self.num_frames:
             idxs = np.random.choice(total_frames, self.num_frames, replace=True)
             return sorted(idxs.tolist())
@@ -111,6 +125,9 @@ class UADFVDataset(Dataset):
             raise ValueError("sampling_strategy: uniform / random / first")
 
     def load_video(self, path: str):
+        """
+        بارگذاری فریم‌های یک ویدیو با استفاده از OpenCV
+        """
         cap = cv2.VideoCapture(path)
         if not cap.isOpened():
             raise IOError(f"Cannot open {path}")
@@ -131,7 +148,7 @@ class UADFVDataset(Dataset):
                     frame = torch.zeros(3, self.image_size, self.image_size)
                 frames.append(frame)
             else:
-                # fallback
+                # اگر فریم خوانده نشد، از فریم قبلی استفاده می‌کنیم
                 fallback = frames[-1].clone() if frames else torch.zeros(3, self.image_size, self.image_size)
                 frames.append(fallback)
 
@@ -144,6 +161,7 @@ class UADFVDataset(Dataset):
     def __getitem__(self, idx):
         path, label = self.video_list[idx]
 
+        # تضمین تکرارپذیری در محیط‌های چندپردازشی
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None:
             seed = self.seed + worker_info.id * 100000 + idx
@@ -180,6 +198,9 @@ def create_uadfv_dataloaders(
     sampling_strategy='uniform',
     seed=42
 ):
+    """
+    تابعی برای ایجاد DataLoaderهای train, val, و test
+    """
     train_ds = UADFVDataset(root_dir, num_frames, image_size,
                             sampling_strategy=sampling_strategy,
                             split='train', seed=seed)
@@ -230,6 +251,7 @@ def create_uadfv_dataloaders(
     return train_loader, val_loader, test_loader
 
 
+# این بخش برای تست کردن دیتاست به تنهایی است
 if __name__ == "__main__":
     root_dir = "/kaggle/input/uadfv-dataset/UADFV"   
 
