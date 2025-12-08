@@ -54,14 +54,14 @@ class Test:
         flops_video = flops_frame * self.num_frames / 1e9  # GFLOPs
 
         print("\n" + "="*85)
-        print("        مقایسه دقیق با مدل معلم شما (170.59 GFLOPs)")
+        
         print("="*85)
-        print(f"مدل معلم (Teacher)         : ۳۲ فریم → ۱۷۰٫۵۹ GFLOPs")
-        print(f"مدل دانشجو (Student)        : {self.num_frames:2d} فریم → {flops_video:7.2f} GFLOPs")
+        print(f"(Teacher)         : 170.59 GFLOPs")
+        print(f" (Student)        : {self.num_frames:2d} فریم → {flops_video:7.2f} GFLOPs")
         print("-"*85)
         reduction = (self.teacher_video_flops - flops_video) / self.teacher_video_flops * 100
-        print(f"               کاهش FLOPs : {reduction:6.2f}%")
-        print(f"           کاهش پارامترها : {(23.51 - params/1e6)/23.51*100:6.2f}%")
+        print(f" FLOPs Reduction : {reduction:6.2f}%")
+        print(f" Params Reduction : {(23.51 - params/1e6)/23.51*100:6.2f}%")
         print("="*85)
 
         # تست دقت
