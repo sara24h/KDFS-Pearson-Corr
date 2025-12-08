@@ -18,9 +18,7 @@ Flops_baselines = {
         "200k": 5390.0,
         "330k": 5390.0,
         "125k": 2100.0,
-        # --- تغییر: به‌روزرسانی FLOPs پایه برای دیتاست ویدیویی UADFV (فرض ۱۶ فریم) ---
-        # 5390.0 (FLOPs per frame) * 16 (frames) = 86240.0
-        "uadfv": 1.88,
+        "uadfv": 172690,
     },
     "MobileNetV2": {
         "hardfakevsrealfaces": 570.0,
@@ -50,7 +48,7 @@ Params_baselines = {
         "200k": 23.51,
         "330k": 23.51,
         "125k": 23.51,
-        "uadfv": 23.51, # تعداد پارامترها ثابت است
+        "uadfv": 23.51, 
     },
     "MobileNetV2": {
         "hardfakevsrealfaces": 2.23,
@@ -82,10 +80,9 @@ image_sizes = {
     "uadfv": 256
 }
 
-# --- تغییر جدید: دیکشنری برای تعداد فریم‌ها در هر کلیپ ویدیویی ---
 num_frames_per_clip = {
-    "uadfv": 30,  # فرض می‌کنیم هر کلیپ ویدیویی ۱۶ فریم دارد
-    # سایر دیتاست‌های ویدیویی را در اینجا اضافه کنید
+    "uadfv": 32,  
+
 }
 
 def get_flops_and_params(dataset_mode, sparsed_student_ckpt_path):
@@ -101,7 +98,6 @@ def get_flops_and_params(dataset_mode, sparsed_student_ckpt_path):
         "uadfv": "uadfv",
     }[dataset_mode]
 
-    # --- تغییر جدید: گرفتن تعداد فریم‌ها (پیش‌فرض ۱ برای دیتاست‌های تصویری) ---
     num_frames = num_frames_per_clip.get(dataset_type, 1)
 
     # Load checkpoint
@@ -134,7 +130,6 @@ def get_flops_and_params(dataset_mode, sparsed_student_ckpt_path):
         for mask_weight in mask_weights
     ]
 
-    # --- تغییر: بارگذاری مدل prune شده متناسب با دیتاست ---
     if model_type == "ResNet_50":
         if dataset_type == "uadfv":
             pruned_model = ResNet_50_pruned_uadfv(masks=masks)
