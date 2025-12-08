@@ -1,221 +1,234 @@
+# train.py
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-import cv2
-import numpy as np
-import os
-import random
-from pathlib import Path
-from torchvision import transforms, models
+from torchvision import models
+from torchvision.models import ResNet50_Weights
 import time
-from data.video_data import create_uadfv_dataloaders
-from torchinfo import summary
+import copy
 from thop import profile
-import argparse
+from data.video_data import create_uadfv_dataloaders
 
-# تغییر 1: اضافه کردن RandAugment برای افزایش داده قوی‌تر
-from torchvision.transforms import RandAugment
+# --- بخش ۱: تنظیمات و هایپرپارامترها ---
+ROOT_DIR = '/kaggle/input/uadfv-dataset/UADFV'  # مسیر دیتاست ویدیویی
+MODEL_SAVE_PATH = 'best_resnet50_video_model.pth'
+BATCH_SIZE_TRAIN = 4
+BATCH_SIZE_EVAL = 8
+NUM_EPOCHS = 30
+# تغییر: کاهش نرخ یادگیری
+LEARNING_RATE = 1e-4 
 
-def create_model(num_classes=1, dropout_prob=0.5):
+# --- هایپرپارامترهای جدید بر اساس اطلاعات دیتاست ---
+NUM_FRAMES = 32
+IMAGE_SIZE = 256
+AVG_VIDEO_SECONDS = 11
+VIDEO_FPS = 30
+
+# --- بخش ۲: تعریف مدل و فاین تیون ---
+def initialize_model(fine_tune=False, use_pretrained=True):
     """
-    یک مدل ResNet50 از پیش آموزش دیده را بارگذاری کرده و برای Fine-tuning آماده می‌کند.
+    مدل را برای Partial Fine-tuning یا Feature Extraction آماده می‌کند.
     """
-    model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+    model_ft = models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V2 if use_pretrained else None)
 
     # فریز کردن تمام پارامترهای مدل
-    for param in model.parameters():
+    for param in model_ft.parameters():
         param.requires_grad = False
 
-    # جایگزینی لایه آخر (classifier) برای تعداد کلاس‌های مورد نظر
-    num_ftrs = model.fc.in_features
+    num_ftrs = model_ft.fc.in_features
+    model_ft.fc = nn.Linear(num_ftrs, 1)
+
+    params_to_update = []
     
-    # تغییر 2: اضافه کردن لایه Dropout
-    model.fc = nn.Sequential(
-        nn.Dropout(p=dropout_prob),
-        nn.Linear(num_ftrs, num_classes)
-    )
+    if fine_tune:
+        # تغییر: unfreeze کردن لایه‌های layer3 و layer4 برای Partial Fine-tuning
+        print("Setting up Partial Fine-tuning...")
+        for param in model_ft.layer3.parameters():
+            param.requires_grad = True
+            params_to_update.append(param)
+        for param in model_ft.layer4.parameters():
+            param.requires_grad = True
+            params_to_update.append(param)
+        print("Unfroze layer3 and layer4.")
+    else:
+        print("Setting up Feature Extraction (only training the final layer).")
 
-    # تغییر 3: باز کردن لایه‌های layer3 و layer4 برای آموزش
-    for param in model.layer3.parameters():
+    # همیشه لایه fc را آموزش می‌دهیم
+    for param in model_ft.fc.parameters():
         param.requires_grad = True
-    for param in model.layer4.parameters():
-        param.requires_grad = True
-    for param in model.fc.parameters():
-        param.requires_grad = True
+        params_to_update.append(param)
+
+    print(f"Params to learn: {len(params_to_update)}")
+    if len(params_to_update) == 0:
+        print("Warning: No parameters to learn.")
         
-    return model
+    return model_ft, params_to_update
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device):
-    model.train()
-    running_loss = 0.0
-    running_corrects = 0
-    total_samples = 0
-
-    for videos, labels in dataloader:
-        videos = videos.to(device)
-        labels = labels.to(device).unsqueeze(1)
-
-        optimizer.zero_grad()
-
-        batch_size, num_frames, C, H, W = videos.shape
-        inputs = videos.view(batch_size * num_frames, C, H, W)
-        
-        outputs = model(inputs)
-        outputs = outputs.view(batch_size, num_frames, -1).mean(dim=1)
-
-        loss = criterion(outputs, labels)
-        preds = (outputs > 0).float()
-        
-        loss.backward()
-        optimizer.step()
-
-        running_loss += loss.item() * videos.size(0)
-        running_corrects += torch.sum(preds == labels.data).item()
-        total_samples += videos.size(0)
-
-    epoch_loss = running_loss / total_samples
-    epoch_acc = running_corrects / total_samples
-    return epoch_loss, epoch_acc
-
-def validate(model, dataloader, criterion, device):
-    model.eval()
-    running_loss = 0.0
-    running_corrects = 0
-    total_samples = 0
-
-    with torch.no_grad():
-        for videos, labels in dataloader:
-            videos = videos.to(device)
-            labels = labels.to(device).unsqueeze(1)
-
-            batch_size, num_frames, C, H, W = videos.shape
-            inputs = videos.view(batch_size * num_frames, C, H, W)
-            
-            outputs = model(inputs)
-            outputs = outputs.view(batch_size, num_frames, -1).mean(dim=1)
-            
-            loss = criterion(outputs, labels)
-            preds = (outputs > 0).float()
-
-            running_loss += loss.item() * videos.size(0)
-            running_corrects += torch.sum(preds == labels.data).item()
-            total_samples += videos.size(0)
-
-    epoch_loss = running_loss / total_samples
-    epoch_acc = running_corrects / total_samples
-    return epoch_loss, epoch_acc
-
-# ==============================================================================
-# بخش 3: اجرای اصلی (با تغییرات)
-# ==============================================================================
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Fine-tune ResNet50 on UADFV video dataset.")
-    parser.add_argument('--root_dir', type=str, default="/kaggle/input/uadfv-dataset/UADFV", help='Root directory of the dataset.')
-    parser.add_argument('--num_frames', type=int, default=32, help='Number of frames to sample from each video.')
-    parser.add_argument('--image_size', type=int, default=256, help='Size of the input images.')
-    parser.add_argument('--train_batch_size', type=int, default=4, help='Batch size for training.')
-    parser.add_argument('--eval_batch_size', type=int, default=8, help='Batch size for validation and testing.')
-    parser.add_argument('--num_epochs', type=int, default=50, help='Number of training epochs.')
-    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Initial learning rate for new layers.')
-    parser.add_argument('--num_workers', type=int, default=4, help='Number of worker processes for data loading.')
-    parser.add_argument('--dropout_prob', type=float, default=0.5, help='Dropout probability.')
-    parser.add_argument('--early_stopping_patience', type=int, default=7, help='Patience for early stopping.')
-
-    args = parser.parse_args()
-
-    print("--- Running with the following arguments ---")
-    for arg, value in vars(args).items():
-        print(f"{arg}: {value}")
-    print("-------------------------------------------")
-
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
-    # --- ایجاد Dataloaderها ---
-    train_loader, val_loader, test_loader = create_uadfv_dataloaders(
-        root_dir=args.root_dir,
-        num_frames=args.num_frames,
-        image_size=args.image_size,
-        train_batch_size=args.train_batch_size,
-        eval_batch_size=args.eval_batch_size,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        ddp=False,
-        sampling_strategy='uniform'
-    )
-
-    # --- ایجاد مدل ---
-    model = create_model(num_classes=1, dropout_prob=args.dropout_prob)
-    model = model.to(device)
-
-    # --- چاپ پیچیدگی مدل ---
-    print("\n" + "="*50)
-    print("Model Architecture Summary (torchinfo):")
-    print("="*50)
-    summary(model, input_size=(1, 3, args.image_size, args.image_size), device=device)
-    
-    print("\n" + "="*50)
-    print("Model Complexity (thop):")
-    print("="*50)
-    dummy_input = torch.randn(1, 3, args.image_size, args.image_size).to(device)
-    flops, params = profile(model, inputs=(dummy_input, ), verbose=False)
-    print(f"Model FLOPs (thop): {flops/1e9:.2f} GFLOPs")
-    print(f"Model Parameters (thop): {params/1e6:.2f} M")
-    print("="*50 + "\n")
-
-    # تغییر 4: استفاده از نرخ یادگیری متفاوت برای بخش‌های مختلف مدل
-    optimizer = optim.Adam([
-        {'params': model.layer3.parameters(), 'lr': args.learning_rate / 10},
-        {'params': model.layer4.parameters(), 'lr': args.learning_rate / 10},
-        {'params': model.fc.parameters(), 'lr': args.learning_rate}
-    ], weight_decay=1e-4)
-
-    criterion = nn.BCEWithLogitsLoss()
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5, verbose=True)
-
-    # تغییر 5: پیاده‌سازی Early Stopping
-    best_val_acc = 0.0
-    best_model_wts = None
-    epochs_no_improve = 0
-
+# --- بخش ۳: توابع آموزش و اعتبارسنجی ---
+def train_model(model, dataloaders, criterion, optimizer, scheduler, num_epochs=25, device='cpu'):
     since = time.time()
-    for epoch in range(args.num_epochs):
-        print(f'Epoch {epoch + 1}/{args.num_epochs}')
+    best_model_wts = copy.deepcopy(model.state_dict())
+    best_acc = 0.0
+
+    for epoch in range(num_epochs):
+        print(f'Epoch {epoch + 1}/{num_epochs}')
         print('-' * 10)
 
-        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
-        val_loss, val_acc = validate(model, val_loader, criterion, device)
-        
-        scheduler.step(val_loss)
+        for phase in ['Train', 'Val']:
+            if phase == 'Train':
+                model.train()
+            else:
+                model.eval()
 
-        print(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}')
-        print(f'Val   Loss: {val_loss:.4f}, Val   Acc: {val_acc:.4f}')
-        print('-' * 20)
+            running_loss = 0.0
+            running_corrects = 0
 
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            best_model_wts = model.state_dict()
-            torch.save(best_model_wts, 'best_resnet50_improved.pth')
-            print(f"Saved best model with validation accuracy: {best_val_acc:.4f} at epoch {epoch + 1}")
-            epochs_no_improve = 0
-        else:
-            epochs_no_improve += 1
+            for inputs, labels in dataloaders[phase]:
+                inputs = inputs.to(device)
+                labels = labels.to(device).float().unsqueeze(1)
 
-        # شرط خروج برای Early Stopping
-        if epochs_no_improve >= args.early_stopping_patience:
-            print(f'Early stopping triggered after {epoch + 1} epochs!')
-            break
+                optimizer.zero_grad()
+
+                with torch.set_grad_enabled(phase == 'Train'):
+                    B, T, C, H, W = inputs.shape
+                    # تغییر شکل برای ورودی ResNet
+                    inputs_flat = inputs.view(B * T, C, H, W)
+                    
+                    # پاس رو به جلو برای هر فریم
+                    frame_logits = model(inputs_flat)
+                    
+                    # تغییر: ترکیب پیش‌بینی‌ها در سطح ویدیو
+                    # [B*T, 1] -> [B, T] -> [B, 1]
+                    video_logits = frame_logits.view(B, T).mean(dim=1, keepdim=True)
+                    
+                    # محاسبه Loss در سطح ویدیو
+                    loss = criterion(video_logits, labels)
+                    
+                    # محاسبه پیش‌بینی نهایی در سطح ویدیو
+                    preds = (video_logits > 0).float()
+
+                    if phase == 'Train':
+                        loss.backward()
+                        optimizer.step()
+
+                # تجمیع معیارها
+                running_loss += loss.item() * inputs.size(0)
+                running_corrects += torch.sum(preds == labels).item()
+
+            dataset_size = len(dataloaders[phase].dataset)
+            epoch_loss = running_loss / dataset_size
+            epoch_acc = running_corrects / dataset_size
+
+            print(f'{phase} Loss: {epoch_loss:.4f}, {phase} Accuracy: {epoch_acc:.4f}')
+
+            if phase == 'Val':
+                # فراخوانی scheduler با مقدار loss روی مجموعه اعتبارسنجی
+                scheduler.step(epoch_loss)
+                if epoch_acc > best_acc:
+                    best_acc = epoch_acc
+                    best_model_wts = copy.deepcopy(model.state_dict())
+                    print(f"Saved best model with validation accuracy: {best_acc:.4f} at epoch {epoch + 1}")
+        print()
 
     time_elapsed = time.time() - since
     print(f'Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.0f}s')
-    print(f'Best val Acc: {best_val_acc:4f}')
-
-    # --- بارگذاری بهترین مدل و ارزیابی روی مجموعه تست ---
-    if best_model_wts:
-        model.load_state_dict(best_model_wts)
+    print(f'Best val Acc: {best_acc:4f}')
     
-    print("\nEvaluating on the test set...")
-    test_loss, test_acc = validate(model, test_loader, criterion, device)
-    print(f'Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.4f}')
+    model.load_state_dict(best_model_wts)
+    return model
+
+def evaluate_model(model, dataloader, criterion, device='cpu'):
+    model.eval()
+    running_loss = 0.0
+    running_corrects = 0
+    dataset_size = len(dataloader.dataset)
+
+    with torch.no_grad():
+        for inputs, labels in dataloader:
+            inputs = inputs.to(device)
+            labels = labels.to(device).float().unsqueeze(1)
+
+            B, T, C, H, W = inputs.shape
+            inputs_flat = inputs.view(B * T, C, H, W)
+            
+            frame_logits = model(inputs_flat)
+            
+            # تغییر: ترکیب پیش‌بینی‌ها و محاسبه Loss در سطح ویدیو
+            video_logits = frame_logits.view(B, T).mean(dim=1, keepdim=True)
+            loss = criterion(video_logits, labels)
+            
+            preds = (video_logits > 0).float()
+        
+            running_loss += loss.item() * inputs.size(0)
+            running_corrects += torch.sum(preds == labels).item()
+
+    test_loss = running_loss / dataset_size
+    test_acc = running_corrects / dataset_size
+    print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.4f}")
+
+def analyze_model_complexity(model, image_size=256, avg_video_seconds=11, fps=30):
+    print("\n" + "="*70)
+    print("Model Complexity Analysis after Fine-Tuning")
+    print("="*70)
+    
+    input_tensor = torch.randn(1, 3, image_size, image_size)
+    flops_per_frame, params_thop = profile(model, inputs=(input_tensor,), verbose=False)
+    
+    avg_frames_per_video = int(avg_video_seconds * fps)
+    flops_per_avg_video = flops_per_frame * avg_frames_per_video
+    
+    print("\n--- Computational Cost Summary ---")
+    print(f"Total Parameters: {params_thop/1e6:.2f} M")
+    print(f"FLOPs per Frame: {flops_per_frame / 1e9:.2f} GFLOPs")
+    print(f"Average Frames per Video ({avg_video_seconds}s @ {fps}fps): {avg_frames_per_video}")
+    print(f"FLOPs per Average Video: {flops_per_avg_video / 1e9:.2f} GFLOPs")
+    print("-" * 35)
+    
+    required_gflops_per_second = (flops_per_frame * fps) / 1e9
+    print(f"Required Hardware Power for Real-Time Processing ({fps} FPS): {required_gflops_per_second:.2f} GFLOP/s")
+    print("="*70)
+
+
+# --- بخش ۴: اجرای اصلی ---
+if __name__ == '__main__':
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    print("="*70)
+    print("Dataset Configuration")
+    print("="*70)
+    print(f"Average Video Duration: {AVG_VIDEO_SECONDS} seconds")
+    print(f"Video Frame Rate (FPS): {VIDEO_FPS}")
+    print(f"Average Frames per Video: {AVG_VIDEO_SECONDS * VIDEO_FPS}")
+    print(f"Frames Sampled per Video for Training: {NUM_FRAMES}")
+    print("="*70)
+
+    train_loader, val_loader, test_loader = create_uadfv_dataloaders(
+        root_dir=ROOT_DIR, 
+        num_frames=NUM_FRAMES, 
+        image_size=IMAGE_SIZE,
+        train_batch_size=BATCH_SIZE_TRAIN, 
+        eval_batch_size=BATCH_SIZE_EVAL,
+        num_workers=2
+    )
+    dataloaders = {'Train': train_loader, 'Val': val_loader, 'Test': test_loader}
+
+    # تغییر: فعال کردن Partial Fine-tuning
+    model_ft, params_to_update = initialize_model(fine_tune=True, use_pretrained=True)
+    model_ft = model_ft.to(device)
+
+    criterion = nn.BCEWithLogitsLoss()
+    # تغییر: اضافه کردن Weight Decay
+    optimizer_ft = optim.Adam(params_to_update, lr=LEARNING_RATE, weight_decay=1e-4)
+    # تغییر: اضافه کردن Learning Rate Scheduler
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer_ft, mode='min', factor=0.5, patience=3, verbose=True)
+
+    model_ft = train_model(model_ft, dataloaders, criterion, optimizer_ft, scheduler, num_epochs=NUM_EPOCHS, device=device)
+    
+    torch.save(model_ft.state_dict(), MODEL_SAVE_PATH)
+    print(f"Saved final model at epoch {NUM_EPOCHS}")
+
+    evaluate_model(model_ft, test_loader, criterion, device=device)
+
+    analyze_model_complexity(model_ft, IMAGE_SIZE, AVG_VIDEO_SECONDS, VIDEO_FPS)
