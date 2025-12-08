@@ -24,12 +24,12 @@ class Test:
         self.args = args
         self.dataset_dir = args.dataset_dir
         self.num_workers = args.num_workers
-        self.pin_memory = self.pin_memory
-        self.arch = args.arch  # Expected to be 'ResNet_50'
+        self.pin_memory = args.pin_memory
+        self.arch = args.arch 
         self.device = args.device
         self.test_batch_size = args.test_batch_size
         self.sparsed_student_ckpt_path = args.sparsed_student_ckpt_path
-        self.dataset_mode = args.dataset_mode  # 'hardfake', 'rvf10k', '140k', '200k', '190k', '330k'
+        self.dataset_mode = args.dataset_mode  
         
         # --- اضافه کردن مسیر برای ذخیره نتایج ---
         self.result_dir = getattr(args, 'result_dir', './test_results')
