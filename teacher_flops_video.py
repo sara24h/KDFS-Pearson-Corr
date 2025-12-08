@@ -12,7 +12,7 @@ import ptflops
 from ptflops import get_model_complexity_info
 
 # وارد کردن تابع ایجاد دیتالودر از فایل جداگانه
-from data.video_data import create_uadfv_dataloaders
+from dataset import create_uadfv_dataloaders
 
 # --- بخش ۱: تنظیمات و هایپرپارامترها ---
 ROOT_DIR = '/kaggle/input/uadfv-dataset/UADFV'  # مسیر دیتاست ویدیویی
@@ -23,42 +23,27 @@ NUM_EPOCHS = 30
 LEARNING_RATE = 0.001
 
 # --- هایپرپارامترهای جدید بر اساس اطلاعات دیتاست ---
-NUM_FRAMES = 32  # افزایش تعداد فریم‌های نمونه‌برداری شده برای ویدیوهای طولانی‌تر
+NUM_FRAMES = 32
 IMAGE_SIZE = 256
-AVG_VIDEO_SECONDS = 11 # میانگین طول ویدیو
-VIDEO_FPS = 30          # نرخ فریم بر ثانیه
+AVG_VIDEO_SECONDS = 11
+VIDEO_FPS = 30
 
-# --- بخش ۲: تعریف مدل و فاین تیون (اصلاح‌شده) ---
+# --- بخش ۲: تعریف مدل و فاین تیون ---
 def initialize_model(feature_extract=False, use_pretrained=True):
-    """
-    مقداردهی اولیه مدل و مشخص کردن پارامترهایی که باید آموزش ببینند.
-    این نسخه اصلاح‌شده، ابتدا لایه‌ها را منجمد کرده و سپس لایه آخر را جایگزین می‌کند.
-    """
-    # 1. بارگذاری مدل با سینتکس جدید و وزن‌های پیش‌آموزش‌دیده ImageNet
     model_ft = models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V1 if use_pretrained else None)
-
-    # 2. منجمد کردن تمام پارامترها اگر در حالت فاین تیون پارسیال هستیم
     if feature_extract:
         for param in model_ft.parameters():
             param.requires_grad = False
-
-    # 3. جایگزینی لایه آخر (fc). پارامترهای این لایه جدید به طور پیش‌فرض قابل آموزش هستند.
     num_ftrs = model_ft.fc.in_features
     model_ft.fc = nn.Linear(num_ftrs, 1)
-
-    # 4. جمع‌آوری پارامترهایی که باید بهینه‌سازی شوند (فقط لایه fc جدید)
     params_to_update = [p for p in model_ft.parameters() if p.requires_grad]
     print(f"Params to learn: {len(params_to_update)}")
     if len(params_to_update) == 0:
         print("Warning: No parameters to learn. Check the feature_extract flag.")
-    
     return model_ft, params_to_update
 
 # --- بخش ۳: توابع آموزش و اعتبارسنجی ---
 def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, device='cpu'):
-    """
-    حلقه اصلی آموزش و اعتبارسنجی مدل
-    """
     since = time.time()
     best_model_wts = copy.deepcopy(model.state_dict())
     best_acc = 0.0
@@ -95,7 +80,8 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, device=
                     outputs = outputs.view(B, T)
                     preds = preds.view(B, T)
                     
-                    final_preds = preds.mean(dim=1).float()
+                    # --- اصلاح شده: تبدیل به float قبل از mean ---
+                    final_preds = preds.float().mean(dim=1)
                     final_labels = labels.squeeze(1).float()
 
                     if phase == 'Train':
@@ -103,7 +89,7 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, device=
                         optimizer.step()
 
                 running_loss += loss.item() * inputs.size(0)
-                running_corrects += torch.sum(final_preds == final_labels)
+                running_corrects += torch.sum(final_preds > 0.5).float() # مقایسه نهایی نیز باید با float انجام شود
 
             dataset_size = len(dataloaders[phase].dataset)
             epoch_loss = running_loss / (dataset_size * NUM_FRAMES)
@@ -144,11 +130,15 @@ def evaluate_model(model, dataloader, criterion, device='cpu'):
             
             outputs = outputs.view(B, T)
             preds = torch.sigmoid(outputs) > 0.5
-            final_preds = preds.mean(dim=1).float()
+            preds = preds.view(B, T)
+            
+            # --- اصلاح شده: تبدیل به float قبل از mean ---
+            final_preds = preds.float().mean(dim=1)
             final_labels = labels.squeeze(1).float()
         
         running_loss += loss.item() * inputs.size(0)
-        running_corrects += torch.sum(final_preds == final_labels)
+        # مقایسه نهایی نیز باید با float انجام شود
+        running_corrects += torch.sum(final_preds > 0.5).float()
 
     test_loss = running_loss / (dataset_size * NUM_FRAMES)
     test_acc = running_corrects.double() / dataset_size
@@ -201,23 +191,17 @@ if __name__ == '__main__':
     )
     dataloaders = {'Train': train_loader, 'Val': val_loader, 'Test': test_loader}
 
-    # مقداردهی اولیه مدل با تابع اصلاح‌شده
     model_ft, params_to_update = initialize_model(feature_extract=True, use_pretrained=True)
     model_ft = model_ft.to(device)
 
-    # تعریف تابع هزینه و بهینه‌ساز
     criterion = nn.BCEWithLogitsLoss()
     optimizer_ft = optim.Adam(params_to_update, lr=LEARNING_RATE)
 
-    # آموزش مدل
     model_ft = train_model(model_ft, dataloaders, criterion, optimizer_ft, num_epochs=NUM_EPOCHS, device=device)
     
-    # ذخیره مدل نهایی
     torch.save(model_ft.state_dict(), MODEL_SAVE_PATH)
     print(f"Saved final model at epoch {NUM_EPOCHS}")
 
-    # ارزیابی روی مجموعه تست
     evaluate_model(model_ft, test_loader, criterion, device=device)
 
-    # تحلیل پیچیدگی مدل با اطلاعات جدید
     analyze_model_complexity(model_ft, IMAGE_SIZE, AVG_VIDEO_SECONDS, VIDEO_FPS)
