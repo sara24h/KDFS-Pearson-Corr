@@ -20,8 +20,12 @@ BATCH_SIZE_TRAIN = 4
 BATCH_SIZE_EVAL = 8
 NUM_EPOCHS = 30
 LEARNING_RATE = 0.001
-NUM_FRAMES = 16
+
+# --- هایپرپارامترهای جدید بر اساس اطلاعات دیتاست ---
+NUM_FRAMES = 32  # افزایش تعداد فریم‌های نمونه‌برداری شده برای ویدیوهای طولانی‌تر
 IMAGE_SIZE = 256
+AVG_VIDEO_SECONDS = 11 # میانگین طول ویدیو
+VIDEO_FPS = 30          # نرخ فریم بر ثانیه
 
 # --- بخش ۲: تعریف مدل و فاین تیون ---
 def get_model(pretrained=True):
@@ -85,10 +89,10 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, device=
                 optimizer.zero_grad()
 
                 with torch.set_grad_enabled(phase == 'Train'):
-                    # پردازش ویدیو: ترکیج بچ و زمان
-                    B, T, C, H, W = inputs.shape
-                    inputs = inputs.view(B * T, C, H, W)
-                    labels_repeated = labels.repeat_interleave(T)
+                    # --- پردازش ویدیو: ترکیج بچ و زمان ---
+                    B, T, C, H, W = inputs.shape # [Batch, Time, Channels, Height, Width]
+                    inputs = inputs.view(B * T, C, H, W) # تبدیل به یک بچ بزرگ از تصاویر
+                    labels_repeated = labels.repeat_interleave(T) # تکرار برچسب‌ها
                     
                     outputs = model(inputs)
                     preds = torch.sigmoid(outputs) > 0.5
@@ -163,28 +167,33 @@ def evaluate_model(model, dataloader, criterion, device='cpu'):
     test_acc = running_corrects.double() / dataset_size
     print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.2%}")
 
-def analyze_model_complexity(model, image_size=256):
+def analyze_model_complexity(model, image_size=256, avg_video_seconds=11, fps=30):
     """
-    تحلیل پیچیدگی محاسباتی و تعداد پارامترهای مدل
+    تحلیل پیچیدگی محاسباتی و تعداد پارامترهای مدل بر اساس اطلاعات دیتاست
     """
     print("\n" + "="*70)
     print("Model Complexity Analysis after Fine-Tuning")
     print("="*70)
     
-    # تحلیل با ptflops برای جزئیات لایه‌ها
-    try:
-        macs, params = get_model_complexity_info(model, (3, image_size, image_size), as_strings=True,
-                                                print_per_layer_stat=True, verbose=True)
-        print(f"ResNet FLOPs (ptflops): {macs}")
-        print(f"ResNet Parameters (ptflops): {params}")
-    except Exception as e:
-        print(f"Could not run ptflops analysis: {e}")
-
-    # تحلیل با thop برای خلاصه
+    # تحلیل با thop برای محاسبات دقیق‌تر
     input_tensor = torch.randn(1, 3, image_size, image_size)
-    flops, params_thop = profile(model, inputs=(input_tensor,), verbose=False)
-    print(f"ResNet MACs (thop): {flops}")
-    print(f"ResNet Parameters (thop): {params_thop}")
+    flops_per_frame, params_thop = profile(model, inputs=(input_tensor,), verbose=False)
+    
+    # محاسبه هزینه بر اساس اطلاعات دیتاست
+    avg_frames_per_video = int(avg_video_seconds * fps)
+    flops_per_avg_video = flops_per_frame * avg_frames_per_video
+    
+    print("\n--- Computational Cost Summary ---")
+    print(f"Total Parameters: {params_thop/1e6:.2f} M")
+    print(f"FLOPs per Frame: {flops_per_frame / 1e9:.2f} GFLOPs")
+    print(f"Average Frames per Video ({avg_video_seconds}s @ {fps}fps): {avg_frames_per_video}")
+    print(f"FLOPs per Average Video: {flops_per_avg_video / 1e9:.2f} GFLOPs")
+    print("-" * 35)
+    
+    # محاسبه توان مورد نیاز برای پردازش زنده
+    required_gflops_per_second = (flops_per_frame * fps) / 1e9
+    print(f"Required Hardware Power for Real-Time Processing ({fps} FPS): {required_gflops_per_second:.2f} GFLOP/s")
+    print("="*70)
 
 
 # --- بخش ۴: اجرای اصلی ---
@@ -192,10 +201,24 @@ if __name__ == '__main__':
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    # چاپ اطلاعات دیتاست
+    print("="*70)
+    print("Dataset Configuration")
+    print("="*70)
+    print(f"Average Video Duration: {AVG_VIDEO_SECONDS} seconds")
+    print(f"Video Frame Rate (FPS): {VIDEO_FPS}")
+    print(f"Average Frames per Video: {AVG_VIDEO_SECONDS * VIDEO_FPS}")
+    print(f"Frames Sampled per Video for Training: {NUM_FRAMES}")
+    print("="*70)
+
+
     # ایجاد دیتالودرها با استفاده از تابع از فایل dataset.py
     train_loader, val_loader, test_loader = create_uadfv_dataloaders(
-        root_dir=ROOT_DIR, num_frames=NUM_FRAMES, image_size=IMAGE_SIZE,
-        train_batch_size=BATCH_SIZE_TRAIN, eval_batch_size=BATCH_SIZE_EVAL,
+        root_dir=ROOT_DIR, 
+        num_frames=NUM_FRAMES, 
+        image_size=IMAGE_SIZE,
+        train_batch_size=BATCH_SIZE_TRAIN, 
+        eval_batch_size=BATCH_SIZE_EVAL,
         num_workers=2 # کاهش تعداد workerها در Kaggle برای جلوگیری از خطا
     )
     dataloaders = {'Train': train_loader, 'Val': val_loader, 'Test': test_loader}
@@ -218,5 +241,5 @@ if __name__ == '__main__':
     # ارزیابی روی مجموعه تست
     evaluate_model(model_ft, test_loader, criterion, device=device)
 
-    # تحلیل پیچیدگی مدل
-    analyze_model_complexity(model_ft, IMAGE_SIZE)
+    # تحلیل پیچیدگی مدل با اطلاعات جدید
+    analyze_model_complexity(model_ft, IMAGE_SIZE, AVG_VIDEO_SECONDS, VIDEO_FPS)
