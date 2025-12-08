@@ -15,7 +15,7 @@ ROOT_DIR = '/kaggle/input/uadfv-dataset/UADFV'  # مسیر دیتاست ویدی
 MODEL_SAVE_PATH = 'best_resnet50_video_model.pth'
 BATCH_SIZE_TRAIN = 4
 BATCH_SIZE_EVAL = 8
-NUM_EPOCHS = 10
+NUM_EPOCHS = 6
 # تغییر: کاهش نرخ یادگیری
 LEARNING_RATE = 1e-4 
 
@@ -59,13 +59,12 @@ def initialize_model(fine_tune=False, use_pretrained=True):
         param.requires_grad = True
         params_to_update.append(param)
 
-    print(f"Params to learn: {len(params_to_update)}")
-    if len(params_to_update) == 0:
-        print("Warning: No parameters to learn.")
+    total_trainable_params = sum(p.numel() for p in params_to_update)
+    print(f"Total trainable parameters: {total_trainable_params:,}")
+
         
     return model_ft, params_to_update
 
-# --- بخش ۳: توابع آموزش و اعتبارسنجی ---
 def train_model(model, dataloaders, criterion, optimizer, scheduler, num_epochs=25, device='cpu'):
     since = time.time()
     best_model_wts = copy.deepcopy(model.state_dict())
@@ -167,12 +166,13 @@ def evaluate_model(model, dataloader, criterion, device='cpu'):
     test_acc = running_corrects / dataset_size
     print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.4f}")
 
-def analyze_model_complexity(model, image_size=256, avg_video_seconds=11, fps=30):
+def analyze_model_complexity(model, device, image_size=256, avg_video_seconds=11, fps=30):
     print("\n" + "="*70)
     print("Model Complexity Analysis after Fine-Tuning")
     print("="*70)
     
-    input_tensor = torch.randn(1, 3, image_size, image_size)
+    # اصلاح: ورودی را به دستگاه مورد نظر منتقل کنید
+    input_tensor = torch.randn(1, 3, image_size, image_size).to(device)
     flops_per_frame, params_thop = profile(model, inputs=(input_tensor,), verbose=False)
     
     avg_frames_per_video = int(avg_video_seconds * fps)
@@ -190,7 +190,6 @@ def analyze_model_complexity(model, image_size=256, avg_video_seconds=11, fps=30
     print("="*70)
 
 
-# --- بخش ۴: اجرای اصلی ---
 if __name__ == '__main__':
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
