@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torchvision import models
+from torchvision.models import ResNet50_Weights
 import time
 import copy
 from thop import profile
@@ -27,34 +28,29 @@ IMAGE_SIZE = 256
 AVG_VIDEO_SECONDS = 11 # میانگین طول ویدیو
 VIDEO_FPS = 30          # نرخ فریم بر ثانیه
 
-# --- بخش ۲: تعریف مدل و فاین تیون ---
-def get_model(pretrained=True):
-    """
-    ایجاد مدل ResNet50 با لایه آخر برای خروجی باینری
-    """
-    model = models.resnet50(pretrained=pretrained)
-    num_ftrs = model.fc.in_features
-    model.fc = nn.Linear(num_ftrs, 1) # خروجی باینری
-    return model
-
-def set_parameter_requires_grad(model, feature_extracting):
-    """
-    منجمد کردن پارامترهای مدل در صورت نیاز (برای فاین تیون پارسیال)
-    """
-    if feature_extracting:
-        for param in model.parameters():
-            param.requires_grad = False
-
+# --- بخش ۲: تعریف مدل و فاین تیون (اصلاح‌شده) ---
 def initialize_model(feature_extract=False, use_pretrained=True):
     """
-    مقداردهی اولیه مدل و مشخص کردن پارامترهایی که باید آموزش ببینند
+    مقداردهی اولیه مدل و مشخص کردن پارامترهایی که باید آموزش ببینند.
+    این نسخه اصلاح‌شده، ابتدا لایه‌ها را منجمد کرده و سپس لایه آخر را جایگزین می‌کند.
     """
-    model_ft = get_model(use_pretrained)
-    set_parameter_requires_grad(model_ft, feature_extract)
-    
-    # فقط پارامترهای لایه fc بهینه‌سازی خواهند شد (اگر feature_extract=True باشد)
+    # 1. بارگذاری مدل با سینتکس جدید و وزن‌های پیش‌آموزش‌دیده ImageNet
+    model_ft = models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V1 if use_pretrained else None)
+
+    # 2. منجمد کردن تمام پارامترها اگر در حالت فاین تیون پارسیال هستیم
+    if feature_extract:
+        for param in model_ft.parameters():
+            param.requires_grad = False
+
+    # 3. جایگزینی لایه آخر (fc). پارامترهای این لایه جدید به طور پیش‌فرض قابل آموزش هستند.
+    num_ftrs = model_ft.fc.in_features
+    model_ft.fc = nn.Linear(num_ftrs, 1)
+
+    # 4. جمع‌آوری پارامترهایی که باید بهینه‌سازی شوند (فقط لایه fc جدید)
     params_to_update = [p for p in model_ft.parameters() if p.requires_grad]
     print(f"Params to learn: {len(params_to_update)}")
+    if len(params_to_update) == 0:
+        print("Warning: No parameters to learn. Check the feature_extract flag.")
     
     return model_ft, params_to_update
 
@@ -71,17 +67,15 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, device=
         print(f'Epoch {epoch + 1}/{num_epochs}')
         print('-' * 10)
 
-        # Each epoch has a training and validation phase
         for phase in ['Train', 'Val']:
             if phase == 'Train':
-                model.train()  # Set model to training mode
+                model.train()
             else:
-                model.eval()   # Set model to evaluate mode
+                model.eval()
 
             running_loss = 0.0
             running_corrects = 0
 
-            # Iterate over data.
             for inputs, labels in dataloaders[phase]:
                 inputs = inputs.to(device)
                 labels = labels.to(device).float().unsqueeze(1)
@@ -89,21 +83,18 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, device=
                 optimizer.zero_grad()
 
                 with torch.set_grad_enabled(phase == 'Train'):
-                    # --- پردازش ویدیو: ترکیج بچ و زمان ---
-                    B, T, C, H, W = inputs.shape # [Batch, Time, Channels, Height, Width]
-                    inputs = inputs.view(B * T, C, H, W) # تبدیل به یک بچ بزرگ از تصاویر
-                    labels_repeated = labels.repeat_interleave(T) # تکرار برچسب‌ها
+                    B, T, C, H, W = inputs.shape
+                    inputs = inputs.view(B * T, C, H, W)
+                    labels_repeated = labels.repeat_interleave(T)
                     
                     outputs = model(inputs)
                     preds = torch.sigmoid(outputs) > 0.5
                     
                     loss = criterion(outputs, labels_repeated.unsqueeze(1))
                     
-                    # بازگرداندن به شکل ویدیویی برای میانگین‌گیری
                     outputs = outputs.view(B, T)
                     preds = preds.view(B, T)
                     
-                    # میانگین‌گیری پیش‌بینی‌ها برای هر ویدیو
                     final_preds = preds.mean(dim=1).float()
                     final_labels = labels.squeeze(1).float()
 
@@ -111,12 +102,11 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, device=
                         loss.backward()
                         optimizer.step()
 
-                # آمارها بر اساس پیش‌بینی نهایی ویدیو
-                running_loss += loss.item() * inputs.size(0) # loss بر اساس همه فریم‌ها
+                running_loss += loss.item() * inputs.size(0)
                 running_corrects += torch.sum(final_preds == final_labels)
 
             dataset_size = len(dataloaders[phase].dataset)
-            epoch_loss = running_loss / (dataset_size * NUM_FRAMES) # میانگین loss بر فریم
+            epoch_loss = running_loss / (dataset_size * NUM_FRAMES)
             epoch_acc = running_corrects.double() / dataset_size
 
             print(f'{phase} Loss: {epoch_loss:.4f}, {phase} Accuracy: {epoch_acc:.2%}')
@@ -135,9 +125,6 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, device=
     return model
 
 def evaluate_model(model, dataloader, criterion, device='cpu'):
-    """
-    ارزیابی نهایی مدل روی مجموعه تست
-    """
     model.eval()
     running_loss = 0.0
     running_corrects = 0
@@ -168,18 +155,13 @@ def evaluate_model(model, dataloader, criterion, device='cpu'):
     print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.2%}")
 
 def analyze_model_complexity(model, image_size=256, avg_video_seconds=11, fps=30):
-    """
-    تحلیل پیچیدگی محاسباتی و تعداد پارامترهای مدل بر اساس اطلاعات دیتاست
-    """
     print("\n" + "="*70)
     print("Model Complexity Analysis after Fine-Tuning")
     print("="*70)
     
-    # تحلیل با thop برای محاسبات دقیق‌تر
     input_tensor = torch.randn(1, 3, image_size, image_size)
     flops_per_frame, params_thop = profile(model, inputs=(input_tensor,), verbose=False)
     
-    # محاسبه هزینه بر اساس اطلاعات دیتاست
     avg_frames_per_video = int(avg_video_seconds * fps)
     flops_per_avg_video = flops_per_frame * avg_frames_per_video
     
@@ -190,7 +172,6 @@ def analyze_model_complexity(model, image_size=256, avg_video_seconds=11, fps=30
     print(f"FLOPs per Average Video: {flops_per_avg_video / 1e9:.2f} GFLOPs")
     print("-" * 35)
     
-    # محاسبه توان مورد نیاز برای پردازش زنده
     required_gflops_per_second = (flops_per_frame * fps) / 1e9
     print(f"Required Hardware Power for Real-Time Processing ({fps} FPS): {required_gflops_per_second:.2f} GFLOP/s")
     print("="*70)
@@ -201,7 +182,6 @@ if __name__ == '__main__':
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # چاپ اطلاعات دیتاست
     print("="*70)
     print("Dataset Configuration")
     print("="*70)
@@ -211,19 +191,17 @@ if __name__ == '__main__':
     print(f"Frames Sampled per Video for Training: {NUM_FRAMES}")
     print("="*70)
 
-
-    # ایجاد دیتالودرها با استفاده از تابع از فایل dataset.py
     train_loader, val_loader, test_loader = create_uadfv_dataloaders(
         root_dir=ROOT_DIR, 
         num_frames=NUM_FRAMES, 
         image_size=IMAGE_SIZE,
         train_batch_size=BATCH_SIZE_TRAIN, 
         eval_batch_size=BATCH_SIZE_EVAL,
-        num_workers=2 # کاهش تعداد workerها در Kaggle برای جلوگیری از خطا
+        num_workers=2
     )
     dataloaders = {'Train': train_loader, 'Val': val_loader, 'Test': test_loader}
 
-    # مقداردهی اولیه مدل
+    # مقداردهی اولیه مدل با تابع اصلاح‌شده
     model_ft, params_to_update = initialize_model(feature_extract=True, use_pretrained=True)
     model_ft = model_ft.to(device)
 
