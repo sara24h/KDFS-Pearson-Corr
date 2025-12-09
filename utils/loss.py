@@ -101,30 +101,25 @@ def compute_filter_correlation(filters, mask_weight, gumbel_temperature=1.0):
     
     return correlation_loss, mean_upper_corr 
 
+# در فایل utils/loss.py
 class MaskLoss(nn.Module):
     def __init__(self):
         super(MaskLoss, self).__init__()
     
     def forward(self, model):
-   
-        total_pruning_loss = 0.0
+        total_loss = 0.0
         num_layers = 0
-        device = next(model.parameters()).device
-        
         for m in model.mask_modules:
             if isinstance(m, SoftMaskedConv2d):
-                filters = m.weight  
-                mask_weight = m.mask_weight 
-                gumbel_temperature = m.gumbel_temperature 
-                pruning_loss, _ = compute_filter_correlation(filters, mask_weight, gumbel_temperature)
-                total_pruning_loss += pruning_loss
+                # این زیان ساده، ماسک‌ها را به سمت صفر (حذف) سوق می‌دهد
+                mask = torch.sigmoid(m.mask_weight)
+                total_loss += torch.mean(mask)
                 num_layers += 1
         
         if num_layers == 0:
-            warnings.warn("No maskable layers found in the model.")
-
-        total_loss = total_pruning_loss / num_layers
-        return total_loss
+            return torch.tensor(0.0, device=next(model.parameters()).device, requires_grad=True)
+        
+        return total_loss / num_layers
 
 class CrossEntropyLabelSmooth(nn.Module):
     def __init__(self, num_classes, epsilon):
