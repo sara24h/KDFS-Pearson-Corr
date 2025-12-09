@@ -358,7 +358,7 @@ class TrainDDP:
             meter_loss = meter.AverageMeter("Loss", ":.4e")
             meter_top1 = meter.AverageMeter("Acc@1", ":6.2f")
             meter_avg_corr = meter.AverageMeter("L_corr", ":.6f")
-            meter_retention = meter.AverageMeter("Retention", ":.4f")
+        
 
         for epoch in range(self.start_epoch + 1, self.num_epochs + 1):
             self.train_loader.sampler.set_epoch(epoch)
@@ -373,7 +373,7 @@ class TrainDDP:
                 meter_loss.reset()
                 meter_top1.reset()
                 meter_avg_corr.reset()
-                meter_retention.reset()
+              
 
                 current_lr = self.optim_weight.param_groups[0]['lr']
 
@@ -496,7 +496,7 @@ class TrainDDP:
                         meter_loss.update(reduced_total_loss.item(), n)
                         meter_top1.update(reduced_prec1.item(), n)
                         meter_avg_corr.update(reduced_avg_corr.item(), n)
-                        meter_retention.update(reduced_avg_ret.item(), n)
+
 
                         _tqdm.set_postfix(
                             loss=f"{meter_loss.avg:.4f}",
@@ -507,12 +507,7 @@ class TrainDDP:
                 if self.rank == 0:
                     self.student.module.ticket = False
                     
-                    # --- شروع بخش اصلاح‌شده برای محاسبه FLOPs ویدیو ---
-                    avg_video_flops = self.student.module.get_video_flops(
-                        video_duration_seconds=self.avg_video_duration, 
-                        fps=self.avg_video_fps
-                    )
-                    # --- پایان بخش اصلاح‌شده ---
+                    val_avg_video_flops = self.student.module.get_video_flops_sampled(num_sampled_frames=self.num_frames )
 
                     self.logger.info(f"[Train] Epoch {epoch} : Gumbel_temperature {current_gumbel_temp:.2f} "
                                     f"LR {current_lr:.6f} OriLoss {meter_oriloss.avg:.4f} "
@@ -521,7 +516,8 @@ class TrainDDP:
                                     f"Train_Acc {meter_top1.avg:.2f}")
                     
                     # لاگ FLOPs بر حسب TFLOPs برای خوانایی بهتر
-                    self.logger.info(f"[Train Avg Video Flops] Epoch {epoch} : {avg_video_flops/1e12:.2f} TFLOPs")
+                    self.logger.info(f"[Train Avg Video Flops] Epoch {epoch} : {avg_video_flops/1e9:.2f} GFLOPs")
+
 
             if self.rank == 0:
                 self.student.eval()
@@ -547,16 +543,11 @@ class TrainDDP:
 
                 mask_avgs = self.get_mask_averages()
                 
-                # --- شروع بخش اصلاح‌شده برای محاسبه FLOPs ویدیو ---
-                val_avg_video_flops = self.student.module.get_video_flops(
-                    video_duration_seconds=self.avg_video_duration, 
-                    fps=self.avg_video_fps
-                )
-                # --- پایان بخش اصلاح‌شده ---
+                avg_video_flops = self.student.module.get_video_flops_sampled(num_sampled_frames=self.num_frames )
                 
                 self.logger.info(f"[Val] Epoch {epoch} : Val_Acc {val_meter.avg:.2f}")
                 self.logger.info(f"[Val mask avg] Epoch {epoch} : {mask_avgs}")
-                self.logger.info(f"[Val Avg Video Flops] Epoch {epoch} : {val_avg_video_flops/1e12:.2f} TFLOPs")
+                self.logger.info(f"[Val Avg Video Flops] Epoch {epoch} : {val_avg_video_flops/1e9:.2f} GFLOPs")
 
                 self.scheduler_student_weight.step()
                 if self.scheduler_student_mask is not None:
