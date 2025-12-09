@@ -245,29 +245,27 @@ class TrainDDP:
             self.logger.info(f"Found {len(weight_params)} weight parameters and {len(mask_params)} mask parameters.")
             self.logger.info("--- End of Parameter Separation ---")
 
-        self.optim_weight = torch.optim.Adamax(weight_params,
-                                              lr=self.lr,
-                                              weight_decay=self.weight_decay,
-                                              eps=1e-7)
+        self.optim_weight = torch.optim.Adamax(weight_params,lr=self.lr,weight_decay=self.weight_decay,eps=1e-7)
 
         self.optim_mask = None
         self.scheduler_student_mask = None
 
         if mask_params:
-            self.optim_mask = torch.optim.Adamax(mask_params, lr=self.lr, eps=1e-7)
+        # نرخ یادگیری ماسک را 100 برابر کوچکتر از نرخ یادگیری اصلی کنید
+            mask_lr = self.lr / 100.0  
+            self.optim_mask = torch.optim.Adamax(mask_params, lr=mask_lr, eps=1e-7)
+
+            if self.rank == 0:
+                self.logger.info(f"Using separate LR for masks: {mask_lr} (Main LR: {self.lr})")
+            
             self.scheduler_student_mask = scheduler.CosineAnnealingLRWarmup(
                 self.optim_mask, T_max=self.lr_decay_T_max,
                 eta_min=self.lr_decay_eta_min, last_epoch=-1,
                 warmup_steps=self.warmup_steps,
-                warmup_start_lr=self.warmup_start_lr)
+                warmup_start_lr=self.warmup_start_lr / 100.0) # نرخ شروع را هم کوچک کنید
         elif self.rank == 0:
             self.logger.warning("Warning: No mask parameters found. 'optim_mask' and 'scheduler_student_mask' will be None.")
-
-        self.scheduler_student_weight = scheduler.CosineAnnealingLRWarmup(
-            self.optim_weight, T_max=self.lr_decay_T_max,
-            eta_min=self.lr_decay_eta_min, last_epoch=-1,
-            warmup_steps=self.warmup_steps,
-            warmup_start_lr=self.warmup_start_lr)
+    
 
     def resume_student_ckpt(self):
         if not os.path.exists(self.resume):
