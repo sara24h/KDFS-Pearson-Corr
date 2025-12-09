@@ -12,8 +12,6 @@ from data.video_data import create_uadfv_dataloaders
 
 # تابع کمکی برای تنظیم seed (اگر ندارید، می‌توانید آن را حذف کنید)
 def set_global_seed(seed: int):
-    # این تابع را باید خودتان پیاده‌سازی کنید یا از کتابخانه مناسب وارد کنید
-    # برای مثال:
     import random
     import numpy as np
     random.seed(seed)
@@ -87,7 +85,7 @@ class Test:
 
     def test(self):
         self.student.eval()
-        self.student.ticket = True  # فعال کردن حالت نهایی pruning
+        self.student.ticket = True  # فعال کردن حالت نهایی pruning (سفت کردن ماسک‌ها)
 
         # --- بخش اصلاح‌شده: محاسبه دقیق FLOPs و پارامترهای مؤثر ---
         print("\n" + "="*80)
@@ -95,24 +93,35 @@ class Test:
         print("="*80)
 
         # محاسبه صحیح FLOPs با استفاده از متد خود مدل دانشجو
+        # این متد از ماسک‌های سفت (hard mask) استفاده می‌کند
         student_flops = self.student.get_video_flops_sampled(num_sampled_frames=self.num_frames) / 1e9  # GFLOPs
         
-        # محاسبه تعداد پارامترهای مؤثر (غیرمهر و موم شده)
+        # --- شروع بخش اصلاح شده برای محاسبه پارامترها ---
+        # محاسبه تعداد پارامترهای مؤثر با پیمایش مستقیم لایه‌های ماسک‌دار
         effective_params = 0
+        # فرض می‌کنیم mask_modules لیستی از تمام لایه‌های SoftMaskedConv2d است
+        for m in self.student.mask_modules:
+            # ماسک وزن را جمع بزن تا تعداد کانال‌های فعال را به دست آوری
+            num_active_channels = torch.sum(m.mask).item()
+            
+            # تعداد پارامترهای فعال در لایه کانولوشنی
+            # (in_channels * kernel_h * kernel_w + 1(for_bias)) * num_active_channels
+            conv_params_per_channel = m.in_channels * m.kernel_size[0] * m.kernel_size[1]
+            if m.bias is not None:
+                conv_params_per_channel += 1
+            
+            effective_params += conv_params_per_channel * num_active_channels
+
+        # اضافه کردن پارامترهای لایه‌هایی که هرس نشده‌اند (مانند conv1, fc, downsample)
         for name, module in self.student.named_modules():
-            if isinstance(module, (nn.Conv2d, nn.Linear)):
-                if hasattr(module, 'weight_mask'):
-                    effective_params += torch.sum(module.weight_mask).item()
-                else:
-                    effective_params += module.weight.nelement()
-                
-                if module.bias is not None:
-                    if hasattr(module, 'bias_mask'):
-                        effective_params += torch.sum(module.bias_mask).item()
-                    else:
-                        effective_params += module.bias.nelement()
-        
+            # لایه‌های استاندارد که در mask_modules نیستند
+            if isinstance(module, (nn.Conv2d, nn.Linear)) and not any(module is m.base_layer for m in self.student.mask_modules):
+                 effective_params += module.weight.nelement()
+                 if module.bias is not None:
+                     effective_params += module.bias.nelement()
+
         student_params = effective_params / 1e6  # MParams
+        # --- پایان بخش اصلاح شده ---
 
         # --- بخش اصلاح‌شده: گزارش نتایج مقایسه‌ای با مدل معلم ---
         print("\n" + "="*80)
