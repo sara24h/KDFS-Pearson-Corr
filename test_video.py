@@ -2,10 +2,9 @@ import os
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-from thop import profile
 from model.teacher.ResNet import ResNet_50_hardfakevsreal
 from model.student.ResNet_sparse_video import ResNet_50_sparse_uadfv
-from data.video_data import create_uadfv_dataloaders  # حتماً این خط باشه
+from data.video_data import create_uadfv_dataloaders
 
 
 class Test:
@@ -15,9 +14,7 @@ class Test:
         self.test_batch_size = args.test_batch_size
         self.sparsed_student_ckpt_path = args.sparsed_student_ckpt_path
         self.num_frames = getattr(args, 'num_frames', 16)
-
-        # عدد دقیق معلم شما (از اجرای قبلی)
-        self.teacher_video_flops = 170.59  # GFLOPs برای ۳۲ فریم
+        self.teacher_num_frames = getattr(args, 'teacher_num_frames', 32)
 
     def build_models(self):
         print("بارگذاری مدل معلم (فقط برای مقایسه)...")
@@ -44,27 +41,56 @@ class Test:
         student.to(self.device)
         student.eval()
         student.ticket = True  # پرونینگ فعال
+        
         return teacher, student
+
+    def calculate_flops(self, model, num_frames):
+        
+        if hasattr(model, 'get_video_flops_sampled'):
+            # برای student که متد جدید دارد
+            flops = model.get_video_flops_sampled(num_sampled_frames=num_frames)
+            return flops / 1e9  # تبدیل به GFLOPs
+        else:
+          
+            flops_per_frame = 5.39  # GFLOPs
+            return flops_per_frame * num_frames
 
     def test(self):
         teacher, student = self.build_models()
 
-        dummy = torch.randn(1, 3, 256, 256).to(self.device)
-        flops_frame, params = profile(student, inputs=(dummy,), verbose=False)
-        flops_video = flops_frame * self.num_frames / 1e9  # GFLOPs
-
         print("\n" + "="*85)
-        
-        print("="*85)
-        print(f"(Teacher)         : 170.59 GFLOPs")
-        print(f" (Student)        : {self.num_frames:2d} فریم → {flops_video:7.2f} GFLOPs")
+        print("محاسبه FLOPs...")
         print("-"*85)
-        reduction = (self.teacher_video_flops - flops_video) / self.teacher_video_flops * 100
-        print(f" FLOPs Reduction : {reduction:6.2f}%")
-        print(f" Params Reduction : {(23.51 - params/1e6)/23.51*100:6.2f}%")
+        
+        # Teacher FLOPs
+        teacher_flops = self.calculate_flops(teacher, self.teacher_num_frames)
+        print(f"Teacher ({self.teacher_num_frames} frames): {teacher_flops:.2f} GFLOPs")
+        
+        # Student FLOPs
+        student_flops = self.calculate_flops(student, self.num_frames)
+        print(f"Student ({self.num_frames} frames): {student_flops:.2f} GFLOPs")
+        
+        # محاسبه پارامترها
+        teacher_params = sum(p.numel() for p in teacher.parameters()) / 1e6
+        student_params = sum(p.numel() for p in student.parameters()) / 1e6
+        
+        print("\n" + "="*85)
+        print("                      مقایسه مدل‌های Teacher و Student")
+        print("="*85)
+        print(f"Teacher: {self.teacher_num_frames:2d} frames → {teacher_flops:7.2f} GFLOPs | {teacher_params:5.2f}M params")
+        print(f"Student: {self.num_frames:2d} frames → {student_flops:7.2f} GFLOPs | {student_params:5.2f}M params")
+        print("-"*85)
+        
+        # کاهش FLOPs
+        flops_reduction = (teacher_flops - student_flops) / teacher_flops * 100
+        params_reduction = (teacher_params - student_params) / teacher_params * 100
+        
+        print(f"FLOPs Reduction  : {flops_reduction:6.2f}%")
+        print(f"Params Reduction : {params_reduction:6.2f}%")
         print("="*85)
 
         # تست دقت
+        print("\nبارگذاری داده‌های تست...")
         _, _, test_loader = create_uadfv_dataloaders(
             root_dir=self.args.dataset_dir,
             num_frames=self.num_frames,
@@ -78,8 +104,10 @@ class Test:
 
         correct = 0
         total = 0
+        
+        print(f"\nتست دقت روی {len(test_loader)} batch...")
         with torch.no_grad():
-            for videos, labels in tqdm(test_loader, desc="Testing Accuracy", ncols=100):
+            for videos, labels in tqdm(test_loader, desc="Testing", ncols=80):
                 videos = videos.to(self.device)
                 labels = labels.to(self.device).float()
 
@@ -93,25 +121,31 @@ class Test:
                 correct += (preds == labels).sum().item()
                 total += B
 
-        accuracy = 100. * correct / total
-        print(f"\nدقت نهایی روی مجموعه تست (با {self.num_frames} فریم): {accuracy:.2f}%")
-        print(f"کاهش FLOPs نسبت به معلم: {reduction:.2f}% → فقط {flops_video:.2f} GFLOPs!")
+        accuracy = 100.0 * correct / total
+        
+        print("\n" + "="*85)
 
-    def main(self):  # این تابع رو اضافه کردم!
+        print(f"Test Accuracy    : {accuracy:.2f}%")
+        print(f"FLOPs Reduction  : {flops_reduction:.2f}%")
+        print(f"Student FLOPs    : {student_flops:.2f} GFLOPs (با {self.num_frames} فریم)")
+        print("="*85)
+
+    def main(self):
         self.test()
 
 
-# ──────── تنظیمات شما ────────
+# ──────── تنظیمات ────────
 class Args:
     def __init__(self):
         self.dataset_dir = "/kaggle/input/uadfv-dataset/UADFV"
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.test_batch_size = 8
-        self.sparsed_student_ckpt_path = "/kaggle/working/results/run_resnet50_imagenet_prune1/student_model/resnet50_sparse_best.pt"  # مسیر دقیق خودت
+        self.sparsed_student_ckpt_path = "/kaggle/working/results/run_resnet50_imagenet_prune1/student_model/resnet50_sparse_best.pt"
         self.num_frames = 16
+        self.teacher_num_frames = 32  # ⭐ تعداد فریم‌های teacher
 
 
 if __name__ == '__main__':
     args = Args()
     tester = Test(args)
-    tester.main()  # حالا کار می‌کنه!
+    tester.main()
