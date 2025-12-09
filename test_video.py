@@ -13,7 +13,7 @@ class Test:
         self.device = args.device
         self.test_batch_size = args.test_batch_size
         self.sparsed_student_ckpt_path = args.sparsed_student_ckpt_path
-        self.num_frames = getattr(args, 'num_frames', 16)
+        self.num_frames = getattr(args, 'num_frames', 32)
         self.teacher_num_frames = getattr(args, 'teacher_num_frames', 32)
 
     def build_models(self):
@@ -160,7 +160,7 @@ class Args:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.test_batch_size = 8
         self.sparsed_student_ckpt_path = "/kaggle/working/results/run_resnet50_imagenet_prune1/student_model/resnet50_sparse_best.pt"
-        self.num_frames = 16
+        self.num_frames = 32
         self.teacher_num_frames = 32
 
 
