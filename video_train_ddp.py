@@ -7,12 +7,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.distributed as dist
+import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
-#from data.video_data import Dataset_selector
-from model.student.ResNet_sparse_video import (ResNet_50_sparse_uadfv,SoftMaskedConv2d)
+from model.student.ResNet_sparse_video import (ResNet_50_sparse_uadfv, SoftMaskedConv2d)
 from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
 from model.student.GoogleNet_sparse import GoogLeNet_sparse_deepfake
 from utils import utils, loss, meter, scheduler
@@ -41,7 +41,6 @@ class TrainDDP:
         self.split_ratio = getattr(args, 'split_ratio', (0.7, 0.15, 0.15))
         self.lr = args.lr
         self.warmup_steps = args.warmup_steps
-        # کد صحیح:
         self.warmup_start_lr = args.warmup_start_lr
         self.lr_decay_T_max = args.lr_decay_T_max
         self.lr_decay_eta_min = args.lr_decay_eta_min
@@ -133,15 +132,12 @@ class TrainDDP:
                 sampling_strategy=self.frame_sampling
             )
 
-            # --- شروع بخش جدید: مشخصات میانگین ویدیو ---
             if self.rank == 0:
                 self.logger.info("Using pre-calculated average video properties for FLOPs reporting.")
-                # مقادیر میانگین برای دیتاست UADFV که از قبل محاسبه کرده‌اید
-                self.avg_video_duration = 11.6  # <-- این مقدار را با میانگین واقعی خود جایگزین کنید
-                self.avg_video_fps = 30.00      # <-- این مقدار را با میانگین واقعی خود جایگزین کنید
+                self.avg_video_duration = 11.6
+                self.avg_video_fps = 30.00
                 self.logger.info(f"Average video duration set to: {self.avg_video_duration}s")
                 self.logger.info(f"Average video FPS set to: {self.avg_video_fps}")
-            # --- پایان بخش جدید ---
 
             if self.rank == 0:
                 self.logger.info("UADFV Dataset has been loaded!")
@@ -179,9 +175,7 @@ class TrainDDP:
             self.logger.info("Building student model")
 
         if self.arch == 'resnet50':
-            StudentModelClass = (ResNet_50_sparse_uadfv
-                                 if self.dataset_mode != "hardfake"
-                                 else ResNet_50_sparse_hardfakevsreal)
+            StudentModelClass = ResNet_50_sparse_uadfv
         elif self.arch == 'mobilenetv2':
             StudentModelClass = MobileNetV2_sparse_deepfake
         elif self.arch == 'googlenet':
@@ -209,7 +203,6 @@ class TrainDDP:
         self.student = self.student.cuda()
         self.student = DDP(self.student, device_ids=[self.local_rank])
 
-        # --- DEBUGGING LOG: List all model parameters ---
         if self.rank == 0:
             self.logger.info("--- Student Model Parameters ---")
             for name, param in self.student.module.named_parameters():
@@ -255,9 +248,7 @@ class TrainDDP:
         self.scheduler_student_mask = None
 
         if mask_params:
-            # نرخ یادگیری ماسک را فقط 10 برابر کوچکتر کنید (نه 100 برابر)
-            # یا حتی همان نرخ یادگیری اصلی را استفاده کنید
-            mask_lr = self.lr / 10.0  # تغییر از 100 به 10
+            mask_lr = self.lr / 10.0
             self.optim_mask = torch.optim.Adamax(
                 mask_params, 
                 lr=mask_lr, 
@@ -273,7 +264,7 @@ class TrainDDP:
                 eta_min=self.lr_decay_eta_min, 
                 last_epoch=-1,
                 warmup_steps=self.warmup_steps,
-                warmup_start_lr=self.warmup_start_lr / 10.0  # تغییر از 100 به 10
+                warmup_start_lr=self.warmup_start_lr / 10.0
             )
         elif self.rank == 0:
             self.logger.warning("Warning: No mask parameters found. 'optim_mask' and 'scheduler_student_mask' will be None.")
@@ -287,6 +278,59 @@ class TrainDDP:
             warmup_start_lr=self.warmup_start_lr
         )
 
+    def resume_student_ckpt(self):
+        if not os.path.exists(self.resume):
+            raise FileNotFoundError(f"Checkpoint file not found: {self.resume}")
+
+        ckpt_student = torch.load(self.resume, map_location="cpu", weights_only=True)
+        self.best_prec1 = ckpt_student["best_prec1"]
+        self.start_epoch = ckpt_student["start_epoch"]
+        self.student.module.load_state_dict(ckpt_student["student"])
+        self.optim_weight.load_state_dict(ckpt_student["optim_weight"])
+        
+        if self.optim_mask is not None and "optim_mask" in ckpt_student:
+            self.optim_mask.load_state_dict(ckpt_student["optim_mask"])
+        
+        self.scheduler_student_weight.load_state_dict(ckpt_student["scheduler_student_weight"])
+
+        if self.scheduler_student_mask is not None and "scheduler_student_mask" in ckpt_student:
+            self.scheduler_student_mask.load_state_dict(ckpt_student["scheduler_student_mask"])
+
+        if self.rank == 0:
+            self.logger.info(f"=> Continue from epoch {self.start_epoch + 1}...")
+
+    def save_student_ckpt(self, is_best, epoch):
+        if self.rank == 0:
+            folder = os.path.join(self.result_dir, "student_model")
+            if not os.path.exists(folder):
+                os.makedirs(folder)
+
+            ckpt_student = {
+                "best_prec1": self.best_prec1,
+                "start_epoch": epoch,
+                "student": self.student.module.state_dict(),
+                "optim_weight": self.optim_weight.state_dict(),
+                "scheduler_student_weight": self.scheduler_student_weight.state_dict(),
+            }
+
+            if self.optim_mask is not None:
+                ckpt_student["optim_mask"] = self.optim_mask.state_dict()
+            if self.scheduler_student_mask is not None:
+                ckpt_student["scheduler_student_mask"] = self.scheduler_student_mask.state_dict()
+
+            if is_best:
+                torch.save(ckpt_student,
+                           os.path.join(folder, self.arch + "_sparse_best.pt"))
+            torch.save(ckpt_student,
+                       os.path.join(folder, self.arch + "_sparse_last.pt"))
+
+    def reduce_tensor(self, tensor):
+        """Reduce tensor across all processes"""
+        rt = tensor.clone()
+        dist.all_reduce(rt, op=dist.ReduceOp.SUM)
+        rt /= self.world_size
+        return rt
+
     def get_mask_averages(self):
         """Get average mask values for each layer with more detail"""
         mask_avgs = []
@@ -295,16 +339,14 @@ class TrainDDP:
         for m in self.student.module.mask_modules:
             if isinstance(m, SoftMaskedConv2d):
                 with torch.no_grad():
-                    # محاسبه احتمال فعال بودن
                     mask_probs = F.gumbel_softmax(
                         logits=m.mask_weight,
                         tau=m.gumbel_temperature,
                         hard=False,
                         dim=1
-                    )[:, 1, 0, 0]  # احتمال کلاس 1 (فعال)
+                    )[:, 1, 0, 0]
                     
                     mask_avgs.append(round(mask_probs.mean().item(), 3))
-                    # تعداد فیلترهای فعال (با آستانه 0.5)
                     active_count = (mask_probs > 0.5).sum().item()
                     mask_active_counts.append(f"{active_count}/{m.out_channels}")
         
@@ -390,20 +432,37 @@ class TrainDDP:
                                 logits_teacher = logits_teacher.squeeze(1)
                                 logits_teacher = logits_teacher.view(batch_size, num_frames).mean(dim=1)
 
+                            if self.rank == 0 and epoch == 1 and not hasattr(self, '_features_logged'):
+                                self._features_logged = True
+                                self.logger.info(f"Student features: {len(feature_list_student)} layers")
+                                self.logger.info(f"Teacher features: {len(feature_list_teacher)} layers")
+                                if len(feature_list_student) > 0:
+                                    self.logger.info(f"First student feature shape: {feature_list_student[0].shape}")
+                                if len(feature_list_teacher) > 0:
+                                    self.logger.info(f"First teacher feature shape: {feature_list_teacher[0].shape}")
+
                             ori_loss = self.ori_loss(logits_student, targets)
                             kd_loss = (self.target_temperature ** 2) * self.kd_loss(
                                 logits_teacher, logits_student, self.target_temperature)
 
                             rc_loss = torch.tensor(0.0, device=images.device, dtype=torch.float32)
                             
-                            if len(feature_list_student) > 0:
+                            if len(feature_list_student) == 0:
+                                if self.rank == 0:
+                                    self.logger.warning("Feature list is empty! Model may not be returning features.")
+                            else:
                                 for i in range(len(feature_list_student)):
                                     layer_rc_loss = self.rc_loss(
                                         feature_list_student[i], 
                                         feature_list_teacher[i]
                                     )
                                     rc_loss = rc_loss + layer_rc_loss
+                                
                                 rc_loss = rc_loss / len(feature_list_student)
+                                
+                                if self.rank == 0 and epoch == 1 and not hasattr(self, '_rc_logged'):
+                                    self._rc_logged = True
+                                    self.logger.info(f"RC Loss per layer: {rc_loss.item():.6f}")
 
                             mask_loss = self.mask_loss(self.student.module)
 
@@ -467,10 +526,8 @@ class TrainDDP:
                 if self.rank == 0:
                     self.student.module.ticket = False
                     
-                    # محاسبه retention rate
                     retention_rate = self.student.module.get_retention_rate()
                     
-                    # محاسبه FLOPs
                     avg_video_flops = self.student.module.get_video_flops(
                         video_duration_seconds=self.avg_video_duration, 
                         fps=self.avg_video_fps
