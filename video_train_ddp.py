@@ -541,7 +541,8 @@ class TrainDDP:
 
                 mask_avgs = self.get_mask_averages()
                 
-                avg_video_flops = self.student.module.get_video_flops_sampled(num_sampled_frames=self.num_frames )
+                val_avg_video_flops = self.student.module.get_video_flops_sampled(num_sampled_frames=self.num_frames)
+
                 
                 self.logger.info(f"[Val] Epoch {epoch} : Val_Acc {val_meter.avg:.2f}")
                 self.logger.info(f"[Val mask avg] Epoch {epoch} : {mask_avgs}")
