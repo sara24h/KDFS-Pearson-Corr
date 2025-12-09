@@ -14,12 +14,15 @@ from utils import meter
 class Test:
     def __init__(self, args):
         self.args = args
+        self.dataset_dir = args.dataset_dir
         self.num_workers = args.num_workers
         self.pin_memory = args.pin_memory
+        self.arch = args.arch
         self.device = args.device
         self.train_batch_size = args.train_batch_size
         self.test_batch_size = args.test_batch_size
         self.sparsed_student_ckpt_path = args.sparsed_student_ckpt_path
+        self.dataset_mode = args.dataset_mode
         self.result_dir = args.result_dir
         self.new_dataset_dir = getattr(args, 'new_dataset_dir', None)  # New dataset directory
 
@@ -28,13 +31,13 @@ class Test:
             
         self.train_loader = None
         self.val_loader = None
-        self.new_test_loader = None 
+        self.test_loader = None
+        self.new_test_loader = None  # Loader for new test dataset
         self.student = None
 
     def dataload(self):
-        print("==> Loading new dataset for training, validation, and testing...")
-
-
+        print("==> Loading datasets...")
+        
         image_size = (256, 256)
         mean_140k = [0.5207, 0.4258, 0.3806]
         std_140k = [0.2490, 0.2239, 0.2212]
@@ -54,27 +57,66 @@ class Test:
             transforms.Normalize(mean=mean_140k, std=std_140k),
         ])
 
-        new_params = {
-            'dataset_mode': 'new_test',
+        params = {
+            'dataset_mode': self.dataset_mode,
             'train_batch_size': self.train_batch_size,
             'eval_batch_size': self.test_batch_size,
             'num_workers': self.num_workers,
             'pin_memory': self.pin_memory,
-            'new_test_train_csv': os.path.join(self.new_dataset_dir, 'train.csv'),
-            'new_test_valid_csv': os.path.join(self.new_dataset_dir, 'valid.csv'),
-            'new_test_csv': os.path.join(self.new_dataset_dir, 'test.csv'),
-            'new_test_root_dir': self.new_dataset_dir
+            'ddp': False
         }
+        
+        if self.dataset_mode == 'hardfake':
+            params['hardfake_csv_file'] = os.path.join(self.dataset_dir, 'data.csv')
+            params['hardfake_root_dir'] = self.dataset_dir
+        elif self.dataset_mode == 'rvf10k':
+            params['rvf10k_train_csv'] = os.path.join(self.dataset_dir, 'train.csv')
+            params['rvf10k_valid_csv'] = os.path.join(self.dataset_dir, 'valid.csv')
+            params['rvf10k_root_dir'] = self.dataset_dir
+        elif self.dataset_mode == '140k':
+            params['realfake140k_train_csv'] = os.path.join(self.dataset_dir, 'train.csv')
+            params['realfake140k_valid_csv'] = os.path.join(self.dataset_dir, 'valid.csv')
+            params['realfake140k_test_csv'] = os.path.join(self.dataset_dir, 'test.csv')
+            params['realfake140k_root_dir'] = self.dataset_dir
+        elif self.dataset_mode == '200k':
+            image_root_dir = os.path.join(self.dataset_dir, 'my_real_vs_ai_dataset', 'my_real_vs_ai_dataset')
+            params['realfake200k_root_dir'] = image_root_dir
+            params['realfake200k_train_csv'] = os.path.join(self.dataset_dir, 'train_labels.csv')
+            params['realfake200k_val_csv'] = os.path.join(self.dataset_dir, 'val_labels.csv')
+            params['realfake200k_test_csv'] = os.path.join(self.dataset_dir, 'test_labels.csv')
+        elif self.dataset_mode == '190k':
+            params['realfake190k_root_dir'] = self.dataset_dir
+        elif self.dataset_mode == '330k':
+            params['realfake330k_root_dir'] = self.dataset_dir
 
-        new_dataset_manager = Dataset_selector(**new_params)
-        new_dataset_manager.loader_train.dataset.transform = transform_train_140k
-        new_dataset_manager.loader_val.dataset.transform = transform_val_test_140k
-        new_dataset_manager.loader_test.dataset.transform = transform_val_test_140k
+        dataset_manager = Dataset_selector(**params)
 
-        self.train_loader = new_dataset_manager.loader_train
-        self.val_loader = new_dataset_manager.loader_val
-        self.new_test_loader = new_dataset_manager.loader_test
-        print(f"New dataset loaders (train, val, test) configured with 140k normalization.")
+        print("Overriding transforms to use consistent 330k normalization stats for all datasets.")
+        dataset_manager.loader_train.dataset.transform = transform_train_140k
+        dataset_manager.loader_val.dataset.transform = transform_val_test_140k
+        dataset_manager.loader_test.dataset.transform = transform_val_test_140k
+
+        self.train_loader = dataset_manager.loader_train
+        self.val_loader = dataset_manager.loader_val
+        self.test_loader = dataset_manager.loader_test
+        
+        print(f"All loaders for '{self.dataset_mode}' are now configured with 140k normalization.")
+
+        # Load new test dataset if provided
+        if self.new_dataset_dir:
+            print("==> Loading new test dataset...")
+            new_params = {
+                'dataset_mode': 'new_test',
+                'eval_batch_size': self.test_batch_size,
+                'num_workers': self.num_workers,
+                'pin_memory': self.pin_memory,
+                'new_test_csv': os.path.join(self.new_dataset_dir, 'test.csv'),
+                'new_test_root_dir': self.new_dataset_dir
+            }
+            new_dataset_manager = Dataset_selector(**new_params)
+            new_dataset_manager.loader_test.dataset.transform = transform_val_test_140k
+            self.new_test_loader = new_dataset_manager.loader_test
+            print(f"New test dataset loader configured with 330k normalization.")
 
     def build_model(self):
         print("==> Building student model...")
@@ -224,7 +266,7 @@ class Test:
         self.student.ticket = False
         
         best_val_acc = 0.0
-        best_model_path = os.path.join(self.result_dir, f'finetuned_model_best_new_dataset.pth')
+        best_model_path = os.path.join(self.result_dir, f'finetuned_model_best_{self.dataset_mode}.pth')
 
         for epoch in range(self.args.f_epochs):
             self.student.train()
@@ -265,21 +307,45 @@ class Test:
             self.student.load_state_dict(torch.load(best_model_path))
         else:
             print("Warning: No best model was saved. The model from the last epoch will be used for testing.")
+        
+        # Compute and print final test metrics after fine-tuning
+        final_test_metrics = self.compute_metrics(self.test_loader, description="Final_Test", print_metrics=True, save_confusion_matrix=True)
+        print(f"\nFinal Test Metrics after Fine-tuning:")
+        print(f"Accuracy: {final_test_metrics['accuracy']:.2f}%")
+        print(f"Precision: {final_test_metrics['precision']:.4f}")
+        print(f"Recall: {final_test_metrics['recall']:.4f}")
+        print(f"Specificity: {final_test_metrics['specificity']:.4f}")
+        print(f"\nPer-Class Metrics:")
+        print(f"Class Real (0):")
+        print(f"  Precision: {final_test_metrics['precision_per_class'][0]:.4f}")
+        print(f"  Recall: {final_test_metrics['recall_per_class'][0]:.4f}")
+        print(f"  Specificity: {final_test_metrics['specificity_per_class'][0]:.4f}")
+        print(f"Class Fake (1):")
+        print(f"  Precision: {final_test_metrics['precision_per_class'][1]:.4f}")
+        print(f"  Recall: {final_test_metrics['recall_per_class'][1]:.4f}")
+        print(f"  Specificity: {final_test_metrics['specificity_per_class'][1]:.4f}")
+        print(f"\nConfusion Matrix:")
+        print(f"{'':>10} {'Predicted Real':>15} {'Predicted Fake':>15}")
+        print(f"{'Actual Real':>10} {final_test_metrics['confusion_matrix'][0,0]:>15} {final_test_metrics['confusion_matrix'][0,1]:>15}")
+        print(f"{'Actual Fake':>10} {final_test_metrics['confusion_matrix'][1,0]:>15} {final_test_metrics['confusion_matrix'][1,1]:>15}")
 
     def main(self):
-        print(f"Starting pipeline for fine-tuning and testing on new dataset")
-        
+        print(f"Starting pipeline with dataset mode: {self.dataset_mode}")
         self.dataload()
-
         self.build_model()
         
-        print("\n--- Testing on NEW dataset BEFORE fine-tuning ---")
-        initial_metrics = self.compute_metrics(self.new_test_loader, "New_Dataset_Initial_Test")
-        self.display_samples(initial_metrics['sample_info'], "New Dataset Initial Test", num_samples=30)
+        print("\n--- Testing BEFORE fine-tuning ---")
+        initial_metrics = self.compute_metrics(self.test_loader, "Initial_Test")
+        self.display_samples(initial_metrics['sample_info'], "Initial Test", num_samples=30)
         
-        print("\n--- Starting fine-tuning on new dataset ---")
+        print("\n--- Starting fine-tuning ---")
         self.finetune()
-
-        print("\n--- Testing on NEW dataset AFTER fine-tuning ---")
-        final_metrics = self.compute_metrics(self.new_test_loader, "New_Dataset_Final_Test")
-        self.display_samples(final_metrics['sample_info'], "New Dataset Final Test", num_samples=30)
+        
+        print("\n--- Testing AFTER fine-tuning with best model ---")
+        final_metrics = self.compute_metrics(self.test_loader, "Final_Test", print_metrics=False)
+        self.display_samples(final_metrics['sample_info'], "Final Test", num_samples=30)
+        
+        if self.new_test_loader:
+            print("\n--- Testing on NEW dataset ---")
+            new_metrics = self.compute_metrics(self.new_test_loader, "New_Dataset_Test")
+            self.display_samples(new_metrics['sample_info'], "New Dataset Test", num_samples=30)
