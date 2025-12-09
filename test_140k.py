@@ -30,9 +30,8 @@ def cleanup_ddp():
 class Test:
     def __init__(self, args):
         self.args = args
-        # DDP: دریافت rank و world_size از آرگومان‌ها
-        self.rank = args.rank
-        self.world_size = args.world_size
+        self.rank = getattr(args, 'rank', 0)
+        self.world_size = getattr(args, 'world_size', 1)
         self.device = torch.device(f"cuda:{self.rank}")
 
         self.dataset_dir = args.dataset_dir
@@ -46,8 +45,17 @@ class Test:
         self.result_dir = args.result_dir
         self.new_dataset_dir = getattr(args, 'new_dataset_dir', None)
 
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is not available! Please check GPU setup.")
+        if torch.cuda.is_available():
+            # اگر محیط موازی فعال است، از GPU اختصاص داده شده استفاده کن
+            if dist.is_available() and dist.is_initialized():
+                self.device = torch.device(f"cuda:{self.rank}")
+            # در غیر این صورت (اجرای عادی)، از اولین GPU موجود استفاده کن
+            else:
+                self.device = torch.device(args.device)
+        else:
+            self.device = torch.device("cpu")
+            if self.rank == 0:
+                print("WARNING: CUDA is not available. Using CPU.")
             
         self.train_loader = None
         self.val_loader = None
