@@ -33,8 +33,7 @@ class Test:
 
     def dataload(self):
         print("==> Loading new dataset for training, validation, and testing...")
-        if not self.new_dataset_dir:
-            raise ValueError("New dataset directory (new_dataset_dir) must be provided!")
+
 
         image_size = (256, 256)
         mean_140k = [0.5207, 0.4258, 0.3806]
