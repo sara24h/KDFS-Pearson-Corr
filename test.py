@@ -14,26 +14,17 @@ from get_flops_and_params import get_flops_and_params
 from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal
 from data.dataset import Dataset_selector
 
-# --- اضافه کردن کتابخانه‌های مورد نیاز ---
-from sklearn.metrics import roc_curve, auc, confusion_matrix, classification_report
-import matplotlib.pyplot as plt
-import seaborn as sns
-
 class Test:
     def __init__(self, args):
         self.args = args
         self.dataset_dir = args.dataset_dir
         self.num_workers = args.num_workers
         self.pin_memory = args.pin_memory
-        self.arch = args.arch 
+        self.arch = args.arch  # Expected to be 'ResNet_50'
         self.device = args.device
         self.test_batch_size = args.test_batch_size
         self.sparsed_student_ckpt_path = args.sparsed_student_ckpt_path
-        self.dataset_mode = args.dataset_mode  
-        
-        # --- اضافه کردن مسیر برای ذخیره نتایج ---
-        self.result_dir = getattr(args, 'result_dir', './test_results')
-        os.makedirs(self.result_dir, exist_ok=True)
+        self.dataset_mode = args.dataset_mode  # 'hardfake', 'rvf10k', '140k', '200k', '190k', '330k'
 
         # Verify CUDA availability
         if self.device == 'cuda' and not torch.cuda.is_available():
@@ -172,115 +163,30 @@ class Test:
             raise
 
     def test(self):
-        # --- متغیرهای جدید برای جمع‌آوری نتایج ---
-        all_targets = []
-        all_probs = []
+        meter_top1 = meter.AverageMeter("Acc@1", ":6.2f")
 
         self.student.eval()
         self.student.ticket = True  # Enable ticket mode for sparse model
-        
-        print("\n==> Starting evaluation...")
         try:
             with torch.no_grad():
-                with tqdm(total=len(self.test_loader), ncols=100, desc="Testing") as _tqdm:
+                with tqdm(total=len(self.test_loader), ncols=100, desc="Test") as _tqdm:
                     for images, targets in self.test_loader:
                         images = images.to(self.device, non_blocking=True)
                         targets = targets.to(self.device, non_blocking=True).float()
                         
                         logits_student, _ = self.student(images)
                         logits_student = logits_student.squeeze()
-                        
-                        # --- جمع‌آوری احتمالات و برچسب‌ها ---
-                        probs = torch.sigmoid(logits_student)
-                        
-                        all_targets.extend(targets.cpu().numpy())
-                        all_probs.extend(probs.cpu().numpy())
+                        preds = (torch.sigmoid(logits_student) > 0.5).float()
+                        correct = (preds == targets).sum().item()
+                        prec1 = 100.0 * correct / images.size(0)
+                        n = images.size(0)
+                        meter_top1.update(prec1, n)
 
+                        _tqdm.set_postfix(top1=f"{meter_top1.avg:.4f}")
                         _tqdm.update(1)
                         time.sleep(0.01)
 
-            # --- تبدیل لیست‌ها به آرایه‌های NumPy ---
-            all_targets_np = np.array(all_targets)
-            all_probs_np = np.array(all_probs)
-            all_preds_np = (all_probs_np > 0.5).astype(int)
-
-            # --- محاسبه معیارها ---
-            tn, fp, fn, tp = confusion_matrix(all_targets_np, all_preds_np).ravel()
-            accuracy = (tp + tn) / (tp + tn + fp + fn)
-            precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-            recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-            f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
-
-            fpr, tpr, _ = roc_curve(all_targets_np, all_probs_np)
-            roc_auc = auc(fpr, tpr)
-
-            # --- چاپ نتایج در کنسول ---
-            print("\n" + "="*50)
-            print("           FINAL TEST RESULTS")
-            print("="*50)
-            print(f"Dataset: {self.dataset_mode}")
-            print(f"Accuracy: {accuracy:.4f}")
-            print(f"Precision: {precision:.4f}")
-            print(f"Recall: {recall:.4f}")
-            print(f"F1-Score: {f1_score:.4f}")
-            print(f"AUC: {roc_auc:.4f}")
-            print("-"*50)
-            print(f"True Positives (TP): {tp}")
-            print(f"False Positives (FP): {fp}")
-            print(f"True Negatives (TN): {tn}")
-            print(f"False Negatives (FN): {fn}")
-            print("="*50 + "\n")
-
-            # --- ذخیره نتایج در فایل متنی ---
-            report_path = os.path.join(self.result_dir, 'test_report.txt')
-            with open(report_path, 'w') as f:
-                f.write("="*50 + "\n")
-                f.write("           FINAL TEST RESULTS\n")
-                f.write("="*50 + "\n")
-                f.write(f"Dataset: {self.dataset_mode}\n")
-                f.write(f"Accuracy: {accuracy:.4f}\n")
-                f.write(f"Precision: {precision:.4f}\n")
-                f.write(f"Recall: {recall:.4f}\n")
-                f.write(f"F1-Score: {f1_score:.4f}\n")
-                f.write(f"AUC: {roc_auc:.4f}\n")
-                f.write("-"*50 + "\n")
-                f.write(f"True Positives (TP): {tp}\n")
-                f.write(f"False Positives (FP): {fp}\n")
-                f.write(f"True Negatives (TN): {tn}\n")
-                f.write(f"False Negatives (FN): {fn}\n")
-                f.write("="*50 + "\n")
-                f.write("\nClassification Report:\n")
-                f.write(classification_report(all_targets_np, all_preds_np, target_names=['Real', 'Fake']))
-            print(f"Test report saved to: {report_path}")
-
-            # --- رسم و ذخیره نمودار ROC ---
-            plt.figure(figsize=(8, 6))
-            plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc:.2f})')
-            plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-            plt.xlim([0.0, 1.0])
-            plt.ylim([0.0, 1.05])
-            plt.xlabel('False Positive Rate')
-            plt.ylabel('True Positive Rate')
-            plt.title('Receiver Operating Characteristic (ROC) Curve')
-            plt.legend(loc="lower right")
-            roc_path = os.path.join(self.result_dir, 'roc_curve.png')
-            plt.savefig(roc_path)
-            plt.close()
-            print(f"ROC curve saved to: {roc_path}")
-
-            # --- رسم و ذخیره ماتریس درهم‌ریختگی ---
-            cm = confusion_matrix(all_targets_np, all_preds_np)
-            plt.figure(figsize=(8, 6))
-            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                        xticklabels=['Predicted Real', 'Predicted Fake'], 
-                        yticklabels=['Actual Real', 'Actual Fake'])
-            plt.title('Confusion Matrix')
-            plt.ylabel('Actual Label')
-            plt.xlabel('Predicted Label')
-            cm_path = os.path.join(self.result_dir, 'confusion_matrix.png')
-            plt.savefig(cm_path)
-            plt.close()
-            print(f"Confusion Matrix saved to: {cm_path}")
+            print(f"[Test] Dataset: {self.dataset_mode}, Prec@1: {meter_top1.avg:.2f}%")
 
             # Calculate FLOPs and parameters
             (
@@ -293,7 +199,7 @@ class Test:
                 
             ) = get_flops_and_params(self.dataset_mode, self.sparsed_student_ckpt_path)
             print(
-                f"\nParams_baseline: {Params_baseline:.2f}M, Params: {Params:.2f}M, "
+                f"Params_baseline: {Params_baseline:.2f}M, Params: {Params:.2f}M, "
                 f"Params reduction: {Params_reduction:.2f}%"
             )
             print(
@@ -307,7 +213,6 @@ class Test:
 
     def main(self):
         print(f"Starting test pipeline with dataset mode: {self.dataset_mode}")
-        print(f"Results will be saved in: {self.result_dir}")
         try:
             print(f"PyTorch version: {torch.__version__}")
             print(f"CUDA available: {torch.cuda.is_available()}")
