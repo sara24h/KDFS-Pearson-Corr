@@ -40,18 +40,34 @@ class Test:
         student.load_state_dict(state_dict, strict=True)
         student.to(self.device)
         student.eval()
-        student.ticket = True  # پرونینگ فعال
         
         return teacher, student
 
     def calculate_flops(self, model, num_frames):
-        
+        """
+        ⭐ محاسبه صحیح FLOPs با توجه به حالت ticket
+        """
         if hasattr(model, 'get_video_flops_sampled'):
-            # برای student که متد جدید دارد
+            # ✅ ذخیره حالت فعلی
+            old_ticket = getattr(model, 'ticket', False)
+            
+            # ✅ فعال کردن ticket برای محاسبه FLOPs با pruning
+            model.ticket = True
+            
+            # ✅ یک forward pass برای اطمینان از باینری شدن ماسک‌ها
+            with torch.no_grad():
+                dummy = torch.randn(1, 3, 256, 256).to(self.device)
+                _ = model(dummy)
+            
+            # محاسبه FLOPs
             flops = model.get_video_flops_sampled(num_sampled_frames=num_frames)
+            
+            # بازگرداندن حالت قبلی
+            model.ticket = old_ticket
+            
             return flops / 1e9  # تبدیل به GFLOPs
         else:
-          
+            # برای teacher
             flops_per_frame = 5.39  # GFLOPs
             return flops_per_frame * num_frames
 
@@ -102,6 +118,9 @@ class Test:
             ddp=False
         )
 
+        # ✅ فعال کردن ticket برای تست
+        student.ticket = True
+        
         correct = 0
         total = 0
         
@@ -124,17 +143,17 @@ class Test:
         accuracy = 100.0 * correct / total
         
         print("\n" + "="*85)
-
+        print("                           نتایج نهایی")
+        print("="*85)
         print(f"Test Accuracy    : {accuracy:.2f}%")
         print(f"FLOPs Reduction  : {flops_reduction:.2f}%")
         print(f"Student FLOPs    : {student_flops:.2f} GFLOPs (با {self.num_frames} فریم)")
+        print(f"Params Reduction : {params_reduction:.2f}%")
         print("="*85)
 
     def main(self):
         self.test()
 
-
-# ──────── تنظیمات ────────
 class Args:
     def __init__(self):
         self.dataset_dir = "/kaggle/input/uadfv-dataset/UADFV"
@@ -142,7 +161,7 @@ class Args:
         self.test_batch_size = 8
         self.sparsed_student_ckpt_path = "/kaggle/working/results/run_resnet50_imagenet_prune1/student_model/resnet50_sparse_best.pt"
         self.num_frames = 16
-        self.teacher_num_frames = 32  # ⭐ تعداد فریم‌های teacher
+        self.teacher_num_frames = 32
 
 
 if __name__ == '__main__':
