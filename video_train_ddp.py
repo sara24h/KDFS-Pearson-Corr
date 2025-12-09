@@ -265,6 +265,12 @@ class TrainDDP:
                 warmup_start_lr=self.warmup_start_lr / 100.0) # نرخ شروع را هم کوچک کنید
         elif self.rank == 0:
             self.logger.warning("Warning: No mask parameters found. 'optim_mask' and 'scheduler_student_mask' will be None.")
+            
+        self.scheduler_student_weight = scheduler.CosineAnnealingLRWarmup(
+            self.optim_weight, T_max=self.lr_decay_T_max,
+            eta_min=self.lr_decay_eta_min, last_epoch=-1,
+            warmup_steps=self.warmup_steps,
+            warmup_start_lr=self.warmup_start_lr)
     
 
     def resume_student_ckpt(self):
