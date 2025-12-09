@@ -9,10 +9,7 @@ from thop import profile
 from .layer import SoftMaskedConv2d
 
 class MaskedNet(nn.Module):
-    """
-    کلاس پایه برای شبکه‌های عصبی با ماسک‌های قابل یادگیری (برای پرuning).
-    این کلاس عملیات مربوط به دمای گامبل، چک‌پوینت وزن‌ها و محاسبه FLOPs را مدیریت می‌کند.
-    """
+  
     def __init__(self, gumbel_start_temperature=2.0, gumbel_end_temperature=0.5, num_epochs=200):
         super().__init__()
         self.gumbel_start_temperature = gumbel_start_temperature
@@ -108,27 +105,9 @@ class MaskedNet(nn.Module):
             )
         return Flops_total
 
-    def get_video_flops(self, video_duration_seconds, fps):
-        """
-        FLOPs کل را برای پردازش یک ویدیو کامل محاسبه می‌کند.
-        این فرض را در نظر می‌گیرد که ویدیو به صورت فریم به فریم پردازش می‌شود.
-
-        Args:
-            video_duration_seconds (float): مدت زمان ویدیو به ثانیه.
-            fps (int): نرخ فریم ویدیو (فریم بر ثانیه).
-
-        Returns:
-            torch.Tensor: FLOPs کل برای پردازش کل ویدیو.
-        """
-        # 1. محاسبه FLOPs برای یک فریم واحد
+    def get_video_flops_sampled(self, num_sampled_frames):
         flops_per_frame = self.get_flops()
-        
-        # 2. محاسبه تعداد کل فریم‌های ویدیو
-        total_frames = video_duration_seconds * fps
-        
-        # 3. محاسبه FLOPs کل برای ویدیو
-        total_video_flops = flops_per_frame * total_frames
-        
+        total_video_flops = flops_per_frame * num_sampled_frames
         return total_video_flops
 
 # کلاس‌های BasicBlock_sparse و Bottleneck_sparse بدون تغییر باقی می‌مانند
