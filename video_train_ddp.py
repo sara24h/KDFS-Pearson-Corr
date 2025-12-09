@@ -506,8 +506,7 @@ class TrainDDP:
 
                 if self.rank == 0:
                     self.student.module.ticket = False
-                    
-                    val_avg_video_flops = self.student.module.get_video_flops_sampled(num_sampled_frames=self.num_frames )
+                    avg_video_flops = self.student.module.get_video_flops_sampled(num_sampled_frames=self.num_frames)
 
                     self.logger.info(f"[Train] Epoch {epoch} : Gumbel_temperature {current_gumbel_temp:.2f} "
                                     f"LR {current_lr:.6f} OriLoss {meter_oriloss.avg:.4f} "
@@ -515,7 +514,6 @@ class TrainDDP:
                                     f"MaskLoss {meter_maskloss.avg:.6f} TotalLoss {meter_loss.avg:.4f} "
                                     f"Train_Acc {meter_top1.avg:.2f}")
                     
-                    # لاگ FLOPs بر حسب TFLOPs برای خوانایی بهتر
                     self.logger.info(f"[Train Avg Video Flops] Epoch {epoch} : {avg_video_flops/1e9:.2f} GFLOPs")
 
 
