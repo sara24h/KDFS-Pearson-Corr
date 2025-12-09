@@ -3,20 +3,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 import copy
 import math
+from thop import profile
+# فرض بر این است که فایل layer.py در کنار این فایل قرار دارد
+# و شامل کلاس SoftMaskedConv2d است.
 from .layer import SoftMaskedConv2d
 
-
 class MaskedNet(nn.Module):
+    """
+    کلاس پایه برای شبکه‌های عصبی با ماسک‌های قابل یادگیری (برای پرuning).
+    این کلاس عملیات مربوط به دمای گامبل، چک‌پوینت وزن‌ها و محاسبه FLOPs را مدیریت می‌کند.
+    """
     def __init__(self, gumbel_start_temperature=2.0, gumbel_end_temperature=0.5, num_epochs=200):
         super().__init__()
         self.gumbel_start_temperature = gumbel_start_temperature
         self.gumbel_end_temperature = gumbel_end_temperature
         self.num_epochs = num_epochs
         self.gumbel_temperature = gumbel_start_temperature
-        self.ticket = False
+        self.ticket = False  # حالتی که در آن ماسک‌ها باینری شده‌اند
         self.mask_modules = []
 
     def checkpoint(self):
+        """از وضعیت فعلی وزن‌ها و ماسک‌ها یک نسخه پشتیبان تهیه می‌کند."""
         for m in self.mask_modules:
             m.checkpoint()
         for m in self.modules():
@@ -24,6 +31,7 @@ class MaskedNet(nn.Module):
                 m.checkpoint = copy.deepcopy(m.state_dict())
 
     def rewind_weights(self):
+        """وزن‌ها را به آخرین نقطه چک‌پوینت بازمی‌گرداند."""
         for m in self.mask_modules:
             m.rewind_weights()
         for m in self.modules():
@@ -31,6 +39,7 @@ class MaskedNet(nn.Module):
                 m.load_state_dict(m.checkpoint)
 
     def update_gumbel_temperature(self, epoch):
+        """دمای گامبل را بر اساس اپوک فعلی به‌روزرسانی می‌کند."""
         self.gumbel_temperature = self.gumbel_start_temperature * math.pow(
             self.gumbel_end_temperature / self.gumbel_start_temperature,
             epoch / self.num_epochs,
@@ -40,200 +49,92 @@ class MaskedNet(nn.Module):
 
     def get_flops(self):
         """
-        محاسبه FLOPs با در نظر گرفتن ماسک‌های Gumbel-Softmax
+        FLOPs (تعداد عملیات شناور) را برای مدل بر روی یک تصویر ورودی محاسبه می‌کند.
+        این محاسبه به اندازه تصویر ورودی بستگی دارد که از طریق dataset_type مشخص می‌شود.
         """
         device = next(self.parameters()).device
         Flops_total = torch.tensor(0.0, device=device)
-
+        
         # دیکشنری اندازه تصاویر ورودی برای هر دیتاست
         image_sizes = {
             "hardfakevsrealfaces": 300,
             "rvf10k": 256,
             "140k": 256,
-            "uadfv": 256
+            "uadfv": 256  # اندازه تصویر برای دیتاست UADFV
         }
-
+        
         dataset_type = getattr(self, "dataset_type", "hardfakevsrealfaces")
-        input_size = image_sizes.get(dataset_type, 256)
-
+        input_size = image_sizes.get(dataset_type, 256) # مقدار پیش‌فرض 256 در صورت عدم وجود
+        
         # محاسبه FLOPs برای لایه‌های اولیه (conv1, bn1)
-        conv1_h = (input_size - 7 + 2 * 3) // 2 + 1  # example
-        maxpool_h = (conv1_h - 3 + 2 * 1) // 2 + 1   # example
-
+        conv1_h = (input_size - 7 + 2 * 3) // 2 + 1
+        maxpool_h = (conv1_h - 3 + 2 * 1) // 2 + 1
+        
         Flops_total = Flops_total + (
             conv1_h * conv1_h * 7 * 7 * 3 * 64 +  # FLOPs for conv1
-            conv1_h * conv1_h * 64                 # FLOPs for bn1
+            conv1_h * conv1_h * 64                 # FLOPs for bn1 (simplified)
         )
-
+        
         # محاسبه FLOPs برای بلوک‌های ResNet با کانولوشن‌های ماسک‌دار
         for i, m in enumerate(self.mask_modules):
             m = m.to(device)
-
-            # محاسبه تعداد فیلترهای فعال با استفاده از Gumbel-Softmax
-            with torch.no_grad():
-                if self.ticket:
-                    # حالت inference: از ماسک باینری استفاده کن
-                    mask_probs = (torch.sigmoid(m.mask_weight) > 0.5).float()
-                else:
-                    # حالت training: از Gumbel-Softmax استفاده کن
-                    mask_probs = F.gumbel_softmax(
-                        logits=m.mask_weight,
-                        tau=m.gumbel_temperature,
-                        hard=False,
-                        dim=1
-                    )[:, 1, :, :]  # احتمال فعال بودن (کلاس 1)
-
-                # میانگین احتمال فعال بودن فیلترها
-                active_filters = mask_probs.mean().item() * m.out_channels
-
             Flops_shortcut_conv = 0
             Flops_shortcut_bn = 0
-
-            # محاسبات مخصوص ResNet-50 (48 لایه ماسک‌دار: 16 بلوک × 3 لایه)
+            
+            # محاسبات مخصوص ResNet-50 (48 لایه ماسک‌دار)
             if len(self.mask_modules) == 48:
-                # در هر بلوک Bottleneck سه لایه conv داریم:
-                # - conv1: 1x1, in_channels -> planes
-                # - conv2: 3x3, planes -> planes
-                # - conv3: 1x1, planes -> planes*4
-
-                block_idx = i // 3  # شماره بلوک
-                layer_in_block = i % 3  # لایه در بلوک (0, 1, 2)
-
-                if layer_in_block == 0:  # conv1 در Bottleneck
-                    # لایه اول: ورودی از بلوک قبل (یا ورودی اصلی)
+                if i % 3 == 0:  # لایه اول در هر بلوک Bottleneck
                     Flops_conv = (
-                        m.feature_map_h * m.feature_map_w *
-                        m.kernel_size * m.kernel_size *
-                        m.in_channels * active_filters
+                        m.feature_map_h * m.feature_map_w * m.kernel_size * m.kernel_size *
+                        m.in_channels * m.mask.sum()
                     )
-
-                elif layer_in_block == 1:  # conv2 در Bottleneck
-                    # لایه دوم: ورودی از لایه قبل همین بلوک
-                    if i > 0:
-                        prev_m = self.mask_modules[i - 1]
-                        with torch.no_grad():
-                            if self.ticket:
-                                prev_mask_probs = (torch.sigmoid(prev_m.mask_weight) > 0.5).float()
-                            else:
-                                prev_mask_probs = F.gumbel_softmax(
-                                    logits=prev_m.mask_weight,
-                                    tau=prev_m.gumbel_temperature,
-                                    hard=False,
-                                    dim=1
-                                )[:, 1, :, :]
-                            prev_active_filters = prev_mask_probs.mean().item() * prev_m.out_channels
-                    else:
-                        prev_active_filters = m.in_channels
-
+                else:  # لایه‌های دوم و سوم در هر بلوک Bottleneck
                     Flops_conv = (
-                        m.feature_map_h * m.feature_map_w *
-                        m.kernel_size * m.kernel_size *
-                        prev_active_filters * active_filters
+                        m.feature_map_h * m.feature_map_w * m.kernel_size * m.kernel_size *
+                        self.mask_modules[i - 1].mask.to(device).sum() * m.mask.sum()
                     )
-
-                else:  # layer_in_block == 2, conv3 در Bottleneck
-                    # لایه سوم: ورودی از لایه قبل همین بلوک
-                    if i > 0:
-                        prev_m = self.mask_modules[i - 1]
-                        with torch.no_grad():
-                            if self.ticket:
-                                prev_mask_probs = (torch.sigmoid(prev_m.mask_weight) > 0.5).float()
-                            else:
-                                prev_mask_probs = F.gumbel_softmax(
-                                    logits=prev_m.mask_weight,
-                                    tau=prev_m.gumbel_temperature,
-                                    hard=False,
-                                    dim=1
-                                )[:, 1, :, :]
-                            prev_active_filters = prev_mask_probs.mean().item() * prev_m.out_channels
-                    else:
-                        prev_active_filters = m.in_channels
-
-                    Flops_conv = (
-                        m.feature_map_h * m.feature_map_w *
-                        m.kernel_size * m.kernel_size *
-                        prev_active_filters * active_filters
+                Flops_bn = m.feature_map_h * m.feature_map_w * m.mask.sum()
+                
+                # محاسبه FLOPs برای اتصال کوتاه (shortcut) در صورت وجود
+                if i % 3 == 2 and m.stride != 1:
+                     Flops_shortcut_conv = (
+                        m.feature_map_h * m.feature_map_w * 1 * 1 *
+                        (m.out_channels // 4) * m.out_channels
                     )
-
-                    # محاسبه FLOPs برای downsample (اتصال کوتاه) در صورت نیاز
-                    # downsample فقط در اولین بلوک هر stage اتفاق می‌افتد
-                    # stage boundaries: block 0, 3, 7, 13 (برای [3,4,6,3])
-                    stage_first_blocks = [0, 3, 7, 13]
-                    if block_idx in stage_first_blocks and getattr(m, "stride", 1) != 1:
-                        # downsample: 1x1 conv از in_channels به out_channels
-                        Flops_shortcut_conv = (
-                            m.feature_map_h * m.feature_map_w *
-                            1 * 1 * m.in_channels * m.out_channels
-                        )
-                        Flops_shortcut_bn = m.feature_map_h * m.feature_map_w * m.out_channels
-
-                # FLOPs برای BatchNorm
-                Flops_bn = m.feature_map_h * m.feature_map_w * active_filters
-
-            else:
-                # برای معماری‌های دیگر (مثل ResNet-18/34)
-                Flops_conv = (
-                    m.feature_map_h * m.feature_map_w *
-                    m.kernel_size * m.kernel_size *
-                    m.in_channels * active_filters
-                )
-                Flops_bn = m.feature_map_h * m.feature_map_w * active_filters
+                     Flops_shortcut_bn = m.feature_map_h * m.feature_map_w * m.out_channels
 
             Flops_total = (
-                Flops_total + Flops_conv + Flops_bn +
-                Flops_shortcut_conv + Flops_shortcut_bn
+                Flops_total + Flops_conv + Flops_bn + Flops_shortcut_conv + Flops_shortcut_bn
             )
-
-        # اضافه کردن FLOPs برای لایه‌های پایانی (avgpool و fc)
-        # avgpool: تقریباً بدون FLOPs
-        # fc: 512 * expansion * num_classes
-        expansion = 4  # برای Bottleneck
-        Flops_total = Flops_total + (512 * expansion * self.fc.out_features)
-
         return Flops_total
 
-    def get_video_flops(self, video_duration_seconds=None, fps=None):
+    def get_video_flops(self, video_duration_seconds, fps):
         """
-        محاسبه FLOPs برای پردازش یک ویدیو کامل
+        FLOPs کل را برای پردازش یک ویدیو کامل محاسبه می‌کند.
+        این فرض را در نظر می‌گیرد که ویدیو به صورت فریم به فریم پردازش می‌شود.
+
+        Args:
+            video_duration_seconds (float): مدت زمان ویدیو به ثانیه.
+            fps (int): نرخ فریم ویدیو (فریم بر ثانیه).
+
+        Returns:
+            torch.Tensor: FLOPs کل برای پردازش کل ویدیو.
         """
+        # 1. محاسبه FLOPs برای یک فریم واحد
         flops_per_frame = self.get_flops()
-        num_sampled_frames = 16  # تعداد فریم‌هایی که از ویدیو نمونه‌برداری می‌شود
-        total_video_flops = flops_per_frame * num_sampled_frames
+        
+        # 2. محاسبه تعداد کل فریم‌های ویدیو
+        total_frames = video_duration_seconds * fps
+        
+        # 3. محاسبه FLOPs کل برای ویدیو
+        total_video_flops = flops_per_frame * total_frames
+        
         return total_video_flops
 
-    def get_retention_rate(self):
-        """
-        محاسبه درصد فیلترهای باقی‌مانده (retention rate)
-        """
-        if len(self.mask_modules) == 0:
-            return 1.0
-
-        total_active = 0
-        total_filters = 0
-
-        with torch.no_grad():
-            for m in self.mask_modules:
-                if isinstance(m, SoftMaskedConv2d):
-                    if self.ticket:
-                        mask_probs = (torch.sigmoid(m.mask_weight) > 0.5).float()[:, 1, 0, 0]
-                    else:
-                        mask_probs = F.gumbel_softmax(
-                            logits=m.mask_weight,
-                            tau=m.gumbel_temperature,
-                            hard=False,
-                            dim=1
-                        )[:, 1, 0, 0]
-
-                    total_active += mask_probs.sum().item()
-                    total_filters += m.out_channels
-
-        retention_rate = total_active / total_filters if total_filters > 0 else 1.0
-        return retention_rate
-
-
+# کلاس‌های BasicBlock_sparse و Bottleneck_sparse بدون تغییر باقی می‌مانند
+# ... (کدهای این کلاس‌ها را از پاسخ قبلی کپی کنید) ...
 class BasicBlock_sparse(nn.Module):
     expansion = 1
-
     def __init__(self, in_planes, planes, stride=1):
         super().__init__()
         self.conv1 = SoftMaskedConv2d(in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
@@ -246,7 +147,6 @@ class BasicBlock_sparse(nn.Module):
                 nn.Conv2d(in_planes, self.expansion * planes, kernel_size=1, stride=stride, bias=False),
                 nn.BatchNorm2d(self.expansion * planes),
             )
-
     def forward(self, x, ticket):
         out = F.relu(self.bn1(self.conv1(x, ticket)))
         out = self.bn2(self.conv2(out, ticket))
@@ -254,10 +154,8 @@ class BasicBlock_sparse(nn.Module):
         out = F.relu(out)
         return out
 
-
 class Bottleneck_sparse(nn.Module):
     expansion = 4
-
     def __init__(self, in_planes, planes, stride=1):
         super().__init__()
         self.conv1 = SoftMaskedConv2d(in_planes, planes, kernel_size=1, bias=False)
@@ -272,7 +170,6 @@ class Bottleneck_sparse(nn.Module):
                 nn.Conv2d(in_planes, self.expansion * planes, kernel_size=1, stride=stride, bias=False),
                 nn.BatchNorm2d(self.expansion * planes),
             )
-
     def forward(self, x, ticket):
         out = F.relu(self.bn1(self.conv1(x, ticket)))
         out = F.relu(self.bn2(self.conv2(out, ticket)))
@@ -280,7 +177,6 @@ class Bottleneck_sparse(nn.Module):
         out += self.downsample(x)
         out = F.relu(out)
         return out
-
 
 class ResNet_sparse(MaskedNet):
     def __init__(self, block, num_blocks, num_classes=1, gumbel_start_temperature=2.0, gumbel_end_temperature=0.5, num_epochs=200, dataset_type="hardfakevsrealfaces"):
@@ -315,27 +211,45 @@ class ResNet_sparse(MaskedNet):
         feature_list = []
         out = F.relu(self.bn1(self.conv1(x)))
         out = self.maxpool(out)
-        for block in self.layer1:
-            out = block(out, self.ticket)
+        for block in self.layer1: out = block(out, self.ticket)
         feature_list.append(self.feat1(out))
-        for block in self.layer2:
-            out = block(out, self.ticket)
+        for block in self.layer2: out = block(out, self.ticket)
         feature_list.append(self.feat2(out))
-        for block in self.layer3:
-            out = block(out, self.ticket)
+        for block in self.layer3: out = block(out, self.ticket)
         feature_list.append(self.feat3(out))
-        for block in self.layer4:
-            out = block(out, self.ticket)
+        for block in self.layer4: out = block(out, self.ticket)
         feature_list.append(self.feat4(out))
         out = self.avgpool(out)
         out = out.view(out.size(0), -1)
         out = self.fc(out)
         return out, feature_list
 
-
 def ResNet_50_sparse_uadfv(gumbel_start_temperature=2.0, gumbel_end_temperature=0.5, num_epochs=200):
     return ResNet_sparse(block=Bottleneck_sparse, num_blocks=[3, 4, 6, 3], num_classes=1, gumbel_start_temperature=gumbel_start_temperature, gumbel_end_temperature=gumbel_end_temperature, num_epochs=num_epochs, dataset_type="uadfv")
 
-
 def ResNet_50_sparse_rvf10k(gumbel_start_temperature=2.0, gumbel_end_temperature=0.5, num_epochs=200):
     return ResNet_sparse(block=Bottleneck_sparse, num_blocks=[3, 4, 6, 3], num_classes=1, gumbel_start_temperature=gumbel_start_temperature, gumbel_end_temperature=gumbel_end_temperature, num_epochs=num_epochs, dataset_type="rvf10k")
+
+# --- مثال نحوه استفاده ---
+if __name__ == '__main__':
+
+    try:
+        model = ResNet_50_sparse_uadfv()
+        model.eval() # قرار دادن مدل در حالت ارزیابی
+
+        video_duration = 11.6  # مدت زمان واقعی ویدیو به ثانیه
+        video_fps = 30.00      # نرخ فریم واقعی ویدیو
+
+        # 3. محاسبه FLOPs برای کل ویدیو با استفاده از تابع جدید
+        total_video_flops = model.get_video_flops(video_duration_seconds=video_duration, fps=video_fps)
+        
+        print(f"--- FLOPs برای پردازش ویدیوی /kaggle/input/uadfv-dataset/UADFV/real/0008.mp4 ---")
+        print(f"پارامترهای ویدیو: مدت زمان = {video_duration} ثانیه, نرخ فریم = {video_fps} FPS")
+        print(f"تعداد کل فریم‌ها: {int(video_duration * video_fps)}")
+        print(f"مجموع FLOPs: {total_video_flops / 1e12:.2f} TFLOPs")
+
+    except NameError:
+        print("\nخطا: کلاس SoftMaskedConv2d یافت نشد.")
+        print("لطفاً مطمئن شوید که فایل layer.py به درستی import شده و کلاس مورد نظر در آن تعریف شده است.")
+    except Exception as e:
+        print(f"\nیک خطای پیش‌بینی نشده رخ داد: {e}")
