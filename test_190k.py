@@ -1,16 +1,26 @@
 import os
 import torch
+import random
+import numpy as np
 from tqdm import tqdm
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
-import numpy as np
 from sklearn.metrics import precision_score, recall_score, confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
 import argparse
 
-# -----------------------------
-# جایگزینی utils.meter با یک AverageMeter ساده
+def set_seed(seed=42):
+
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 class AverageMeter:
     """Computes and stores the average and current value"""
     def __init__(self, name, fmt=':f'):
@@ -33,12 +43,7 @@ class AverageMeter:
     def __str__(self):
         fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
         return fmtstr.format(**self.__dict__)
-# -----------------------------
 
-# -----------------------------
-# جایگزینی واردات‌های خارجی با فرض وجود داشتن مدل
-# اگر واقعاً نیاز به ResNet_50_sparse_hardfakevsreal دارید، باید آن را پیاده‌سازی کنید یا از ResNet استاندارد استفاده کنید.
-# اما برای اجرای تستی، یک مدل ساده جایگزین می‌کنیم:
 try:
     from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal
 except ImportError:
@@ -51,16 +56,11 @@ except ImportError:
             super().__init__()
             self.backbone = models.resnet50(weights=None)
             self.backbone.fc = nn.Linear(self.backbone.fc.in_features, 1)
-            self.ticket = False  # فرضی برای کار با self.ticket
+            self.ticket = False
 
         def forward(self, x):
             return self.backbone(x), None
-# -----------------------------
 
-# -----------------------------
-# جایگزینی Dataset_selector (اگر واقعاً آن را ندارید، این فقط برای تست است)
-# اما شما باید Dataset_selector واقعی خود را داشته باشید!
-# برای اجرای عملی، این بخش را حذف یا جایگزین کنید.
 try:
     from data.dataset import Dataset_selector
 except ImportError:
@@ -68,11 +68,13 @@ except ImportError:
         "You must provide a valid 'data.dataset.Dataset_selector' implementation. "
         "This script cannot run without it."
     )
-# -----------------------------
+
 
 class Test:
     def __init__(self, args):
         self.args = args
+        set_seed(getattr(args, 'seed', 42))
+        
         self.dataset_dir = args.dataset_dir
         self.num_workers = args.num_workers
         self.pin_memory = args.pin_memory
@@ -178,6 +180,9 @@ class Test:
 
     def build_model(self):
         print("==> Building student model...")
+        # تنظیم مجدد seed قبل از ساخت مدل (برای اطمینان از مقداردهی اولیه قطعی)
+        set_seed(getattr(self.args, 'seed', 42))
+        
         self.student = ResNet_50_sparse_hardfakevsreal()
         
         if not os.path.exists(self.sparsed_student_ckpt_path):
@@ -317,7 +322,7 @@ class Test:
             f.write("-" * 100 + "\n")
             f.write(f"Accuracy: {metrics['accuracy']:.2f}%\n")
             f.write(f"Precision: {metrics['precision']:.4f}\n")
-            f.write(f"Recay: {metrics['recall']:.4f}\n")
+            f.write(f"Recay: {metrics['recall']:.4f}\n") # Note: Typo "Recay" is from original code
             f.write(f"Specificity: {metrics['specificity']:.4f}\n\n")
             
             cm = metrics['confusion_matrix']
@@ -378,6 +383,9 @@ class Test:
 
     def finetune(self):
         print("==> Fine-tuning using FEATURE EXTRACTOR strategy on 'fc' and 'layer4'...")
+        # تنظیم مجدد seed قبل از فاین‌تونینگ
+        set_seed(getattr(self.args, 'seed', 42))
+        
         if not os.path.exists(self.result_dir):
             os.makedirs(self.result_dir)
         
@@ -402,6 +410,9 @@ class Test:
         best_model_path = os.path.join(self.result_dir, f'finetuned_model_best_{self.dataset_mode}.pth')
 
         for epoch in range(self.args.f_epochs):
+            # تنظیم seed در ابتدای هر epoch برای تکرارپذیری کامل در داده‌ها و فرآیند آموزش
+            set_seed(getattr(self.args, 'seed', 42) + epoch)
+            
             self.student.train()
             meter_loss = AverageMeter("Loss", ":6.4f")
             meter_top1_train = AverageMeter("Train Acc@1", ":6.2f")
@@ -483,10 +494,6 @@ class Test:
             self.display_samples(new_metrics['sample_info'], "New Dataset Test", num_samples=30)
             self.save_predictions_for_mcnemar(new_metrics, "New_Dataset_Test")
 
-
-# =============================
-# بخش اجرایی
-# =============================
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Test and Fine-tune Sparse Student Model (All-in-One)")
 
@@ -508,6 +515,9 @@ if __name__ == '__main__':
     parser.add_argument('--train_batch_size', type=int, default=64)
     parser.add_argument('--test_batch_size', type=int, default=128)
     parser.add_argument('--arch', type=str, default='resnet50_sparse')
+    
+    # اضافه کردن پارامتر seed
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
 
     # تنظیمات فاین‌تون
     parser.add_argument('--f_epochs', type=int, default=10, help='Number of fine-tuning epochs')
@@ -515,6 +525,9 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    # تنظیم seed در ابتدای اجرای اسکریپت
+    set_seed(args.seed)
+    
     # اجرای اصلی
     tester = Test(args)
     tester.main()
