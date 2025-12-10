@@ -236,11 +236,7 @@ class Test:
         }
 
     def save_predictions_for_mcnemar(self, metrics, description="Test"):
-        """
-        Save predictions and true labels to a text file for McNemar test.
-        This file contains sample-by-sample predictions that can be used later
-        to compare with another model's predictions.
-        """
+        os.makedirs(self.result_dir, exist_ok=True)
         predictions = metrics['predictions']
         true_labels = metrics['true_labels']
         sample_info = metrics['sample_info']
