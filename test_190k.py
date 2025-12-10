@@ -234,16 +234,15 @@ class Test:
             self.compute_metrics(self.new_test_loader, "New Dataset Test")
 
 
-# تنظیمات — فقط این بخش رو تغییر بده
 class Config:
     def __init__(self):
         self.seed = 3407
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.dataset_mode = "190k"
-        self.dataset_dir = "/path/to/your/190k/dataset"      # تغییر بده
-        self.sparsed_student_ckpt_path = "/path/to/model.pth"  # تغییر بده
-        self.result_dir = "./results_mcnemar"
-        self.model_name = "Model1"  # اسم یکتای مدلت (مثلاً Model1, ResNet_Sparse, etc.)
+        self.dataset_mode = "rvf10k"
+        self.dataset_dir = "/kaggle/input/rvf10k"      # تغییر بده
+        self.sparsed_student_ckpt_path = "/kaggle/input/190k-pearson-seed2025-data/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt"  # تغییر بده
+        self.result_dir = "kaggle/working/"
+        self.model_name = "Model1" 
         self.test_batch_size = 64
         self.num_workers = 4
         self.pin_memory = True
