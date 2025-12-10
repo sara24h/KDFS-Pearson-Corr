@@ -7,9 +7,68 @@ import numpy as np
 from sklearn.metrics import precision_score, recall_score, confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
-from data.dataset import Dataset_selector
-from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal
-from utils import meter
+import argparse
+
+# -----------------------------
+# جایگزینی utils.meter با یک AverageMeter ساده
+class AverageMeter:
+    """Computes and stores the average and current value"""
+    def __init__(self, name, fmt=':f'):
+        self.name = name
+        self.fmt = fmt
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+    def __str__(self):
+        fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
+        return fmtstr.format(**self.__dict__)
+# -----------------------------
+
+# -----------------------------
+# جایگزینی واردات‌های خارجی با فرض وجود داشتن مدل
+# اگر واقعاً نیاز به ResNet_50_sparse_hardfakevsreal دارید، باید آن را پیاده‌سازی کنید یا از ResNet استاندارد استفاده کنید.
+# اما برای اجرای تستی، یک مدل ساده جایگزین می‌کنیم:
+try:
+    from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal
+except ImportError:
+    print("[WARNING] Could not import ResNet_50_sparse_hardfakevsreal. Using a mock model for demonstration.")
+    import torch.nn as nn
+    import torchvision.models as models
+
+    class ResNet_50_sparse_hardfakevsreal(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.backbone = models.resnet50(weights=None)
+            self.backbone.fc = nn.Linear(self.backbone.fc.in_features, 1)
+            self.ticket = False  # فرضی برای کار با self.ticket
+
+        def forward(self, x):
+            return self.backbone(x), None
+# -----------------------------
+
+# -----------------------------
+# جایگزینی Dataset_selector (اگر واقعاً آن را ندارید، این فقط برای تست است)
+# اما شما باید Dataset_selector واقعی خود را داشته باشید!
+# برای اجرای عملی، این بخش را حذف یا جایگزین کنید.
+try:
+    from data.dataset import Dataset_selector
+except ImportError:
+    raise ImportError(
+        "You must provide a valid 'data.dataset.Dataset_selector' implementation. "
+        "This script cannot run without it."
+    )
+# -----------------------------
 
 class Test:
     def __init__(self, args):
@@ -133,7 +192,7 @@ class Test:
         print(f"Model loaded on {self.device}")
 
     def compute_metrics(self, loader, description="Test", print_metrics=True, save_confusion_matrix=True):
-        meter_top1 = meter.AverageMeter("Acc@1", ":6.2f")
+        meter_top1 = AverageMeter("Acc@1", ":6.2f")
         all_preds = []
         all_targets = []
         sample_info = []
@@ -258,7 +317,7 @@ class Test:
             f.write("-" * 100 + "\n")
             f.write(f"Accuracy: {metrics['accuracy']:.2f}%\n")
             f.write(f"Precision: {metrics['precision']:.4f}\n")
-            f.write(f"Recall: {metrics['recall']:.4f}\n")
+            f.write(f"Recay: {metrics['recall']:.4f}\n")
             f.write(f"Specificity: {metrics['specificity']:.4f}\n\n")
             
             cm = metrics['confusion_matrix']
@@ -267,7 +326,6 @@ class Test:
             f.write(f"{'Actual Real':>15} {cm[0,0]:>15} {cm[0,1]:>15}\n")
             f.write(f"{'Actual Fake':>15} {cm[1,0]:>15} {cm[1,1]:>15}\n\n")
             
-            # Count correct and incorrect predictions
             correct_preds = np.sum(predictions == true_labels)
             incorrect_preds = len(predictions) - correct_preds
             f.write(f"Correct Predictions: {correct_preds} ({correct_preds/len(predictions)*100:.2f}%)\n")
@@ -345,8 +403,8 @@ class Test:
 
         for epoch in range(self.args.f_epochs):
             self.student.train()
-            meter_loss = meter.AverageMeter("Loss", ":6.4f")
-            meter_top1_train = meter.AverageMeter("Train Acc@1", ":6.2f")
+            meter_loss = AverageMeter("Loss", ":6.4f")
+            meter_top1_train = AverageMeter("Train Acc@1", ":6.2f")
             
             for images, targets in tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{self.args.f_epochs} [Train]", ncols=100):
                 images, targets = images.to(self.device), targets.to(self.device).float()
@@ -409,7 +467,6 @@ class Test:
         print("\n--- Testing BEFORE fine-tuning ---")
         initial_metrics = self.compute_metrics(self.test_loader, "Initial_Test")
         self.display_samples(initial_metrics['sample_info'], "Initial Test", num_samples=30)
-        # Save predictions for McNemar test
         self.save_predictions_for_mcnemar(initial_metrics, "Initial_Test")
         
         print("\n--- Starting fine-tuning ---")
@@ -418,12 +475,46 @@ class Test:
         print("\n--- Testing AFTER fine-tuning with best model ---")
         final_metrics = self.compute_metrics(self.test_loader, "Final_Test", print_metrics=False)
         self.display_samples(final_metrics['sample_info'], "Final Test", num_samples=30)
-        # Save predictions for McNemar test
         self.save_predictions_for_mcnemar(final_metrics, "Final_Test")
         
         if self.new_test_loader:
             print("\n--- Testing on NEW dataset ---")
             new_metrics = self.compute_metrics(self.new_test_loader, "New_Dataset_Test")
             self.display_samples(new_metrics['sample_info'], "New Dataset Test", num_samples=30)
-            # Save predictions for McNemar test
             self.save_predictions_for_mcnemar(new_metrics, "New_Dataset_Test")
+
+
+# =============================
+# بخش اجرایی
+# =============================
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Test and Fine-tune Sparse Student Model (All-in-One)")
+
+    # مسیرهای اصلی
+    parser.add_argument('--dataset_dir', type=str, required=True, help='Path to dataset directory')
+    parser.add_argument('--sparsed_student_ckpt_path', type=str, required=True, help='Path to model checkpoint (.pth)')
+    parser.add_argument('--result_dir', type=str, default='./results', help='Directory to save results')
+    parser.add_argument('--new_dataset_dir', type=str, default=None, help='Optional: path to new test set')
+
+    # تنظیمات داده
+    parser.add_argument('--dataset_mode', type=str, required=True,
+                        choices=['hardfake', 'rvf10k', '140k', '190k', '200k', '330k'],
+                        help='Dataset name/mode')
+
+    # تنظیمات اجرایی
+    parser.add_argument('--device', type=str, default='cuda', choices=['cuda', 'cpu'])
+    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--pin_memory', action='store_true', default=True)
+    parser.add_argument('--train_batch_size', type=int, default=64)
+    parser.add_argument('--test_batch_size', type=int, default=128)
+    parser.add_argument('--arch', type=str, default='resnet50_sparse')
+
+    # تنظیمات فاین‌تون
+    parser.add_t_argument('--f_epochs', type=int, default=10, help='Number of fine-tuning epochs')
+    parser.add_argument('--f_lr', type=float, default=1e-4, help='Fine-tuning learning rate')
+
+    args = parser.parse_args()
+
+    # اجرای اصلی
+    tester = Test(args)
+    tester.main()
