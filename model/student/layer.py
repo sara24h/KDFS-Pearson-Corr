@@ -49,11 +49,9 @@ class SoftMaskedConv2d(nn.Module):
                 bound = 1 / math.sqrt(fan_in)
                 nn.init.uniform_(self.bias, -bound, bound)
 
-
     def init_mask(self):
         self.mask_weight = nn.Parameter(torch.Tensor(self.out_channels, 2, 1, 1))
-        nn.init.kaiming_normal_(self.mask_weight)     
- 
+        nn.init.kaiming_normal_(self.mask_weight)
 
     def compute_mask(self, ticket):
         if ticket:
