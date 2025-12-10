@@ -510,7 +510,7 @@ if __name__ == '__main__':
     parser.add_argument('--arch', type=str, default='resnet50_sparse')
 
     # تنظیمات فاین‌تون
-    parser.add_t_argument('--f_epochs', type=int, default=10, help='Number of fine-tuning epochs')
+    parser.add_argument('--f_epochs', type=int, default=10, help='Number of fine-tuning epochs')
     parser.add_argument('--f_lr', type=float, default=1e-4, help='Fine-tuning learning rate')
 
     args = parser.parse_args()
