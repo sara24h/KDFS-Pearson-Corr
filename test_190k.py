@@ -8,6 +8,8 @@ import numpy as np
 from sklearn.metrics import precision_score, recall_score, confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
+import pandas as pd  # <--- کتابخانه pandas برای ذخیره CSV اضافه شد
+
 # فرض می‌کنیم این فایل‌ها در همان مسیر یا مسیر نصب پایتون شما قابل دسترسی هستند
 from data.dataset import Dataset_selector
 from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal
@@ -160,7 +162,7 @@ class Test:
         self.student.to(self.device)
         print(f"Model loaded on {self.device}")
 
-    def compute_metrics(self, loader, description="Test", print_metrics=True, save_confusion_matrix=True):
+    def compute_metrics(self, loader, description="Test", print_metrics=True, save_confusion_matrix=True, save_predictions_csv=False):
         meter_top1 = meter.AverageMeter("Acc@1", ":6.2f")
         all_preds = []
         all_targets = []
@@ -183,13 +185,18 @@ class Test:
                 batch_size = images.size(0)
                 for i in range(batch_size):
                     try:
+                        # A more robust way to get sample path if available
                         img_path = loader.dataset.samples[batch_idx * loader.batch_size + i][0]
                     except (AttributeError, IndexError):
                         img_path = f"Sample_{batch_idx * loader.batch_size + i}"
+                    
+                    is_correct = (preds[i] == targets[i]).item() # <--- محاسبه صحت پیش‌بینی
+                    
                     sample_info.append({
                         'id': img_path,
                         'true_label': targets[i].item(),
-                        'pred_label': preds[i].item()
+                        'pred_label': preds[i].item(),
+                        'is_correct': is_correct # <--- اضافه شدن ستون جدید
                     })
                
                 correct = (preds == targets).sum().item()
@@ -248,6 +255,17 @@ class Test:
             plt.savefig(plot_path)
             plt.close()
             print(f"Confusion matrix saved to: {plot_path}")
+
+        # <--- بخش جدید برای ذخیره پیش‌بینی‌ها در فایل CSV --->
+        if save_predictions_csv:
+            print(f"\n[{description}] Saving predictions to CSV for McNemar test...")
+            df = pd.DataFrame(sample_info)
+            sanitized_description = description.lower().replace(" ", "_").replace("/", "_")
+            csv_path = os.path.join(self.result_dir, f'predictions_{self.config.model_name}_{self.dataset_mode}_{sanitized_description}.csv')
+            os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+            df.to_csv(csv_path, index=False)
+            print(f"Predictions successfully saved to: {csv_path}")
+        # ---------------------------------------------------->
        
         return {
             'accuracy': accuracy,
@@ -278,7 +296,7 @@ class Test:
         for name, param in self.student.named_parameters():
             if 'fc' in name or 'layer4' in name:
                 param.requires_grad = True
-                print(f"Unfreezing for training: {name}")
+                # print(f"Unfreezing for training: {name}") # برای کاهش خروجی کامنت شد
             else:
                 param.requires_grad = False
         
@@ -332,29 +350,9 @@ class Test:
             self.student.load_state_dict(torch.load(best_model_path))
         else:
             print("Warning: No best model was saved. The model from the last epoch will be used for testing.")
-       
-        final_test_metrics = self.compute_metrics(self.test_loader, description="Final_Test", print_metrics=True, save_confusion_matrix=True)
-        print(f"\nFinal Test Metrics after Fine-tuning:")
-        print(f"Accuracy: {final_test_metrics['accuracy']:.2f}%")
-        print(f"Precision: {final_test_metrics['precision']:.4f}")
-        print(f"Recall: {final_test_metrics['recall']:.4f}")
-        print(f"Specificity: {final_test_metrics['specificity']:.4f}")
-        print(f"\nPer-Class Metrics:")
-        print(f"Class Real (0):")
-        print(f" Precision: {final_test_metrics['precision_per_class'][0]:.4f}")
-        print(f" Recall: {final_test_metrics['recall_per_class'][0]:.4f}")
-        print(f" Specificity: {final_test_metrics['specificity_per_class'][0]:.4f}")
-        print(f"Class Fake (1):")
-        print(f" Precision: {final_test_metrics['precision_per_class'][1]:.4f}")
-        print(f" Recall: {final_test_metrics['recall_per_class'][1]:.4f}")
-        print(f" Specificity: {final_test_metrics['specificity_per_class'][1]:.4f}")
-        print(f"\nConfusion Matrix:")
-        print(f"{'':>10} {'Predicted Real':>15} {'Predicted Fake':>15}")
-        print(f"{'Actual Real':>10} {final_test_metrics['confusion_matrix'][0,0]:>15} {final_test_metrics['confusion_matrix'][0,1]:>15}")
-        print(f"{'Actual Fake':>10} {final_test_metrics['confusion_matrix'][1,0]:>15} {final_test_metrics['confusion_matrix'][1,1]:>15}")
 
     def main(self):
-        print(f"Starting pipeline with dataset mode: {self.dataset_mode}")
+        print(f"Starting pipeline for model '{self.config.model_name}' with dataset mode: {self.dataset_mode}")
         self.dataload()
         self.build_model()
        
@@ -366,7 +364,9 @@ class Test:
         self.finetune()
        
         print("\n--- Testing AFTER fine-tuning with best model ---")
-        final_metrics = self.compute_metrics(self.test_loader, "Final_Test", print_metrics=False)
+        # <--- تغییر کلیدی: ذخیره پیش‌بینی‌های مدل نهایی برای تست مک‌نمر --->
+        final_metrics = self.compute_metrics(self.test_loader, "Final_Test", print_metrics=True, save_confusion_matrix=True, save_predictions_csv=True)
+        # ----------------------------------------------------------->
         self.display_samples(final_metrics['sample_info'], "Final Test", num_samples=30)
        
         if self.new_test_loader:
@@ -407,12 +407,9 @@ class Config:
 
         # --- پارامترهای خروجی ---
         self.result_dir = "./results" # پوشه‌ای برای ذخیره نتایج و مدل فاین‌تیون شده
+        self.model_name = "Model1" # <--- نام یکتا برای این مدل جهت استفاده در تست مک‌نمر
 
 if __name__ == "__main__":
-
     config = Config()
-    
-    # 2. نمونه از کلاس Test ایجاد کرده و متد main را فراخوانی کنید
-    # تمام مراحل تست و فاین‌تیونینگ به ترتیب اجرا خواهند شد
     test_pipeline = Test(config)
     test_pipeline.main()
