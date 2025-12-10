@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 from collections import OrderedDict
+
 from model.student.ResNet_sparse_video import ResNet_50_sparse_uadfv
 from data.video_data import create_uadfv_dataloaders
 
@@ -63,7 +64,17 @@ class Test:
         if not os.path.exists(self.sparsed_student_ckpt_path):
             raise FileNotFoundError(f"Checkpoint file not found: {self.sparsed_student_ckpt_path}")
         
+        print(f"\nبارگذاری checkpoint از: {self.sparsed_student_ckpt_path}")
         ckpt_student = torch.load(self.sparsed_student_ckpt_path, map_location="cpu", weights_only=True)
+        
+        # بررسی محتوای checkpoint
+        print("کلیدهای موجود در checkpoint:")
+        for key in ckpt_student.keys():
+            if isinstance(ckpt_student[key], dict):
+                print(f"  - {key}: {len(ckpt_student[key])} آیتم")
+            else:
+                print(f"  - {key}: {type(ckpt_student[key])}")
+        
         state_dict = ckpt_student.get("student", ckpt_student)
         
         if list(state_dict.keys())[0].startswith('module.'):
@@ -73,154 +84,210 @@ class Test:
                 new_state_dict[name] = v
             state_dict = new_state_dict
         
+        # بررسی وجود ماسک‌ها در state_dict
+        mask_count = sum(1 for k in state_dict.keys() if 'mask' in k)
+        print(f"\nتعداد ماسک‌ها در checkpoint: {mask_count}")
+        if mask_count == 0:
+            print("⚠️ هشدار: هیچ ماسکی در checkpoint یافت نشد!")
+            print("   مدل احتمالاً prune نشده است.")
+        
         self.student.load_state_dict(state_dict, strict=True)
         self.student.to(self.device)
         print(f"Model loaded on {self.device}")
 
+    def analyze_pruning_status(self):
+        """بررسی دقیق وضعیت pruning مدل"""
+        
+        print("\n" + "="*80)
+        print("تحلیل وضعیت Pruning")
+        print("="*80)
+        
+        has_masks = False
+        mask_layers = []
+        
+        for name, module in self.student.named_modules():
+            if hasattr(module, 'weight_mask'):
+                has_masks = True
+                mask = module.weight_mask
+                total = mask.numel()
+                active = torch.sum(mask).item()
+                sparsity = (1 - active/total) * 100
+                
+                mask_layers.append({
+                    'name': name,
+                    'total': total,
+                    'active': active,
+                    'sparsity': sparsity
+                })
+        
+        if not has_masks:
+            print("❌ مدل فاقد ماسک‌های pruning است!")
+            print("   احتمالات:")
+            print("   1. Checkpoint قبل از pruning بوده است")
+            print("   2. ماسک‌ها در checkpoint ذخیره نشده‌اند")
+            print("   3. تنظیم 'ticket=True' کافی نیست - نیاز به apply_mask() دارید")
+            return False
+        
+        print(f"✓ تعداد لایه‌های دارای ماسک: {len(mask_layers)}")
+        print("\nجزئیات pruning هر لایه:")
+        print("-"*80)
+        
+        total_weights = 0
+        total_active = 0
+        
+        for layer in mask_layers[:10]:  # فقط 10 لایه اول را نمایش می‌دهیم
+            print(f"{layer['name']:40s} | Sparsity: {layer['sparsity']:6.2f}% | "
+                  f"Active: {layer['active']:8d}/{layer['total']:8d}")
+            total_weights += layer['total']
+            total_active += layer['active']
+        
+        if len(mask_layers) > 10:
+            print(f"... و {len(mask_layers)-10} لایه دیگر")
+            for layer in mask_layers[10:]:
+                total_weights += layer['total']
+                total_active += layer['active']
+        
+        overall_sparsity = (1 - total_active/total_weights) * 100
+        print("-"*80)
+        print(f"میانگین کلی Sparsity: {overall_sparsity:.2f}%")
+        print("="*80)
+        
+        return True
+
     def calculate_model_metrics(self):
         """محاسبه دقیق پارامترها و FLOPs"""
         
-        # ✅ محاسبه صحیح پارامترها (شامل تمام لایه‌ها)
-        total_params = 0
+        # محاسبه پارامترها
+        total_params = sum(p.numel() for p in self.student.parameters())
+        
+        # محاسبه پارامترهای فعال
         effective_params = 0
-        pruned_params = 0
+        for name, module in self.student.named_modules():
+            if isinstance(module, (nn.Conv2d, nn.Linear)):
+                if hasattr(module, 'weight_mask'):
+                    effective_params += torch.sum(module.weight_mask).item()
+                else:
+                    effective_params += module.weight.numel()
+                
+                if module.bias is not None:
+                    if hasattr(module, 'bias_mask'):
+                        effective_params += torch.sum(module.bias_mask).item()
+                    else:
+                        effective_params += module.bias.numel()
+        
+        # اضافه کردن پارامترهای BatchNorm و غیره
+        for name, param in self.student.named_parameters():
+            module_name = '.'.join(name.split('.')[:-1])
+            try:
+                module = self.student.get_submodule(module_name) if module_name else self.student
+                if not isinstance(module, (nn.Conv2d, nn.Linear)):
+                    effective_params += param.numel()
+            except:
+                effective_params += param.numel()
+        
+        sparsity = (total_params - effective_params) / total_params * 100 if total_params > 0 else 0
         
         print("\n" + "="*80)
-        print("جزئیات محاسبه پارامترها:")
+        print("محاسبه پارامترها:")
         print("-"*80)
-        
-        for name, param in self.student.named_parameters():
-            param_count = param.numel()
-            total_params += param_count
-            
-            # پیدا کردن ماسک مرتبط
-            mask = None
-            if 'weight' in name:
-                mask_name = name.replace('weight', 'weight_mask')
-            elif 'bias' in name:
-                mask_name = name.replace('bias', 'bias_mask')
-            else:
-                mask_name = None
-            
-            if mask_name:
-                # جستجوی ماسک در مدل
-                parts = mask_name.split('.')
-                obj = self.student
-                found_mask = True
-                for part in parts:
-                    if hasattr(obj, part):
-                        obj = getattr(obj, part)
-                    else:
-                        found_mask = False
-                        break
-                
-                if found_mask and isinstance(obj, torch.Tensor):
-                    mask = obj
-                    effective_count = torch.sum(mask).item()
-                    effective_params += effective_count
-                    pruned_params += (param_count - effective_count)
-                else:
-                    # ماسک وجود ندارد - همه پارامترها فعال
-                    effective_params += param_count
-            else:
-                # پارامترهای بدون ماسک (مثل BatchNorm)
-                effective_params += param_count
-        
-        sparsity = (pruned_params / total_params) * 100 if total_params > 0 else 0
-        
         print(f"کل پارامترها:         {total_params/1e6:8.2f} M")
         print(f"پارامترهای فعال:       {effective_params/1e6:8.2f} M")
-        print(f"پارامترهای حذف شده:    {pruned_params/1e6:8.2f} M")
+        print(f"پارامترهای حذف شده:    {(total_params-effective_params)/1e6:8.2f} M")
         print(f"نرخ Sparsity:          {sparsity:8.2f} %")
         print("="*80)
         
-        # ✅ محاسبه FLOPs
+        # محاسبه FLOPs
         print("\nمحاسبه FLOPs...")
         
-        # روش 1: استفاده از متد داخلی مدل
+        # استفاده از متد داخلی
         try:
-            student_flops_method1 = self.student.get_video_flops_sampled(
+            # ⚠️ IMPORTANT: این متد احتمالاً FLOPs یک فریم sample شده را برمی‌گرداند
+            # نه کل 32 فریم!
+            student_flops_single = self.student.get_video_flops_sampled(
                 num_sampled_frames=self.num_frames
             ) / 1e9
-            print(f"FLOPs (متد داخلی):     {student_flops_method1:8.2f} GFLOPs")
+            
+            print(f"⚠️ توجه: متد get_video_flops_sampled احتمالاً فقط یک فریم sample شده")
+            print(f"   را حساب می‌کند نه کل {self.num_frames} فریم!")
+            print(f"   FLOPs گزارش شده: {student_flops_single:.2f} GFLOPs")
+            
+            # تخمین FLOPs واقعی برای تمام فریم‌ها
+            # فرض: اگر متد فقط 1 فریم را حساب کرده، باید در تعداد فریم‌ها ضرب شود
+            estimated_total_flops = student_flops_single * self.num_frames
+            print(f"   تخمین FLOPs کل ({self.num_frames} فریم): {estimated_total_flops:.2f} GFLOPs")
+            
+            # استفاده از عدد کمتر برای مقایسه منصفانه
+            student_flops = student_flops_single
+            
         except Exception as e:
-            print(f"خطا در محاسبه FLOPs با متد داخلی: {e}")
-            student_flops_method1 = None
-        
-        # روش 2: محاسبه دستی برای یک فریم
-        single_frame_flops = self._calculate_single_frame_flops()
-        student_flops_method2 = (single_frame_flops * self.num_frames) / 1e9
-        print(f"FLOPs (محاسبه دستی):   {student_flops_method2:8.2f} GFLOPs ({self.num_frames} فریم)")
-        
-        # انتخاب FLOPs نهایی
-        student_flops = student_flops_method1 if student_flops_method1 is not None else student_flops_method2
+            print(f"خطا در محاسبه FLOPs: {e}")
+            student_flops = 0.0
         
         return {
             'total_params': total_params / 1e6,
             'effective_params': effective_params / 1e6,
-            'pruned_params': pruned_params / 1e6,
+            'pruned_params': (total_params - effective_params) / 1e6,
             'sparsity': sparsity,
-            'student_flops': student_flops
+            'student_flops': student_flops,
+            'estimated_total_flops': estimated_total_flops if 'estimated_total_flops' in locals() else student_flops
         }
-    
-    def _calculate_single_frame_flops(self):
-        """محاسبه FLOPs برای یک فریم (تقریبی)"""
-        total_flops = 0
-        
-        for name, module in self.student.named_modules():
-            if isinstance(module, nn.Conv2d):
-                # FLOPs = 2 × Cin × Cout × K × K × H × W
-                # (فاکتور 2 برای ضرب و جمع)
-                
-                # بررسی وجود ماسک
-                if hasattr(module, 'weight_mask'):
-                    # تعداد کانال‌های ورودی/خروجی فعال
-                    active_weights = torch.sum(module.weight_mask).item()
-                    # تقریب: استفاده از نسبت ماسک
-                    mask_ratio = active_weights / module.weight.numel()
-                else:
-                    mask_ratio = 1.0
-                
-                # محاسبه FLOPs (فرض: ورودی 256x256)
-                # توجه: این یک تقریب است و باید با توجه به معماری دقیق‌تر شود
-                k = module.kernel_size[0] if isinstance(module.kernel_size, tuple) else module.kernel_size
-                flops = 2 * module.in_channels * module.out_channels * k * k
-                flops *= mask_ratio
-                total_flops += flops * (256 * 256)  # فرض: spatial size اولیه
-                
-            elif isinstance(module, nn.Linear):
-                if hasattr(module, 'weight_mask'):
-                    active_weights = torch.sum(module.weight_mask).item()
-                else:
-                    active_weights = module.weight.numel()
-                
-                total_flops += 2 * active_weights
-        
-        return total_flops
 
     def test(self):
         self.student.eval()
-        self.student.ticket = True  # فعال کردن حالت نهایی pruning
-
-        # ✅ محاسبه معیارها
+        
+        # 🔧 FIX 1: بررسی و فعال‌سازی صحیح pruning
+        print("\n" + "="*80)
+        print("فعال‌سازی حالت Pruning")
+        print("="*80)
+        
+        # روش 1: تنظیم ticket
+        self.student.ticket = True
+        print("✓ ticket = True")
+        
+        # روش 2: اگر متد apply_mask وجود دارد، آن را فراخوانی کنید
+        if hasattr(self.student, 'apply_mask'):
+            self.student.apply_mask()
+            print("✓ apply_mask() فراخوانی شد")
+        
+        # روش 3: بررسی وجود متد get_sparse_model
+        if hasattr(self.student, 'get_sparse_model'):
+            print("⚠️ توجه: متد get_sparse_model() وجود دارد - ممکن است نیاز باشد فراخوانی شود")
+        
+        # تحلیل وضعیت pruning
+        has_pruning = self.analyze_pruning_status()
+        
+        if not has_pruning:
+            print("\n" + "="*80)
+            print("⚠️ هشدار مهم: مدل prune نشده است!")
+            print("="*80)
+            print("راه‌حل‌های پیشنهادی:")
+            print("1. مطمئن شوید checkpoint صحیح است (بعد از pruning)")
+            print("2. بررسی کنید که آیا باید از checkpoint دیگری استفاده کنید")
+            print("3. ممکن است نیاز باشد script pruning را اجرا کنید")
+            print("="*80 + "\n")
+        
+        # محاسبه معیارها
         metrics = self.calculate_model_metrics()
         
-        # ✅ گزارش مقایسه‌ای
+        # گزارش مقایسه‌ای
         print("\n" + "="*80)
-        print("          مقایسه مدل دانشجو با مدل معلم (Teacher)")
+        print("          مقایسه با مدل معلم (Teacher)")
         print("="*80)
         print(f"مدل معلم (Teacher):")
-        print(f"  - FLOPs:      {self.teacher_video_flops:8.2f} GFLOPs ({self.num_frames} فریم)")
-        print(f"  - پارامترها: {self.teacher_params:8.2f} M")
+        print(f"  - FLOPs (32 فریم):     {self.teacher_video_flops:8.2f} GFLOPs")
+        print(f"  - پارامترها:            {self.teacher_params:8.2f} M")
         print("-"*80)
         print(f"مدل دانشجو (Student):")
-        print(f"  - FLOPs:      {metrics['student_flops']:8.2f} GFLOPs ({self.num_frames} فریم)")
-        print(f"  - پارامترها فعال: {metrics['effective_params']:8.2f} M")
-        print(f"  - Sparsity:   {metrics['sparsity']:8.2f} %")
+        print(f"  - FLOPs (گزارش شده):    {metrics['student_flops']:8.2f} GFLOPs")
+        if 'estimated_total_flops' in metrics:
+            print(f"  - FLOPs (تخمینی کل):    {metrics['estimated_total_flops']:8.2f} GFLOPs")
+        print(f"  - پارامترها فعال:       {metrics['effective_params']:8.2f} M")
+        print(f"  - Sparsity:             {metrics['sparsity']:8.2f} %")
         print("-"*80)
         
-        # محاسبه کاهش
-        flops_reduction = ((self.teacher_video_flops - metrics['student_flops']) / 
+        # محاسبه کاهش (با FLOPs تخمینی)
+        flops_for_comparison = metrics.get('estimated_total_flops', metrics['student_flops'])
+        flops_reduction = ((self.teacher_video_flops - flops_for_comparison) / 
                           self.teacher_video_flops * 100)
         params_reduction = ((self.teacher_params - metrics['effective_params']) / 
                            self.teacher_params * 100)
@@ -228,17 +295,6 @@ class Test:
         print(f"کاهش FLOPs:     {flops_reduction:7.2f} %")
         print(f"کاهش پارامترها: {params_reduction:7.2f} %")
         print("="*80)
-        
-        # ⚠️ هشدارهای احتمالی
-        if abs(metrics['sparsity'] - params_reduction) > 10:
-            print("\n⚠️ هشدار: تفاوت قابل توجه بین Sparsity و کاهش پارامترها!")
-            print("   این ممکن است نشان‌دهنده مشکل در محاسبه یا وجود پارامترهای")
-            print("   غیر-prunable (مثل BatchNorm) باشد.\n")
-        
-        if flops_reduction > 90:
-            print("\n⚠️ هشدار: کاهش FLOPs بیش از 90% غیرمعمول است!")
-            print("   لطفاً متد get_video_flops_sampled() را بررسی کنید.")
-            print("   ممکن است این متد frame sampling انجام دهد.\n")
         
         # تست دقت
         correct = 0
@@ -268,10 +324,14 @@ class Test:
         # خلاصه نهایی
         print("\n" + "="*80)
         print("خلاصه نتایج:")
-        print(f"  ✓ Accuracy: {final_acc:.2f}%")
-        print(f"  ✓ کاهش FLOPs: {flops_reduction:.2f}%")
-        print(f"  ✓ کاهش پارامترها: {params_reduction:.2f}%")
-        print(f"  ✓ Sparsity: {metrics['sparsity']:.2f}%")
+        print(f"  ✓ Accuracy:         {final_acc:.2f}%")
+        print(f"  ✓ کاهش FLOPs:       {flops_reduction:.2f}%")
+        print(f"  ✓ کاهش پارامترها:   {params_reduction:.2f}%")
+        print(f"  ✓ Sparsity واقعی:   {metrics['sparsity']:.2f}%")
+        
+        if metrics['sparsity'] < 1.0:
+            print("\n  ⚠️ توجه: Sparsity نزدیک به صفر است - مدل prune نشده!")
+        
         print("="*80)
 
     def main(self):
