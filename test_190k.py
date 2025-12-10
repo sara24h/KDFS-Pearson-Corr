@@ -243,6 +243,7 @@ class Config:
         self.sparsed_student_ckpt_path = "/kaggle/input/190k-pearson-seed2025-data/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt"  # تغییر بده
         self.result_dir = "kaggle/working/"
         self.model_name = "Model1" 
+        self.new_dataset_dir = None
         self.test_batch_size = 64
         self.num_workers = 4
         self.pin_memory = True
