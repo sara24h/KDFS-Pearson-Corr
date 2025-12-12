@@ -189,7 +189,7 @@ class Test:
             raise FileNotFoundError(f"Checkpoint file not found: {self.sparsed_student_ckpt_path}")
             
         print(f"Loading pre-trained weights from: {self.sparsed_student_ckpt_path}")
-        ckpt_student = torch.load(self.sparsed_student_ckpt_path, map_location="cpu")
+        ckpt_student = torch.load(self.sparsed_student_ckpt_path, map_location="cpu", weights_only=False)
         state_dict = ckpt_student.get("student", ckpt_student)
         
         self.student.load_state_dict(state_dict, strict=False)
