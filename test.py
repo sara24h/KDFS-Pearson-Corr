@@ -155,7 +155,7 @@ class Test:
             # Load checkpoint
             if not os.path.exists(self.sparsed_student_ckpt_path):
                 raise FileNotFoundError(f"Checkpoint file not found: {self.sparsed_student_ckpt_path}")
-            ckpt_student = torch.load(self.sparsed_student_ckpt_path, map_location="cpu", weights_only=True)
+            ckpt_student = torch.load(self.sparsed_student_ckpt_path, map_location="cpu", weights_only=False)
             state_dict = ckpt_student["student"] if "student" in ckpt_student else ckpt_student
             try:
                 self.student.load_state_dict(state_dict, strict=True)
