@@ -41,19 +41,7 @@ class Test:
             mode = self.dataset_mode
             ddir = self.dataset_dir
 
-            if mode == 'hardfake':
-                csv = os.path.join(ddir, 'data.csv')
-                if not os.path.exists(csv): raise FileNotFoundError(csv)
-                dataset = Dataset_selector(
-                    dataset_mode='hardfake',
-                    hardfake_csv_file=csv,
-                    hardfake_root_dir=ddir,
-                    eval_batch_size=self.test_batch_size,
-                    num_workers=self.num_workers,
-                    pin_memory=self.pin_memory,
-                    ddp=False
-                )
-            elif mode == 'rvf10k':
+            if mode == 'rvf10k':
                 train_csv = '/kaggle/input/rvf10k/train.csv'
                 valid_csv = '/kaggle/input/rvf10k/valid.csv'
                 if not (os.path.exists(train_csv) and os.path.exists(valid_csv)):
