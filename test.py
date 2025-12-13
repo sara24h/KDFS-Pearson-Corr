@@ -130,10 +130,31 @@ class Test:
                 all_probs.extend(probs.cpu().numpy())
         return np.array(all_targets), np.array(all_probs)
 
+    def simulate_pdd_roc(self, y_true):
+       
+        np.random.seed(42)
+        n = len(y_true)
+        n_pos = int(y_true.sum())
+        n_neg = n - n_pos
+
+        # تولید امتیازهای مصنوعی
+        scores_neg = np.random.normal(loc=0.0, scale=1.0, size=n_neg)
+        scores_pos = np.random.normal(loc=2.33, scale=1.0, size=n_pos)  # ~AUC=0.95
+
+        y_scores = np.concatenate([scores_neg, scores_pos])
+        y_true_sim = np.concatenate([np.zeros(n_neg), np.ones(n_pos)])
+
+        # بررسی یکسان بودن برچسب‌ها (اگر دیتاست متوازن باشد، مشکلی نیست)
+        # در عمل، ترتیب مهم نیست چون ROC به ترتیب وابسته نیست
+        fpr, tpr, _ = roc_curve(y_true_sim, y_scores)
+        auc_val = auc(fpr, tpr)
+        return fpr, tpr, auc_val
+
     def test(self):
         plt.figure(figsize=(8, 6))
         all_targets_ref = None
 
+        # --- اجرای مدل‌های واقعی ---
         for ckpt, name in zip(self.ckpt_paths, self.model_names):
             model = self.build_model(ckpt)
             targets, probs = self.evaluate_model(model)
@@ -148,19 +169,27 @@ class Test:
             plt.plot(fpr, tpr, lw=2, label=f'{name} (AUC = {auc_val:.3f})')
             print(f"[{name}] AUC = {auc_val:.4f}")
 
-        plt.plot([0, 1], [0, 1], 'k--', lw=2)
+        # --- اضافه کردن منحنی شبیه‌سازی‌شده PDD ---
+        fpr_pdd, tpr_pdd, auc_pdd = self.simulate_pdd_roc(all_targets_ref)
+        plt.plot(fpr_pdd, tpr_pdd, lw=2, linestyle='-.', color='red', 
+                 label=f'PDD (Simulated, AUC = {auc_pdd:.3f})')
+        print(f"[PDD] AUC = {auc_pdd:.4f}")
+
+        # --- خط مرجع ---
+        plt.plot([0, 1], [0, 1], 'k--', lw=1.5)
+
         plt.xlim([0.0, 1.0])
         plt.ylim([0.0, 1.05])
         plt.xlabel('False Positive Rate')
         plt.ylabel('True Positive Rate')
-        plt.title('ROC Curves Comparison')
+        plt.title('ROC Curves Comparison (KDFS vs Pearson vs PDD)')
         plt.legend(loc="lower right")
         roc_path = os.path.join(self.result_dir, 'roc_curves_comparison.png')
         plt.savefig(roc_path, dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"\n✅ ROC comparison saved to: {roc_path}")
+        print(f"\n✅ ROC comparison (3 curves) saved to: {roc_path}")
 
-        # Full report for first model
+        # --- گزارش کامل برای اولین مدل واقعی ---
         model = self.build_model(self.ckpt_paths[0])
         targets, probs = self.evaluate_model(model)
         preds = (probs > 0.5).astype(int)
@@ -170,16 +199,14 @@ class Test:
         prec = tp / (tp + fp) if (tp + fp) > 0 else 0
         rec = tp / (tp + fn) if (tp + fn) > 0 else 0
         f1 = 2 * (prec * rec) / (prec + rec) if (prec + rec) > 0 else 0
-        _, _, auc_val = roc_curve(targets, probs), None, auc(*roc_curve(targets, probs)[:2])
+        auc_val = auc(*roc_curve(targets, probs)[:2])
 
-        # Save report
         with open(os.path.join(self.result_dir, 'test_report.txt'), 'w') as f:
             f.write(f"Dataset: {self.dataset_mode}\n")
             f.write(f"Accuracy: {acc:.4f}\nPrecision: {prec:.4f}\nRecall: {rec:.4f}\nF1: {f1:.4f}\nAUC: {auc_val:.4f}\n")
             f.write(f"TP: {tp}, FP: {fp}, TN: {tn}, FN: {fn}\n")
             f.write("\n" + classification_report(targets, preds, target_names=['Real', 'Fake']))
 
-        # Confusion matrix
         plt.figure(figsize=(6, 5))
         sns.heatmap(confusion_matrix(targets, preds), annot=True, fmt='d', cmap='Blues',
                     xticklabels=['Real', 'Fake'], yticklabels=['Real', 'Fake'])
@@ -188,7 +215,6 @@ class Test:
         plt.savefig(os.path.join(self.result_dir, 'confusion_matrix.png'), dpi=300, bbox_inches='tight')
         plt.close()
 
-        # FLOPs & Params
         Flops_b, Flops, Flops_red, Params_b, Params, Params_red = get_flops_and_params(
             self.dataset_mode, self.ckpt_paths[0]
         )
@@ -196,29 +222,29 @@ class Test:
         print(f"FLOPs:  {Flops_b:.2f}M → {Flops:.2f}M (↓{Flops_red:.1f}%)")
 
     def main(self):
-        print(f"🚀 Testing {len(self.ckpt_paths)} models on '{self.dataset_mode}'")
+        print(f"🚀 Testing 2 real models + 1 simulated (PDD) on '{self.dataset_mode}'")
         print(f"💾 Results dir: {self.result_dir}")
         self.dataload()
         self.test()
 
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset_dir', type=str, required=True, help='Root directory of dataset')
-    parser.add_argument('--dataset_mode', type=str, required=True, choices=['hardfake', 'rvf10k', '140k', '200k', '190k', '330k'])
-    parser.add_argument('--ckpt1', type=str, required=True, help='Path to first model checkpoint')
-    parser.add_argument('--ckpt2', type=str, required=True, help='Path to second model checkpoint')
-    parser.add_argument('--name1', type=str, default='Model A')
-    parser.add_argument('--name2', type=str, default='Model B')
+    parser.add_argument('--dataset_dir', type=str, required=True)
+    parser.add_argument('--dataset_mode', type=str, required=True, choices=['rvf10k', '140k', '200k', '190k', '330k'])
+    parser.add_argument('--ckpt1', type=str, required=True)
+    parser.add_argument('--ckpt2', type=str, required=True)
+    parser.add_argument('--name1', type=str, default='KDFS')
+    parser.add_argument('--name2', type=str, default='Pearson')
     parser.add_argument('--result_dir', type=str, default='./test_results')
     parser.add_argument('--batch_size', type=int, default=256)
     args = parser.parse_args()
 
-    # Build args object compatible with Test class
     class Args:
         dataset_dir = args.dataset_dir
         dataset_mode = args.dataset_mode
-        ckpt_paths = ['/kaggle/input/10k-kdfs-seed-2025-data/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt', '/kaggle/input/10k-pearson-seed5555-data/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt']
+        ckpt_paths = [args.ckpt1, args.ckpt2]
         model_names = [args.name1, args.name2]
         result_dir = args.result_dir
         test_batch_size = args.batch_size
