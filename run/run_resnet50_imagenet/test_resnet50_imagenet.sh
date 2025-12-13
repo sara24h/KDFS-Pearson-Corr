@@ -4,7 +4,7 @@
 arch="ResNet_50"
 dataset_dir="/kaggle/input/rvf10k"
 dataset_mode="rvf10k"      # ✅ تغییر داده شد!
-result_dir="./test_results_comparison"
+result_dir="/kaggle/working/"
 batch_size=256
 num_workers=4
 device_id=0
