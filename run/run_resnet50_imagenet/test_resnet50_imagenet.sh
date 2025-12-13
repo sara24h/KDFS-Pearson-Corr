@@ -3,17 +3,17 @@
 # ========== تنظیمات پیش‌فرض ==========
 arch="ResNet_50"
 dataset_dir="/kaggle/input/rvf10k"
-dataset_mode="rvf10k"      # ✅ تغییر داده شد!
+dataset_mode="rvf10k"
 result_dir="/kaggle/working/"
-batch_size=256
 num_workers=4
 device_id=0
+batch_size=256  # ✅ تعریف شد
 
 # ========== بررسی ورودی‌ها ==========
 if [ "$#" -ne 2 ]; then
     echo "Usage: $0 <checkpoint_path_1> <checkpoint_path_2>"
     echo "Example:"
-    echo "  $0 /kaggle/input/10k-kdfs-seed-2025-data/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt /kaggle/input/10k-pearson-seed5555-data/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt"
+    echo "  $0 /kaggle/input/10k-kdfs-seed-2025-data/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt  /kaggle/input/10k-pearson-seed5555-data/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt
     exit 1
 fi
 
@@ -31,9 +31,8 @@ if [ ! -f "$ckpt2" ]; then
     exit 1
 fi
 
-# برای rvf10k، بررسی CSVهای لازم (نه data.csv)
 if [ ! -f "/kaggle/input/rvf10k/train.csv" ] || [ ! -f "/kaggle/input/rvf10k/valid.csv" ]; then
-    echo "❌ Error: RVF10k CSV files not found in /kaggle/input/rvf10k/"
+    echo "❌ Error: RVF10k CSV files not found!"
     exit 1
 fi
 
@@ -50,6 +49,8 @@ CUDA_VISIBLE_DEVICES=$device_id python test.py \
   --name1 "KDFS" \
   --name2 "Pearson" \
   --result_dir "$result_dir" \
-  --batch_size $batch_size
+  --test_batch_size $batch_size \          # ✅ تغییر به test_batch_size
+  --num_workers $num_workers \
+  --pin_memory
 
 echo "✅ Done! Results saved in: $result_dir"
