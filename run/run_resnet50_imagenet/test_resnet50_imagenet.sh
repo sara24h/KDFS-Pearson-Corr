@@ -42,7 +42,7 @@ echo "   Model 1: $ckpt1"
 echo "   Model 2: $ckpt2"
 echo "   Output: $result_dir"
 
-CUDA_VISIBLE_DEVICES=$device_id python test_comparison.py \
+CUDA_VISIBLE_DEVICES=$device_id python test.py \
   --dataset_dir "$dataset_dir" \
   --dataset_mode "$dataset_mode" \
   --ckpt1 "$ckpt1" \
