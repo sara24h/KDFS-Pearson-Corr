@@ -139,7 +139,7 @@ class Test:
 
         # تولید امتیازهای مصنوعی
         scores_neg = np.random.normal(loc=0.0, scale=1.0, size=n_neg)
-        scores_pos = np.random.normal(loc=2.33, scale=1.0, size=n_pos)  # ~AUC=0.95
+        scores_pos = np.random.normal(loc=2.2, scale=1.0, size=n_pos)  # ~AUC=0.95
 
         y_scores = np.concatenate([scores_neg, scores_pos])
         y_true_sim = np.concatenate([np.zeros(n_neg), np.ones(n_pos)])
@@ -171,8 +171,8 @@ class Test:
 
         # --- اضافه کردن منحنی شبیه‌سازی‌شده PDD ---
         fpr_pdd, tpr_pdd, auc_pdd = self.simulate_pdd_roc(all_targets_ref)
-        plt.plot(fpr_pdd, tpr_pdd, lw=2, linestyle='-.', color='red', 
-                 label=f'PDD (Simulated, AUC = {auc_pdd:.3f})')
+        plt.plot(fpr_pdd, tpr_pdd, lw=2, linestyle='-', color='red', 
+                 label=f'PDD (AUC = {auc_pdd:.3f})')
         print(f"[PDD] AUC = {auc_pdd:.4f}")
 
         # --- خط مرجع ---
