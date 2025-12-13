@@ -7,13 +7,13 @@ dataset_mode="rvf10k"
 result_dir="/kaggle/working/"
 num_workers=4
 device_id=0
-batch_size=256  # ✅ تعریف شد
+batch_size=256
 
 # ========== بررسی ورودی‌ها ==========
 if [ "$#" -ne 2 ]; then
     echo "Usage: $0 <checkpoint_path_1> <checkpoint_path_2>"
     echo "Example:"
-    echo "  $0 /kaggle/input/10k-kdfs-seed-2025-data/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt  /kaggle/input/10k-pearson-seed5555-data/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt
+    echo "  $0 /kaggle/input/10k-kdfs-seed-2025-data/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt /kaggle/input/10k-pearson-seed5555-data/results/run_resnet50_imagenet_prune1/student_model/finetune_ResNet_50_sparse_best.pt"
     exit 1
 fi
 
@@ -49,7 +49,7 @@ CUDA_VISIBLE_DEVICES=$device_id python test.py \
   --name1 "KDFS" \
   --name2 "Pearson" \
   --result_dir "$result_dir" \
-  --test_batch_size $batch_size \          # ✅ تغییر به test_batch_size
+  --test_batch_size $batch_size \
   --num_workers $num_workers \
   --pin_memory
 
