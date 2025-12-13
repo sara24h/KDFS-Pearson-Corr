@@ -3,11 +3,11 @@
 # ========== تنظیمات پیش‌فرض ==========
 arch="ResNet_50"
 dataset_dir="/kaggle/input/rvf10k"
-dataset_mode="hardfake"
+dataset_mode="rvf10k"      # ✅ تغییر داده شد!
 result_dir="./test_results_comparison"
 batch_size=256
 num_workers=4
-device_id=0  # GPU ID (مثلاً 0)
+device_id=0
 
 # ========== بررسی ورودی‌ها ==========
 if [ "$#" -ne 2 ]; then
@@ -31,16 +31,15 @@ if [ ! -f "$ckpt2" ]; then
     exit 1
 fi
 
-if [ ! -d "$dataset_dir" ]; then
-    echo "❌ Error: Dataset directory not found: $dataset_dir"
+# برای rvf10k، بررسی CSVهای لازم (نه data.csv)
+if [ ! -f "/kaggle/input/rvf10k/train.csv" ] || [ ! -f "/kaggle/input/rvf10k/valid.csv" ]; then
+    echo "❌ Error: RVF10k CSV files not found in /kaggle/input/rvf10k/"
     exit 1
 fi
 
-# ========== اجرای تست با دو مدل ==========
-echo "🚀 Testing two models and plotting ROC comparison..."
+echo "🚀 Testing two models on RVF10k dataset..."
 echo "   Model 1: $ckpt1"
 echo "   Model 2: $ckpt2"
-echo "   Dataset: $dataset_dir ($dataset_mode)"
 echo "   Output: $result_dir"
 
 CUDA_VISIBLE_DEVICES=$device_id python test_comparison.py \
@@ -48,8 +47,8 @@ CUDA_VISIBLE_DEVICES=$device_id python test_comparison.py \
   --dataset_mode "$dataset_mode" \
   --ckpt1 "$ckpt1" \
   --ckpt2 "$ckpt2" \
-  --name1 "Model A" \
-  --name2 "Model B" \
+  --name1 "KDFS" \
+  --name2 "Pearson" \
   --result_dir "$result_dir" \
   --batch_size $batch_size
 
