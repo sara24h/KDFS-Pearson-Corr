@@ -154,7 +154,18 @@ class Test:
                     all_probs.extend(probs.cpu().numpy())
                     _tqdm.update(1)
                     time.sleep(0.01)
-        return np.array(all_targets), np.array(all_probs)
+        
+        # Convert to numpy arrays
+        all_targets_np = np.array(all_targets)
+        all_probs_np = np.array(all_probs)
+        
+        # Invert labels and probabilities to treat "Fake" (original 0) as the positive class (1)
+        # Original convention from dataset: Real=1, Fake=0
+        # New convention for evaluation: Real=0, Fake=1
+        inverted_targets = 1 - all_targets_np
+        inverted_probs = 1 - all_probs_np
+        
+        return inverted_targets, inverted_probs
 
     def simulate_pdd_probs(self, n_samples, seed=42):
         """شبیه‌سازی احتمال‌های PDD با AUC ≈ 0.95"""
@@ -165,8 +176,6 @@ class Test:
         # Fake (1): high scores (loc=2.33 → AUC≈0.95)
         scores_pos = np.random.normal(loc=2.33, scale=1.0, size=n_half)
         probs = np.concatenate([scores_neg, scores_pos])
-        # تبدیل به احتمال در بازه [0,1] (اختیاری، ولی برای ثبات بهتر است)
-        # اما ROC به تبدیل نیاز ندارد، پس همین امتیازات کافی‌اند
         targets = np.concatenate([np.zeros(n_half), np.ones(n_half)])
         return targets, probs
 
@@ -174,36 +183,35 @@ class Test:
         # --- ارزیابی مدل KDFS ---
         print(f"\n==> Evaluating {self.name1}...")
         model1 = self.build_model(self.ckpt1)
-        targets1, probs1 = self.evaluate_model(model1)
+        targets1, probs1 = self.evaluate_model(model1) # Now returns inverted targets/probs
 
         # --- ارزیابی مدل Pearson ---
         print(f"\n==> Evaluating {self.name2}...")
         model2 = self.build_model(self.ckpt2)
-        targets2, probs2 = self.evaluate_model(model2)
+        targets2, probs2 = self.evaluate_model(model2) # Now returns inverted targets/probs
 
         # --- شبیه‌سازی PDD ---
         n_samples = len(targets1)
-        targets_pdd, probs_pdd = self.simulate_pdd_probs(n_samples)
+        targets_pdd, probs_pdd = self.simulate_pdd_probs(n_samples) # Already uses Fake=1
 
         # --- بررسی یکسان بودن برچسب‌ها (برای مقایسه عادلانه) ---
         assert np.array_equal(targets1, targets2), "Targets differ between models!"
-        # PDD فرض می‌کند دیتاست متوازن است (مانند کد اصلی شما)
 
         # --- رسم ROC سه‌گانه ---
         plt.figure(figsize=(8, 6))
 
         # KDFS
-        fpr1, tpr1, _ = roc_curve(targets1, probs1)
+        fpr1, tpr1, _ = roc_curve(targets1, probs1) # Now for Fake class
         auc1 = auc(fpr1, tpr1)
         plt.plot(fpr1, tpr1, lw=2, label=f'{self.name1} (AUC = {auc1:.3f})')
 
         # Pearson
-        fpr2, tpr2, _ = roc_curve(targets2, probs2)
+        fpr2, tpr2, _ = roc_curve(targets2, probs2) # Now for Fake class
         auc2 = auc(fpr2, tpr2)
         plt.plot(fpr2, tpr2, lw=2, label=f'{self.name2} (AUC = {auc2:.3f})')
 
         # PDD
-        fpr_pdd, tpr_pdd, _ = roc_curve(targets_pdd, probs_pdd)
+        fpr_pdd, tpr_pdd, _ = roc_curve(targets_pdd, probs_pdd) # Already for Fake class
         auc_pdd = auc(fpr_pdd, tpr_pdd)
         plt.plot(fpr_pdd, tpr_pdd, lw=2, linestyle='-', color='green', label=f'PDD (AUC = {auc_pdd:.3f})')
 
@@ -212,7 +220,7 @@ class Test:
         plt.ylim([0.0, 1.05])
         plt.xlabel('False Positive Rate')
         plt.ylabel('True Positive Rate')
-        plt.title('ROC Curves Comparison')
+        plt.title('ROC Curves Comparison (for Fake Class)') # More specific title
         plt.legend(loc="lower right")
         roc_path = os.path.join(self.result_dir, 'roc_curves_comparison.png')
         plt.savefig(roc_path)
@@ -220,9 +228,9 @@ class Test:
         print(f"\n✅ ROC curves saved to: {roc_path}")
 
         # --- گزارش کامل برای مدل اول (KDFS) — دقیقاً مانند کد اصلی شما ---
-        all_targets_np = targets1
-        all_probs_np = probs1
-        all_preds_np = (all_probs_np > 0.5).astype(int)
+        all_targets_np = targets1 # Inverted targets (Fake=1)
+        all_probs_np = probs1   # Inverted probs (P(Fake))
+        all_preds_np = (all_probs_np > 0.5).astype(int) # Predicts 1 for Fake
 
         tn, fp, fn, tp = confusion_matrix(all_targets_np, all_preds_np).ravel()
         accuracy = (tp + tn) / (tp + tn + fp + fn)
@@ -234,6 +242,7 @@ class Test:
         # چاپ در کنسول
         print("\n" + "="*50)
         print("           FINAL TEST RESULTS (KDFS)")
+        print("      (Metrics calculated for 'Fake' class)")
         print("="*50)
         print(f"Dataset: {self.dataset_mode}")
         print(f"Accuracy: {accuracy:.4f}")
@@ -242,10 +251,10 @@ class Test:
         print(f"F1-Score: {f1_score:.4f}")
         print(f"AUC: {roc_auc:.4f}")
         print("-"*50)
-        print(f"True Positives (TP): {tp}")
-        print(f"False Positives (FP): {fp}")
-        print(f"True Negatives (TN): {tn}")
-        print(f"False Negatives (FN): {fn}")
+        print(f"True Positives (TP - Correctly identified as Fake): {tp}")
+        print(f"False Positives (FP - Incorrectly identified as Fake): {fp}")
+        print(f"True Negatives (TN - Correctly identified as Real): {tn}")
+        print(f"False Negatives (FN - Incorrectly identified as Real): {fn}")
         print("="*50 + "\n")
 
         # ذخیره گزارش
@@ -253,6 +262,7 @@ class Test:
         with open(report_path, 'w') as f:
             f.write("="*50 + "\n")
             f.write("           FINAL TEST RESULTS\n")
+            f.write("      (Metrics calculated for 'Fake' class)\n")
             f.write("="*50 + "\n")
             f.write(f"Dataset: {self.dataset_mode}\n")
             f.write(f"Accuracy: {accuracy:.4f}\n")
@@ -261,10 +271,10 @@ class Test:
             f.write(f"F1-Score: {f1_score:.4f}\n")
             f.write(f"AUC: {roc_auc:.4f}\n")
             f.write("-"*50 + "\n")
-            f.write(f"True Positives (TP): {tp}\n")
-            f.write(f"False Positives (FP): {fp}\n")
-            f.write(f"True Negatives (TN): {tn}\n")
-            f.write(f"False Negatives (FN): {fn}\n")
+            f.write(f"True Positives (TP - Correctly identified as Fake): {tp}\n")
+            f.write(f"False Positives (FP - Incorrectly identified as Fake): {fp}\n")
+            f.write(f"True Negatives (TN - Correctly identified as Real): {tn}\n")
+            f.write(f"False Negatives (FN - Incorrectly identified as Real): {fn}\n")
             f.write("="*50 + "\n")
             f.write("\nClassification Report:\n")
             f.write(classification_report(all_targets_np, all_preds_np, target_names=['Real', 'Fake']))
@@ -278,7 +288,7 @@ class Test:
         plt.ylim([0.0, 1.05])
         plt.xlabel('False Positive Rate')
         plt.ylabel('True Positive Rate')
-        plt.title('ROC Curve (KDFS)')
+        plt.title('ROC Curve for Fake Class (KDFS)') # More specific title
         plt.legend(loc="lower right")
         plt.savefig(os.path.join(self.result_dir, 'roc_curve.png'))
         plt.close()
@@ -287,8 +297,8 @@ class Test:
         # Confusion Matrix
         cm = confusion_matrix(all_targets_np, all_preds_np)
         plt.figure(figsize=(8, 6))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                    xticklabels=['Predicted Real', 'Predicted Fake'], 
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                    xticklabels=['Predicted Real', 'Predicted Fake'],
                     yticklabels=['Actual Real', 'Actual Fake'])
         plt.title('Confusion Matrix (KDFS)')
         plt.ylabel('Actual Label')
