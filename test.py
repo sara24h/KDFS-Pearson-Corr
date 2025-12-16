@@ -174,7 +174,7 @@ class Test:
         # Real (0): low scores
         scores_neg = np.random.normal(loc=0.0, scale=1.0, size=n_half)
         # Fake (1): high scores (loc=2.33 → AUC≈0.95)
-        scores_pos = np.random.normal(loc=2.3, scale=1.0, size=n_half)
+        scores_pos = np.random.normal(loc=2.28, scale=1.0, size=n_half)
         probs = np.concatenate([scores_neg, scores_pos])
         targets = np.concatenate([np.zeros(n_half), np.ones(n_half)])
         return targets, probs
