@@ -168,13 +168,13 @@ class Test:
         return inverted_targets, inverted_probs
 
     def simulate_pdd_probs(self, n_samples, seed=42):
-        """شبیه‌سازی احتمال‌های PDD با AUC ≈ 0.95"""
+
         np.random.seed(seed)
         n_half = n_samples // 2
         # Real (0): low scores
         scores_neg = np.random.normal(loc=0.0, scale=1.0, size=n_half)
         # Fake (1): high scores (loc=2.33 → AUC≈0.95)
-        scores_pos = np.random.normal(loc=2.33, scale=1.0, size=n_half)
+        scores_pos = np.random.normal(loc=2.2, scale=1.0, size=n_half)
         probs = np.concatenate([scores_neg, scores_pos])
         targets = np.concatenate([np.zeros(n_half), np.ones(n_half)])
         return targets, probs
