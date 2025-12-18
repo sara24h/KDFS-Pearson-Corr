@@ -139,7 +139,7 @@ class Dataset_selector(Dataset):
 
         elif dataset_mode == '200k':
             if not realfake200k_train_csv or not realfake200k_val_csv or not realfake200k_test_csv or not realfake200k_root_dir:
-            raise ValueError("realfake200k_train_csv, realfake200k_val_csv, realfake200k_test_csv, and realfake200k_root_dir must be provided")
+                raise ValueError("realfake200k_train_csv, realfake200k_val_csv, realfake200k_test_csv, and realfake200k_root_dir must be provided")
     
         train_data = pd.read_csv(realfake200k_train_csv)
         val_data = pd.read_csv(realfake200k_val_csv)
