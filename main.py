@@ -97,19 +97,19 @@ def parse_args():
     parser.add_argument(
         "--realfake200k_train_csv",
         type=str,
-        default="/kaggle/input/200k-real-vs-ai-visuals-by-mbilal/train_labels.csv",
+        default="/kaggle/input/undersampled-200k/balanced_unique_200k_dataset/train_labels.csv",
         help="The path to the 200k train CSV file (for 200k mode)",
     )
     parser.add_argument(
         "--realfake200k_valid_csv",
         type=str,
-        default="/kaggle/input/200k-real-vs-ai-visuals-by-mbilal/val_labels.csv",
+        default="/kaggle/input/undersampled-200k/balanced_unique_200k_dataset/val_labels.csv",
         help="The path to the 200k valid CSV file (for 200k mode)",
     )
     parser.add_argument(
         "--realfake200k_test_csv",
         type=str,
-        default="/kaggle/input/200k-real-vs-ai-visuals-by-mbilal/test_labels.csv",
+        default="/kaggle/input/undersampled-200k/balanced_unique_200k_dataset/test_labels.csv",
         help="The path to the 200k test CSV file (for 200k mode)",
     )
     parser.add_argument(
