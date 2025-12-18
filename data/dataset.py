@@ -27,10 +27,10 @@ class FaceDataset(Dataset):
             image = self.transform(image)
         return image, torch.tensor(label, dtype=torch.float)
 
-class Dataset_selector(Dataset):
+class Dataset_selector:
     def __init__(
         self,
-        dataset_mode,  # 'hardfake', 'rvf10k', '140k', '190k', '200k', '330k'
+        dataset_mode,
         rvf10k_train_csv=None,
         rvf10k_valid_csv=None,
         rvf10k_root_dir=None,
@@ -52,13 +52,10 @@ class Dataset_selector(Dataset):
     ):
         if dataset_mode not in ['hardfake', 'rvf10k', '140k', '190k', '200k', '330k']:
             raise ValueError("dataset_mode must be 'hardfake', 'rvf10k', '140k', '190k', '200k', or '330k'")
-
         self.dataset_mode = dataset_mode
 
-        # Define image size based on dataset_mode
         image_size = (256, 256) if dataset_mode in ['rvf10k', '140k', '190k', '200k', '330k'] else (300, 300)
 
-     
         if dataset_mode == 'rvf10k':
             mean = (0.5212, 0.4260, 0.3811)
             std = (0.2486, 0.2238, 0.2211)
@@ -71,11 +68,10 @@ class Dataset_selector(Dataset):
         elif dataset_mode == '190k':
             mean = (0.4668, 0.3816, 0.3414)
             std = (0.2410, 0.2161, 0.2081)
-        else:  
+        else:
             mean = (0.4923, 0.4042, 0.3624)
-            std = (0.2446, 0.2198, 0.2141)   
+            std = (0.2446, 0.2198, 0.2141)
 
-        # Define transforms
         transform_train = transforms.Compose([
             transforms.Resize(image_size),
             transforms.RandomHorizontalFlip(p=0.5),
@@ -86,23 +82,21 @@ class Dataset_selector(Dataset):
             transforms.ToTensor(),
             transforms.Normalize(mean=mean, std=std),
         ])
-
         transform_test = transforms.Compose([
             transforms.Resize(image_size),
             transforms.ToTensor(),
             transforms.Normalize(mean=mean, std=std),
         ])
 
-        # Set img_column based on dataset_mode
         img_column = 'path' if dataset_mode in ['140k'] else 'images_id'
 
-        # Load data based on dataset_mode
-        
+        root_dir = None
+        train_data = val_data = test_data = None
+
         if dataset_mode == 'rvf10k':
             if not rvf10k_train_csv or not rvf10k_valid_csv or not rvf10k_root_dir:
                 raise ValueError("rvf10k_train_csv, rvf10k_valid_csv, and rvf10k_root_dir must be provided")
             train_data = pd.read_csv(rvf10k_train_csv)
-
             def create_image_path(row, split='train'):
                 folder = 'fake' if row['label'] == 0 else 'real'
                 img_name = row['id']
@@ -110,11 +104,9 @@ class Dataset_selector(Dataset):
                 if not img_name.endswith('.jpg'):
                     img_name += '.jpg'
                 return os.path.join('rvf10k', split, folder, img_name)
-
             train_data['images_id'] = train_data.apply(lambda row: create_image_path(row, 'train'), axis=1)
             valid_data = pd.read_csv(rvf10k_valid_csv)
             valid_data['images_id'] = valid_data.apply(lambda row: create_image_path(row, 'valid'), axis=1)
-
             val_data, test_data = train_test_split(
                 valid_data, test_size=0.5, stratify=valid_data['label'], random_state=3407
             )
@@ -129,10 +121,8 @@ class Dataset_selector(Dataset):
             val_data = pd.read_csv(realfake140k_valid_csv)
             test_data = pd.read_csv(realfake140k_test_csv)
             root_dir = os.path.join(realfake140k_root_dir, 'real_vs_fake', 'real-vs-fake')
-
             if 'path' not in train_data.columns:
                 raise ValueError("CSV files for 140k dataset must contain a 'path' column")
-
             train_data = train_data.sample(frac=1, random_state=3407).reset_index(drop=True)
             val_data = val_data.sample(frac=1, random_state=3407).reset_index(drop=True)
             test_data = test_data.sample(frac=1, random_state=3407).reset_index(drop=True)
@@ -140,29 +130,26 @@ class Dataset_selector(Dataset):
         elif dataset_mode == '200k':
             if not realfake200k_train_csv or not realfake200k_val_csv or not realfake200k_test_csv or not realfake200k_root_dir:
                 raise ValueError("realfake200k_train_csv, realfake200k_val_csv, realfake200k_test_csv, and realfake200k_root_dir must be provided")
-    
-        train_data = pd.read_csv(realfake200k_train_csv)
-        val_data = pd.read_csv(realfake200k_val_csv)
-        test_data = pd.read_csv(realfake200k_test_csv)
-    
-        root_dir = realfake200k_root_dir  # /kaggle/input/undersampled-200k/balanced_unique_200k_dataset
-    
-        def create_image_path(row, split):
-        # split می‌تونه 'train', 'val' یا 'test' باشه
-            folder = 'real' if row['label'] in [1, 'real', 'Real'] else 'fake'
-            img_name = row.get('filename_clean', row.get('filename', row.get('image', row.get('path', ''))))
-            img_name = os.path.basename(img_name)  # فقط نام فایل
-            return os.path.join(split, folder, img_name)
-    
-        train_data['images_id'] = train_data.apply(lambda row: create_image_path(row, 'train'), axis=1)
-        val_data['images_id'] = val_data.apply(lambda row: create_image_path(row, 'val'), axis=1)
-        test_data['images_id'] = test_data.apply(lambda row: create_image_path(row, 'test'), axis=1)
+
+            train_data = pd.read_csv(realfake200k_train_csv)
+            val_data = pd.read_csv(realfake200k_val_csv)
+            test_data = pd.read_csv(realfake200k_test_csv)
+
+            root_dir = realfake200k_root_dir  # /kaggle/input/undersampled-200k/balanced_unique_200k_dataset
+
+            def create_image_path(row, split):
+                folder = 'real' if row['label'] in [1, 'real', 'Real'] else 'fake'
+                img_name = os.path.basename(row.get('filename_clean', row.get('filename', row.get('image', row.get('path', '')))))
+                return os.path.join(split, folder, img_name)
+
+            train_data['images_id'] = train_data.apply(lambda row: create_image_path(row, 'train'), axis=1)
+            val_data['images_id'] = val_data.apply(lambda row: create_image_path(row, 'val'), axis=1)
+            test_data['images_id'] = test_data.apply(lambda row: create_image_path(row, 'test'), axis=1)
 
         elif dataset_mode == '190k':
             if not realfake190k_root_dir:
                 raise ValueError("realfake190k_root_dir must be provided")
             root_dir = realfake190k_root_dir
-
             def collect_images_from_folder(split):
                 data = []
                 for label in ['Real', 'Fake']:
@@ -174,11 +161,9 @@ class Dataset_selector(Dataset):
                             img_path = os.path.join(split, label, img_name)
                             data.append({'images_id': img_path, 'label': label})
                 return pd.DataFrame(data)
-
             train_data = collect_images_from_folder('Train')
             val_data = collect_images_from_folder('Validation')
             test_data = collect_images_from_folder('Test')
-
             train_data = train_data.sample(frac=1, random_state=None).reset_index(drop=True)
             val_data = val_data.sample(frac=1, random_state=None).reset_index(drop=True)
             test_data = test_data.sample(frac=1, random_state=None).reset_index(drop=True)
@@ -187,7 +172,6 @@ class Dataset_selector(Dataset):
             if not realfake330k_root_dir:
                 raise ValueError("realfake330k_root_dir must be provided")
             root_dir = realfake330k_root_dir
-
             def collect_images_from_folder(split):
                 data = []
                 for label in ['Real', 'Fake']:
@@ -199,106 +183,54 @@ class Dataset_selector(Dataset):
                             img_path = os.path.join(split, label, img_name)
                             data.append({'images_id': img_path, 'label': label})
                 return pd.DataFrame(data)
-
             train_data = collect_images_from_folder('train')
             val_data = collect_images_from_folder('valid')
             test_data = collect_images_from_folder('test')
-
             train_data = train_data.sample(frac=1, random_state=3407).reset_index(drop=True)
             val_data = val_data.sample(frac=1, random_state=3407).reset_index(drop=True)
             test_data = test_data.sample(frac=1, random_state=3407).reset_index(drop=True)
 
-        # Debug: Print data statistics
+        # Debug statistics
         print(f"{dataset_mode} dataset statistics:")
-        print(f"Sample train image paths:\n{train_data[img_column].head()}")
-        print(f"Total train dataset size: {len(train_data)}")
+        print(f"Total train: {len(train_data)} | val: {len(val_data)} | test: {len(test_data)}")
         print(f"Train label distribution:\n{train_data['label'].value_counts()}")
-        print(f"Sample validation image paths:\n{val_data[img_column].head()}")
-        print(f"Total validation dataset size: {len(val_data)}")
-        print(f"Validation label distribution:\n{val_data['label'].value_counts()}")
-        print(f"Sample test image paths:\n{test_data[img_column].head()}")
-        print(f"Total test dataset size: {len(test_data)}")
+        print(f"Val label distribution:\n{val_data['label'].value_counts()}")
         print(f"Test label distribution:\n{test_data['label'].value_counts()}")
 
-        # Check for missing images
-        for split, data in [('train', train_data), ('validation', val_data), ('test', test_data)]:
-            missing_images = []
-            for img_path in data[img_column]:
-                full_path = os.path.join(root_dir, img_path)
-                if not os.path.exists(full_path):
-                    missing_images.append(full_path)
-            if missing_images:
-                print(f"Missing {split} images: {len(missing_images)}")
-                print(f"Sample missing {split} images:", missing_images[:5])
+        # Check missing images
+        for split_name, data in [('train', train_data), ('val', val_data), ('test', test_data)]:
+            missing = [os.path.join(root_dir, p) for p in data['images_id'] if not os.path.exists(os.path.join(root_dir, p))]
+            print(f"{split_name} missing images: {len(missing)}")
+            if missing:
+                print(f"Sample missing: {missing[:3]}")
 
         # Create datasets
         train_dataset = FaceDataset(train_data, root_dir, transform=transform_train, img_column=img_column)
         val_dataset = FaceDataset(val_data, root_dir, transform=transform_test, img_column=img_column)
         test_dataset = FaceDataset(test_data, root_dir, transform=transform_test, img_column=img_column)
 
-        # Create data loaders with DDP support for all loaders
+        # DataLoaders
         if ddp:
             train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, shuffle=True)
             val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, shuffle=False)
             test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset, shuffle=False)
-            
-            self.loader_train = DataLoader(
-                train_dataset, 
-                batch_size=train_batch_size, 
-                num_workers=num_workers,
-                pin_memory=pin_memory, 
-                sampler=train_sampler,
-            )
-            self.loader_val = DataLoader(
-                val_dataset, 
-                batch_size=eval_batch_size, 
-                num_workers=num_workers,
-                pin_memory=pin_memory, 
-                sampler=val_sampler,
-            )
-            self.loader_test = DataLoader(
-                test_dataset, 
-                batch_size=eval_batch_size, 
-                num_workers=num_workers,
-                pin_memory=pin_memory, 
-                sampler=test_sampler,
-            )
+
+            self.loader_train = DataLoader(train_dataset, batch_size=train_batch_size, sampler=train_sampler, num_workers=num_workers, pin_memory=pin_memory)
+            self.loader_val = DataLoader(val_dataset, batch_size=eval_batch_size, sampler=val_sampler, num_workers=num_workers, pin_memory=pin_memory)
+            self.loader_test = DataLoader(test_dataset, batch_size=eval_batch_size, sampler=test_sampler, num_workers=num_workers, pin_memory=pin_memory)
         else:
-            self.loader_train = DataLoader(
-                train_dataset, 
-                batch_size=train_batch_size, 
-                shuffle=True,
-                num_workers=num_workers, 
-                pin_memory=pin_memory,
-            )
-            self.loader_val = DataLoader(
-                val_dataset, 
-                batch_size=eval_batch_size, 
-                shuffle=False, 
-                num_workers=num_workers, 
-                pin_memory=pin_memory,
-            )
-            self.loader_test = DataLoader(
-                test_dataset, 
-                batch_size=eval_batch_size, 
-                shuffle=False, 
-                num_workers=num_workers, 
-                pin_memory=pin_memory,
-            )
+            self.loader_train = DataLoader(train_dataset, batch_size=train_batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory)
+            self.loader_val = DataLoader(val_dataset, batch_size=eval_batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
+            self.loader_test = DataLoader(test_dataset, batch_size=eval_batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
 
-        # Debug: Print loader sizes
-        print(f"Train loader batches: {len(self.loader_train)}")
-        print(f"Validation loader batches: {len(self.loader_val)}")
-        print(f"Test loader batches: {len(self.loader_test)}")
+        print(f"DataLoaders ready - Train batches: {len(self.loader_train)}, Val: {len(self.loader_val)}, Test: {len(self.loader_test)}")
 
-        # Test a sample batch
-        for loader, name in [(self.loader_train, 'train'), (self.loader_val, 'validation'), (self.loader_test, 'test')]:
-            try:
-                sample = next(iter(loader))
-                print(f"Sample {name} batch image shape: {sample[0].shape}")
-                print(f"Sample {name} batch labels: {sample[1]}")
-            except Exception as e:
-                print(f"Error loading sample {name} batch: {e}")
+        # Test sample batch
+        try:
+            sample_train = next(iter(self.loader_train))
+            print(f"Sample train batch shape: {sample_train[0].shape}, labels: {sample_train[1][:5]}")
+        except Exception as e:
+            print(f"Error in train loader: {e}")
 
 if __name__ == "__main__":
   
