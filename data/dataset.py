@@ -139,20 +139,24 @@ class Dataset_selector(Dataset):
 
         elif dataset_mode == '200k':
             if not realfake200k_train_csv or not realfake200k_val_csv or not realfake200k_test_csv or not realfake200k_root_dir:
-                raise ValueError("realfake200k_train_csv, realfake200k_val_csv, realfake200k_test_csv, and realfake200k_root_dir must be provided")
-            train_data = pd.read_csv(realfake200k_train_csv)
-            val_data = pd.read_csv(realfake200k_val_csv)
-            test_data = pd.read_csv(realfake200k_test_csv)
-            root_dir = realfake200k_root_dir
-
-            def create_image_path(row):
-                folder = 'real' if row['label'] == 1 else 'ai_images'
-                img_name = row.get('filename', row.get('image', row.get('path', '')))
-                return os.path.join(folder, img_name)
-
-            train_data['images_id'] = train_data.apply(create_image_path, axis=1)
-            val_data['images_id'] = val_data.apply(create_image_path, axis=1)
-            test_data['images_id'] = test_data.apply(create_image_path, axis=1)
+            raise ValueError("realfake200k_train_csv, realfake200k_val_csv, realfake200k_test_csv, and realfake200k_root_dir must be provided")
+    
+        train_data = pd.read_csv(realfake200k_train_csv)
+        val_data = pd.read_csv(realfake200k_val_csv)
+        test_data = pd.read_csv(realfake200k_test_csv)
+    
+        root_dir = realfake200k_root_dir  # /kaggle/input/undersampled-200k/balanced_unique_200k_dataset
+    
+        def create_image_path(row, split):
+        # split می‌تونه 'train', 'val' یا 'test' باشه
+            folder = 'real' if row['label'] in [1, 'real', 'Real'] else 'fake'
+            img_name = row.get('filename_clean', row.get('filename', row.get('image', row.get('path', ''))))
+            img_name = os.path.basename(img_name)  # فقط نام فایل
+            return os.path.join(split, folder, img_name)
+    
+        train_data['images_id'] = train_data.apply(lambda row: create_image_path(row, 'train'), axis=1)
+        val_data['images_id'] = val_data.apply(lambda row: create_image_path(row, 'val'), axis=1)
+        test_data['images_id'] = test_data.apply(lambda row: create_image_path(row, 'test'), axis=1)
 
         elif dataset_mode == '190k':
             if not realfake190k_root_dir:
