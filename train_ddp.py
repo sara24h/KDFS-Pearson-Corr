@@ -164,9 +164,9 @@ class TrainDDP:
                 if not os.path.exists(realfake140k_test_csv):
                     raise FileNotFoundError(f"Test CSV file not found: {realfake140k_test_csv}")
         elif self.dataset_mode == '200k':
-            realfake200k_train_csv = "/kaggle/input/200k-real-vs-ai-visuals-by-mbilal/train_labels.csv"
-            realfake200k_val_csv = "/kaggle/input/200k-real-vs-ai-visuals-by-mbilal/val_labels.csv"
-            realfake200k_test_csv = "/kaggle/input/200k-real-vs-ai-visuals-by-mbilal/test_labels.csv"
+            realfake200k_train_csv = "/kaggle/input/undersampled-200k/balanced_unique_200k_dataset/train_labels.csv"
+            realfake200k_val_csv = "/kaggle/input/undersampled-200k/balanced_unique_200k_dataset/val_labels.csv"
+            realfake200k_test_csv = "/kaggle/input/undersampled-200k/balanced_unique_200k_dataset/test_labels.csv"
             realfake200k_root_dir = self.dataset_dir
             if self.rank == 0:
                 if not os.path.exists(realfake200k_train_csv):
