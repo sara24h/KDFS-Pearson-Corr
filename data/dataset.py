@@ -334,10 +334,10 @@ if __name__ == "__main__":
     # Example for 200k Real and Fake Faces
     dataset_200k = Dataset_selector(
         dataset_mode='200k',
-        realfake200k_train_csv='/kaggle/input/200k-real-and-fake-faces/train_labels.csv',
-        realfake200k_val_csv='/kaggle/input/200k-real-and-fake-faces/val_labels.csv',
-        realfake200k_test_csv='/kaggle/input/200k-real-and-fake-faces/test_labels.csv',
-        realfake200k_root_dir='/kaggle/input/200k-real-and-fake-faces',
+        realfake200k_train_csv='/kaggle/input/undersampled-200k/balanced_unique_200k_dataset/train_labels.csv',
+        realfake200k_val_csv='/kaggle/input/undersampled-200k/balanced_unique_200k_dataset/val_labels.csv',
+        realfake200k_test_csv='/kaggle/input/undersampled-200k/balanced_unique_200k_dataset/test_labels.csv',
+        realfake200k_root_dir='/kaggle/input/undersampled-200k/balanced_unique_200k_dataset',
         train_batch_size=64,
         eval_batch_size=64,
         ddp=True,
