@@ -104,7 +104,7 @@ class Test:
                 realfake200k_train_csv=os.path.join(self.dataset_dir, 'train_labels.csv'),
                 realfake200k_val_csv=os.path.join(self.dataset_dir, 'val_labels.csv'),
                 realfake200k_test_csv=os.path.join(self.dataset_dir, 'test_labels.csv'),
-                realfake200k_root_dir=os.path.join(self.dataset_dir, 'my_real_vs_ai_dataset/my_real_vs_ai_dataset'), 
+                realfake200k_root_dir=os.path.join(self.dataset_dir, 'balanced_unique_200k_dataset'), 
                 train_batch_size=self.test_batch_size,
                 eval_batch_size=self.test_batch_size,
                 num_workers=self.num_workers,
