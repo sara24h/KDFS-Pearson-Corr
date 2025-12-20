@@ -1011,14 +1011,18 @@ def main():
  
     dist.barrier()
  
+        # --- شروع کد جدید ---
+    print("\n" + "="*70)
+    print("EVALUATING FUZZY HESITANT ENSEMBLE")
+    print("="*70)
+    
+    # مهم: این خط را خارج از شرط if قرار دهید تا همه GPU ها آن را اجرا کنند
+    ensemble_test_acc, ensemble_weights, membership_values = evaluate_ensemble_final_ddp(
+        ensemble, test_loader, device, "Test", MODEL_NAMES, rank
+    )
+    
+    # حالا فقط GPU اصلی نتایج نهایی را چاپ و ذخیره می‌کند
     if is_main:
-        print("\n" + "="*70)
-        print("EVALUATING FUZZY HESITANT ENSEMBLE")
-        print("="*70)
-        ensemble_test_acc, ensemble_weights, membership_values = evaluate_ensemble_final_ddp(
-            ensemble, test_loader, device, "Test", MODEL_NAMES, rank
-        )
-       
         print("\n" + "="*70)
         print("FINAL COMPARISON")
         print("="*70)
