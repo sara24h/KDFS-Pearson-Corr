@@ -1017,7 +1017,8 @@ def main():
     print("="*70)
     
     # مهم: این خط را خارج از شرط if قرار دهید تا همه GPU ها آن را اجرا کنند
-    ensemble_test_acc, ensemble_weights, membership_values = evaluate_ensemble_final_ddp(
+    # کد اصلاح شده (صحیح)
+    ensemble_test_acc, ensemble_weights, membership_values, activation_percentages = evaluate_ensemble_final_ddp(
         ensemble, test_loader, device, "Test", MODEL_NAMES, rank
     )
     
