@@ -233,21 +233,21 @@ class TrainDDP:
         else:
             raise ValueError(f"Unsupported architecture: {self.arch}")
 
-        # --- FIX 1: Robustly load teacher weights ---
-        # This code removes the 'module.' prefix added by DDP
-        ckpt_teacher = torch.load(self.teacher_ckpt_path, map_location="cpu")
+      
+        checkpoint = torch.load(teacher_ckpt_path, map_location='cuda')
         # Handle different checkpoint saving conventions
-        state_dict = ckpt_teacher.get('config_state_dict', ckpt_teacher.get('student', ckpt_teacher))
+        state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
 
-        if list(state_dict.keys())[0].startswith('module.'):
-            from collections import OrderedDict
-            new_state_dict = OrderedDict()
-            for k, v in state_dict.items():
-                name = k.replace('module.', '', 1)  # remove `module.`
-                new_state_dict[name] = v
-            state_dict = new_state_dict
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k == 'fc.weight':
+                new_state_dict['fc.1.weight'] = v
+            elif k == 'fc.bias':  # remove `module.`
+                new_state_dict['fc.1.bias'] = v
+            else:
+                new_state_dict[k] = v
         
-        teacher_model.load_state_dict(state_dict, strict=True)
+        teacher_model.load_state_dict(new_state_dict, strict=False)
         self.teacher = teacher_model.cuda()
 
         if self.rank == 0:
