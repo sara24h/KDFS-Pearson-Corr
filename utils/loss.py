@@ -47,6 +47,8 @@ def compute_filter_correlation(filters, mask_weight, gumbel_temperature=1.0):
     
     filters_flat = filters.view(num_filters, -1)
 
+    W = filters_flat.shape[1]
+
     variance = torch.var(filters_flat, dim=1)
     zero_variance_indices = torch.where(variance == 0)[0]
     if len(zero_variance_indices) > 0:
