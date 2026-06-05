@@ -234,7 +234,7 @@ class TrainDDP:
             raise ValueError(f"Unsupported architecture: {self.arch}")
 
       
-        checkpoint = torch.load(teacher_ckpt_path, map_location='cuda')
+        checkpoint = torch.load(self.teacher_ckpt_path, map_location='cuda')
         # Handle different checkpoint saving conventions
         state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
 
