@@ -58,7 +58,7 @@ def compute_filter_correlation(filters, mask_weight, gumbel_temperature=1.0):
     std = torch.std(filters_flat, dim=1, keepdim=True)
     #epsilon = 1e-4 
     filters_normalized = centered / (std)
-
+    
     #norm = torch.norm(filters_normalized, dim=1, keepdim=True)
     #filters_normalized = filters_normalized / (norm + epsilon)
     
@@ -67,7 +67,7 @@ def compute_filter_correlation(filters, mask_weight, gumbel_temperature=1.0):
     if torch.isinf(filters_normalized).any():
         warnings.warn("Normalized filters contain Inf values.")
     
-    corr_matrix = torch.matmul(filters_normalized, filters_normalized.t())
+    corr_matrix = torch.matmul(filters_normalized, filters_normalized.t()) / (W - 1)
     
     if torch.isnan(corr_matrix).any():
         warnings.warn("Correlation matrix contains NaN values.")
