@@ -1,3 +1,33 @@
+import torch
+from torch.utils.data import Dataset, DataLoader
+import torchvision.transforms as transforms
+import os
+import pandas as pd
+from PIL import Image
+from sklearn.model_selection import train_test_split
+
+class FaceDataset(Dataset):
+    def __init__(self, data_frame, root_dir, transform=None, img_column='images_id'):
+        self.data = data_frame
+        self.root_dir = root_dir
+        self.transform = transform
+        self.img_column = img_column
+        self.label_map = {1: 1, 0: 0, 'real': 1, 'fake': 0, 'Real': 1, 'Fake': 0}
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        img_name = os.path.join(self.root_dir, self.data[self.img_column].iloc[idx])
+        if not os.path.exists(img_name):
+            raise FileNotFoundError(f"image not found: {img_name}")
+        image = Image.open(img_name).convert('RGB')
+        label = self.label_map[self.data['label'].iloc[idx]]
+        if self.transform:
+            image = self.transform(image)
+        return image, torch.tensor(label, dtype=torch.float)
+
+
 class Dataset_selector:
     def __init__(
         self,
