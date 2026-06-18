@@ -247,10 +247,10 @@ if __name__ == "__main__":
     # Example for 140k Real and Fake Faces
     dataset_140k = Dataset_selector(
         dataset_mode='140k',
-        realfake140k_train_csv='/kaggle/input/140k-real-and-fake-faces/train.csv',
-        realfake140k_valid_csv='/kaggle/input/140k-real-and-fake-faces/valid.csv',
-        realfake140k_test_csv='/kaggle/input/140k-real-and-fake-faces/test.csv',
-        realfake140k_root_dir='/kaggle/input/140k-real-and-fake-faces',
+        realfake140k_train_csv='/kaggle/input/datasets/xhlulu/140k-real-and-fake-faces/train.csv',
+        realfake140k_valid_csv='/kaggle/input/datasets/xhlulu/140k-real-and-fake-faces/valid.csv',
+        realfake140k_test_csv='/kaggle/input/datasets/xhlulu/140k-real-and-fake-faces/test.csv',
+        realfake140k_root_dir='/kaggle/input/datasets/xhlulu/140k-real-and-fake-faces',
         train_batch_size=64,
         eval_batch_size=64,
         ddp=True,
