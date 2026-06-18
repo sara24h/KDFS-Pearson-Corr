@@ -79,19 +79,19 @@ def parse_args():
     parser.add_argument(
         "--realfake140k_train_csv",
         type=str,
-        default="/kaggle/input/140k-real-and-fake-faces/train.csv",
+        default="/kaggle/input/datasets/xhlulu/140k-real-and-fake-faces/train.csv",
         help="The path to the 140k train CSV file (for 140k mode)",
     )
     parser.add_argument(
         "--realfake140k_valid_csv",
         type=str,
-        default="/kaggle/input/140k-real-and-fake-faces/valid.csv",
+        default="/kaggle/input/datasets/xhlulu/140k-real-and-fake-faces/valid.csv",
         help="The path to the 140k valid CSV file (for 140k mode)",
     )
     parser.add_argument(
         "--realfake140k_test_csv",
         type=str,
-        default="/kaggle/input/140k-real-and-fake-faces/test.csv",
+        default="/kaggle/input/datasets/xhlulu/140k-real-and-fake-faces/test.csv",
         help="The path to the 140k test CSV file (for 140k mode)",
     )
     parser.add_argument(
