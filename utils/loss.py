@@ -58,8 +58,8 @@ def compute_filter_correlation(filters, mask_weight, gumbel_temperature=1.0):
     mean = torch.mean(filters_flat, dim=1, keepdim=True)
     centered = filters_flat - mean
     std = torch.std(filters_flat, dim=1, keepdim=True)
-    #epsilon = 1e-4 
-    filters_normalized = centered / (std)
+    epsilon = 1e-7 
+    filters_normalized = centered / (std + epsilon)
     
     #norm = torch.norm(filters_normalized, dim=1, keepdim=True)
     #filters_normalized = filters_normalized / (norm + epsilon)
