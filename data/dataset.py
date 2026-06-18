@@ -1,32 +1,3 @@
-import torch
-from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as transforms
-import os
-import pandas as pd
-from PIL import Image
-from sklearn.model_selection import train_test_split
-
-class FaceDataset(Dataset):
-    def __init__(self, data_frame, root_dir, transform=None, img_column='images_id'):
-        self.data = data_frame
-        self.root_dir = root_dir
-        self.transform = transform
-        self.img_column = img_column
-        self.label_map = {1: 1, 0: 0, 'real': 1, 'fake': 0, 'Real': 1, 'Fake': 0}
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        img_name = os.path.join(self.root_dir, self.data[self.img_column].iloc[idx])
-        if not os.path.exists(img_name):
-            raise FileNotFoundError(f"image not found: {img_name}")
-        image = Image.open(img_name).convert('RGB')
-        label = self.label_map[self.data['label'].iloc[idx]]
-        if self.transform:
-            image = self.transform(image)
-        return image, torch.tensor(label, dtype=torch.float)
-
 class Dataset_selector:
     def __init__(
         self,
@@ -86,6 +57,7 @@ class Dataset_selector:
             transforms.Normalize(mean=mean, std=std),
         ])
 
+        # تعیین نام ستون آدرس تصاویر به صورت داینامیک
         img_column = 'path' if dataset_mode in ['140k'] else 'images_id'
 
         root_dir = None
@@ -133,7 +105,7 @@ class Dataset_selector:
             val_data = pd.read_csv(realfake200k_val_csv)
             test_data = pd.read_csv(realfake200k_test_csv)
 
-            root_dir = realfake200k_root_dir  # /kaggle/input/undersampled-200k/balanced_unique_200k_dataset
+            root_dir = realfake200k_root_dir
 
             def create_image_path(row, split):
                 folder = 'real' if row['label'] in [1, 'real', 'Real'] else 'fake'
@@ -195,9 +167,9 @@ class Dataset_selector:
         print(f"Val label distribution:\n{val_data['label'].value_counts()}")
         print(f"Test label distribution:\n{test_data['label'].value_counts()}")
 
-        # Check missing images
-        for split_name, data in [('train', train_data), ('val', val_data), ('test', test_data)]:
-            missing = [os.path.join(root_dir, p) for p in data['images_id'] if not os.path.exists(os.path.join(root_dir, p))]
+        # اصلاح خطای کرش: استفاده از img_column به جای هاردکد کردن 'images_id'
+        for split_name, split_df in [('train', train_data), ('val', val_data), ('test', test_data)]:
+            missing = [os.path.join(root_dir, p) for p in split_df[img_column] if not os.path.exists(os.path.join(root_dir, p))]
             print(f"{split_name} missing images: {len(missing)}")
             if missing:
                 print(f"Sample missing: {missing[:3]}")
@@ -229,59 +201,3 @@ class Dataset_selector:
             print(f"Sample train batch shape: {sample_train[0].shape}, labels: {sample_train[1][:5]}")
         except Exception as e:
             print(f"Error in train loader: {e}")
-
-if __name__ == "__main__":
-  
-
-    # Example for rvf10k
-    dataset_rvf10k = Dataset_selector(
-        dataset_mode='rvf10k',
-        rvf10k_train_csv='/kaggle/input/rvf10k/train.csv',
-        rvf10k_valid_csv='/kaggle/input/rvf10k/valid.csv',
-        rvf10k_root_dir='/kaggle/input/rvf10k',
-        train_batch_size=64,
-        eval_batch_size=64,
-        ddp=True,
-    )
-
-    # Example for 140k Real and Fake Faces
-    dataset_140k = Dataset_selector(
-        dataset_mode='140k',
-        realfake140k_train_csv='/kaggle/input/datasets/xhlulu/140k-real-and-fake-faces/train.csv',
-        realfake140k_valid_csv='/kaggle/input/datasets/xhlulu/140k-real-and-fake-faces/valid.csv',
-        realfake140k_test_csv='/kaggle/input/datasets/xhlulu/140k-real-and-fake-faces/test.csv',
-        realfake140k_root_dir='/kaggle/input/datasets/xhlulu/140k-real-and-fake-faces',
-        train_batch_size=64,
-        eval_batch_size=64,
-        ddp=True,
-    )
-
-    # Example for 190k Real and Fake Faces
-    dataset_190k = Dataset_selector(
-        dataset_mode='190k',
-        realfake190k_root_dir='/kaggle/input/deepfake-and-real-images/Dataset',
-        train_batch_size=64,
-        eval_batch_size=64,
-        ddp=True,
-    )
-
-    # Example for 200k Real and Fake Faces
-    dataset_200k = Dataset_selector(
-        dataset_mode='200k',
-        realfake200k_train_csv='/kaggle/input/undersampled-200k/balanced_unique_200k_dataset/train_labels.csv',
-        realfake200k_val_csv='/kaggle/input/undersampled-200k/balanced_unique_200k_dataset/val_labels.csv',
-        realfake200k_test_csv='/kaggle/input/undersampled-200k/balanced_unique_200k_dataset/test_labels.csv',
-        realfake200k_root_dir='/kaggle/input/undersampled-200k/balanced_unique_200k_dataset',
-        train_batch_size=64,
-        eval_batch_size=64,
-        ddp=True,
-    )
-
-    # Example for 330k Real and Fake Faces
-    dataset_330k = Dataset_selector(
-        dataset_mode='330k',
-        realfake330k_root_dir='/kaggle/input/deepfake-dataset',
-        train_batch_size=64,
-        eval_batch_size=64,
-        ddp=True,
-    )
